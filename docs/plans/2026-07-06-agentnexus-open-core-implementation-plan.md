@@ -207,8 +207,8 @@ go test ./internal/connectors/agent
 
 ### Goal 11: Implement External Receipt Relay
 
-- Resolve receipt targets from external sources, connector config, Policy DSL org rules, or user selection.
-- Implement delivery abstraction, receipt verification, and result propagation.
+- Completed receipt target resolution from external sources, connector config, Policy DSL org rules, or user selection.
+- Completed delivery abstraction, receipt verification, and result propagation.
 
 Verification:
 
