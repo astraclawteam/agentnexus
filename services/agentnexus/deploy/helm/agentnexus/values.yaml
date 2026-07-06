@@ -23,6 +23,10 @@ services:
     enabled: true
     replicas: 1
     command: /app/connector-worker
+  connectorAgent:
+    enabled: true
+    replicas: 1
+    command: /app/connector-agent
 
 dependencies:
   postgres:

@@ -1,0 +1,39 @@
+{{- if .Values.services.connectorAgent.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-connector-agent
+  labels:
+    app.kubernetes.io/name: agentnexus
+    app.kubernetes.io/component: connector-agent
+spec:
+  replicas: {{ .Values.services.connectorAgent.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentnexus
+      app.kubernetes.io/component: connector-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentnexus
+        app.kubernetes.io/component: connector-agent
+    spec:
+      containers:
+        - name: connector-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["{{ .Values.services.connectorAgent.command }}"]
+          env:
+            - name: AGENTNEXUS_ENV
+              value: "{{ .Values.runtime.env }}"
+            - name: AGENTNEXUS_PROFILE
+              value: "{{ .Values.runtime.profile }}"
+            - name: AGENTNEXUS_VERSION
+              value: "{{ .Values.runtime.version }}"
+            - name: AGENTNEXUS_POSTGRES_DSN
+              value: "{{ .Values.dependencies.postgres.dsn }}"
+            - name: AGENTNEXUS_NATS_URL
+              value: "{{ .Values.dependencies.nats.url }}"
+            - name: AGENTNEXUS_SECRET_PROVIDER
+              value: "{{ .Values.dependencies.secretProvider.mode }}"
+{{- end }}

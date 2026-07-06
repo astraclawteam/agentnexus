@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/agent"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/observability"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tasks"
 )
 
@@ -26,6 +27,13 @@ func NewGatewayAgentRouterWithAgentService(serviceName, version string, agentSer
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, health)
+	})
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte(observability.PrometheusText(observability.Snapshot{
+			Service: serviceName,
+			Ready:   true,
+		})))
 	})
 	mux.HandleFunc("POST /v1/agent/deployments/first-run:plan", func(w http.ResponseWriter, r *http.Request) {
 		var input FirstDeploymentPlanInput

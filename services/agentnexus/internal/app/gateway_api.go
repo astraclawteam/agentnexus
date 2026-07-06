@@ -8,6 +8,7 @@ import (
 	connectorinstance "github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/instance"
 	connectorruntime "github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/runtime"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/iam"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/observability"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/receipts"
 )
 
@@ -77,6 +78,13 @@ func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOptio
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, health)
+	})
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte(observability.PrometheusText(observability.Snapshot{
+			Service: serviceName,
+			Ready:   true,
+		})))
 	})
 	mux.HandleFunc("GET /api/console/overview", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, NewConsoleOverview(r.URL.Query().Get("locale")))

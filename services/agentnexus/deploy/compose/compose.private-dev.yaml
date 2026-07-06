@@ -48,6 +48,10 @@ services:
     <<: *agentnexus-service
     command: ["go", "run", "./cmd/connector-worker"]
 
+  connector-agent:
+    <<: *agentnexus-service
+    command: ["go", "run", "./cmd/connector-agent"]
+
   postgres:
     image: postgres:16-alpine
     environment:
