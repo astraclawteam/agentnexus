@@ -1,4 +1,4 @@
-﻿# AgentNexus Service
+# AgentNexus Service
 
 This module contains the open-core AgentNexus Go services.
 

@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package agentnexus.audit.v1;
+
+option go_package = "github.com/astraclawteam/agentnexus/services/agentnexus/api/proto/agentnexus/audit/v1;auditv1";
+
+message AuditEvent {
+  string id = 1;
+  string enterprise_id = 2;
+  string case_ticket_id = 3;
+  string step_grant_id = 4;
+  string actor_user_id = 5;
+  string connector_instance_id = 6;
+  string resource_type = 7;
+  string resource_id = 8;
+  string action = 9;
+  string decision = 10;
+  string input_hash = 11;
+  string output_hash = 12;
+  EvidencePointer evidence_pointer = 13;
+  string prev_hash = 14;
+  string event_hash = 15;
+}
+
+message AuditChain {
+  string id = 1;
+  string enterprise_id = 2;
+  string case_ticket_id = 3;
+  repeated AuditEvent events = 4;
+  string head_hash = 5;
+}
+
+message EvidencePointer {
+  string uri = 1;
+  string content_type = 2;
+  string sha256 = 3;
+}

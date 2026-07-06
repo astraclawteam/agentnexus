@@ -1,4 +1,4 @@
-﻿.PHONY: test build
+.PHONY: test build
 
 test:
 	go test ./...

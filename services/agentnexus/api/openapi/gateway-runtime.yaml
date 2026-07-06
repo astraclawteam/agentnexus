@@ -1,0 +1,224 @@
+openapi: 3.0.3
+info:
+  title: AgentNexus Gateway Runtime API
+  version: 0.1.0
+  description: Stable runtime entrypoints for Claw, AgentRag, and enterprise agents.
+paths:
+  /v1/runtime/locate:
+    post:
+      operationId: locateRuntimeResources
+      summary: Locate resources available to the actor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeLocateRequest'
+      responses:
+        '200':
+          description: Resource locations and evidence pointers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeLocateResponse'
+  /v1/runtime/read:
+    post:
+      operationId: readRuntimeResource
+      summary: Read a resource through ticketed policy enforcement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeReadRequest'
+      responses:
+        '200':
+          description: Normalized read result or waiting state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeReadResponse'
+  /v1/runtime/act:
+    post:
+      operationId: actOnRuntimeResource
+      summary: Execute an explicitly authorized action.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeActRequest'
+      responses:
+        '200':
+          description: Action result, denial, or external receipt state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeActResponse'
+  /v1/runtime/tickets/{id}:
+    get:
+      operationId: getRuntimeTicket
+      summary: Get Access Ticket status and trace context.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Ticket status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketResponse'
+components:
+  schemas:
+    RequestEnvelope:
+      type: object
+      required:
+        - enterprise_id
+        - actor_user_id
+        - request_id
+      properties:
+        enterprise_id:
+          type: string
+        actor_user_id:
+          type: string
+        request_id:
+          type: string
+        trace_id:
+          type: string
+    RuntimeLocateRequest:
+      allOf:
+        - $ref: '#/components/schemas/RequestEnvelope'
+        - type: object
+          required:
+            - intent
+          properties:
+            intent:
+              type: string
+            resource_types:
+              type: array
+              items:
+                type: string
+    RuntimeLocateResponse:
+      type: object
+      required:
+        - case_ticket_id
+        - resources
+      properties:
+        case_ticket_id:
+          type: string
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/LocatedResource'
+    RuntimeReadRequest:
+      allOf:
+        - $ref: '#/components/schemas/RequestEnvelope'
+        - type: object
+          required:
+            - case_ticket_id
+            - resource
+          properties:
+            case_ticket_id:
+              type: string
+            resource:
+              $ref: '#/components/schemas/ResourceRef'
+            fields:
+              type: array
+              items:
+                type: string
+    RuntimeReadResponse:
+      type: object
+      required:
+        - decision
+      properties:
+        decision:
+          $ref: '#/components/schemas/PolicyDecision'
+        step_grant_id:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+        waiting_external_receipt_id:
+          type: string
+    RuntimeActRequest:
+      allOf:
+        - $ref: '#/components/schemas/RequestEnvelope'
+        - type: object
+          required:
+            - case_ticket_id
+            - resource
+            - action
+          properties:
+            case_ticket_id:
+              type: string
+            resource:
+              $ref: '#/components/schemas/ResourceRef'
+            action:
+              type: string
+            input:
+              type: object
+              additionalProperties: true
+    RuntimeActResponse:
+      type: object
+      required:
+        - decision
+      properties:
+        decision:
+          $ref: '#/components/schemas/PolicyDecision'
+        step_grant_id:
+          type: string
+        result:
+          type: object
+          additionalProperties: true
+        waiting_external_receipt_id:
+          type: string
+    TicketResponse:
+      type: object
+      required:
+        - case_ticket_id
+        - status
+      properties:
+        case_ticket_id:
+          type: string
+        status:
+          type: string
+        trace_id:
+          type: string
+        org_version_id:
+          type: string
+    LocatedResource:
+      type: object
+      required:
+        - resource
+      properties:
+        resource:
+          $ref: '#/components/schemas/ResourceRef'
+        evidence_pointer:
+          type: string
+        summary:
+          type: string
+    ResourceRef:
+      type: object
+      required:
+        - type
+        - id
+      properties:
+        type:
+          type: string
+        id:
+          type: string
+        connector_instance_id:
+          type: string
+        resource_name:
+          type: string
+    PolicyDecision:
+      type: string
+      enum:
+        - allow
+        - deny
+        - need_external_receipt
+        - allow_with_masking
