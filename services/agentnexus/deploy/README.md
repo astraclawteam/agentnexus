@@ -23,6 +23,7 @@ This directory contains open-core development profiles only. Production private-
 | `AGENTNEXUS_OBJECT_STORAGE_ENDPOINT` | S3-compatible object storage endpoint. |
 | `AGENTNEXUS_SECRET_PROVIDER_EXTERNAL` | Set to `true` when secrets are resolved by an external provider. |
 | `AGENTNEXUS_SECRET_PROVIDER` | Secret provider mode, defaulting to `local-dev`. |
+| `AGENTNEXUS_GATEWAY_AGENT_PORT` | Host port for the dev-only Gateway Agent dry-run HTTP endpoint, defaulting to `8081`. |
 
 ## Compose
 

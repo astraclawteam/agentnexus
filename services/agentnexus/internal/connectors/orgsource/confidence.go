@@ -12,10 +12,10 @@ const (
 )
 
 type Conflict struct {
-	Code        ConflictCode
-	EmployeeID  string
-	RelatedID   string
-	Description string
+	Code        ConflictCode `json:"code"`
+	EmployeeID  string       `json:"employee_id"`
+	RelatedID   string       `json:"related_id,omitempty"`
+	Description string       `json:"description"`
 }
 
 type PreviewRow struct {

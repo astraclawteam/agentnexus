@@ -67,6 +67,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CheckpointResponse'
+  /v1/agent/deployments/first-run:plan:
+    post:
+      operationId: planFirstDeployment
+      summary: Build a first-deployment dry-run plan.
+      description: Returns a plan only. The endpoint does not execute Docker, Helm, shell commands, or production deployment actions.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FirstDeploymentPlanRequest'
+      responses:
+        '200':
+          description: Dry-run deployment plan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentPlan'
 components:
   schemas:
     RequestEnvelope:
@@ -159,6 +177,46 @@ components:
         checkpoint_id:
           type: string
         status:
+          type: string
+    FirstDeploymentPlanRequest:
+      type: object
+      properties:
+        profile:
+          type: string
+          default: private-dev
+        compose_file:
+          type: string
+          default: deploy/compose/compose.private-dev.yaml
+    DeploymentPlan:
+      type: object
+      required:
+        - profile
+        - mode
+        - steps
+        - requires_confirmation
+      properties:
+        profile:
+          type: string
+        mode:
+          type: string
+          enum:
+            - dry_run
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeploymentPlanStep'
+        requires_confirmation:
+          type: boolean
+    DeploymentPlanStep:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        command:
+          type: string
+        description:
           type: string
     ArtifactRef:
       type: object

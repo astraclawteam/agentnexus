@@ -1,0 +1,183 @@
+openapi: 3.0.3
+info:
+  title: AgentNexus Connector Plugin Verification API
+  version: 0.1.0
+  description: Open-core development endpoints for connector manifest validation and smoke verification.
+paths:
+  /api/connectors/packages/validate:
+    post:
+      operationId: validateConnectorPackage
+      summary: Validate a connector manifest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorManifest'
+          application/yaml:
+            schema:
+              $ref: '#/components/schemas/ConnectorManifest'
+      responses:
+        '200':
+          description: Manifest is valid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorPackageValidateResponse'
+        '400':
+          description: Manifest is invalid.
+  /api/connectors/instances/smoke:
+    post:
+      operationId: smokeConnectorInstance
+      summary: Run a read smoke check against an in-memory connector instance.
+      description: Uses credential_ref resolution and never returns resolved secret values.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorInstanceSmokeRequest'
+      responses:
+        '200':
+          description: Smoke read completed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorInstanceSmokeResponse'
+        '400':
+          description: Invalid manifest, resource, operation, or field.
+components:
+  schemas:
+    ConnectorPackageValidateResponse:
+      type: object
+      required:
+        - valid
+        - name
+        - resources
+      properties:
+        valid:
+          type: boolean
+        name:
+          type: string
+        resources:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+    ConnectorInstanceSmokeRequest:
+      type: object
+      required:
+        - connector_instance_id
+        - manifest
+        - resource
+        - operation
+      properties:
+        connector_instance_id:
+          type: string
+        manifest:
+          $ref: '#/components/schemas/ConnectorManifest'
+        resource:
+          type: string
+        operation:
+          type: string
+        fields:
+          type: array
+          items:
+            type: string
+        credential_ref:
+          type: string
+    ConnectorInstanceSmokeResponse:
+      type: object
+      required:
+        - ok
+        - adapter
+        - credential_resolved
+      properties:
+        ok:
+          type: boolean
+        adapter:
+          type: string
+        credential_resolved:
+          type: boolean
+        error:
+          type: string
+    ConnectorManifest:
+      type: object
+      required:
+        - schema_version
+        - name
+        - version
+        - resources
+      properties:
+        schema_version:
+          type: string
+        name:
+          type: string
+        version:
+          type: string
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectorResource'
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectorCredential'
+    ConnectorResource:
+      type: object
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum:
+            - http
+            - database
+            - file_storage
+        read_only:
+          type: boolean
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectorField'
+        operations:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectorOperation'
+    ConnectorField:
+      type: object
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        mask:
+          type: boolean
+    ConnectorOperation:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        method:
+          type: string
+        path:
+          type: string
+    ConnectorCredential:
+      type: object
+      required:
+        - name
+        - credential_ref
+      properties:
+        name:
+          type: string
+        credential_ref:
+          type: string

@@ -36,6 +36,11 @@ services:
   gateway-agent:
     <<: *agentnexus-service
     command: ["go", "run", "./cmd/gateway-agent"]
+    environment:
+      <<: *agentnexus-env
+      AGENTNEXUS_HTTP_ADDR: ":8081"
+    ports:
+      - "${AGENTNEXUS_GATEWAY_AGENT_PORT:-8081}:8081"
 
   connector-worker:
     <<: *agentnexus-service

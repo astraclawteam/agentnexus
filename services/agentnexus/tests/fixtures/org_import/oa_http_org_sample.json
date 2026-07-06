@@ -1,0 +1,27 @@
+{
+  "departments": [
+    {
+      "id": "dept_rd",
+      "parent_id": "",
+      "name": "R&D",
+      "manager_employee_id": "user_ada"
+    }
+  ],
+  "employees": [
+    {
+      "id": "user_ada",
+      "display_name": "Ada",
+      "email": "ada@example.test",
+      "phone": "",
+      "manager_employee_id": "",
+      "department_ids": ["dept_rd"]
+    }
+  ],
+  "memberships": [
+    {
+      "employee_id": "user_ada",
+      "department_id": "dept_rd",
+      "role": "manager"
+    }
+  ]
+}

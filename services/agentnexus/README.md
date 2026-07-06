@@ -19,7 +19,10 @@ go build ./cmd/connector-worker
 go build ./cmd/connector-agent
 ```
 
+Week-one dev-flow verification is documented in [docs/week-one-verification.md](docs/week-one-verification.md).
+
 Environment variables:
 
 - `AGENTNEXUS_VERSION`: service version printed by entrypoints.
 - `AGENTNEXUS_ENV`: deployment environment label, defaulting to `dev`.
+- `AGENTNEXUS_HTTP_ADDR`: HTTP listen address for gateway services, defaulting to `:8080`.

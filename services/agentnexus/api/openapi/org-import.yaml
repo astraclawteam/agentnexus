@@ -1,0 +1,83 @@
+openapi: 3.0.3
+info:
+  title: AgentNexus Organization Import API
+  version: 0.1.0
+  description: Preview-only open-core organization import endpoints. Requests use token_ref only; raw credentials are not accepted.
+paths:
+  /api/org/import/preview:
+    post:
+      operationId: previewOrgImport
+      summary: Preview organization import from a generic OA HTTP source.
+      description: Builds an import preview only. The endpoint does not persist departments, employees, memberships, or credentials.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrgImportPreviewRequest'
+      responses:
+        '200':
+          description: Import preview.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgImportPreviewResponse'
+        '400':
+          description: Invalid request or unsupported provider.
+        '502':
+          description: Upstream OA source or secret resolution failed.
+components:
+  schemas:
+    OrgImportPreviewRequest:
+      type: object
+      required:
+        - provider
+        - base_url
+        - departments_path
+        - employees_path
+      properties:
+        provider:
+          type: string
+          enum:
+            - oa_http
+        base_url:
+          type: string
+          format: uri
+        departments_path:
+          type: string
+        employees_path:
+          type: string
+        token_ref:
+          type: string
+          description: Secret reference resolved by the service. Do not send raw tokens in this field.
+    OrgImportPreviewResponse:
+      type: object
+      required:
+        - provider
+        - requires_confirmation
+        - auto_importable_employee_ids
+        - conflicts
+      properties:
+        provider:
+          type: string
+        requires_confirmation:
+          type: boolean
+        auto_importable_employee_ids:
+          type: array
+          items:
+            type: string
+        conflicts:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrgImportConflict'
+    OrgImportConflict:
+      type: object
+      properties:
+        code:
+          type: string
+        employee_id:
+          type: string
+        related_id:
+          type: string
+        description:
+          type: string
