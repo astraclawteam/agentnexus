@@ -230,9 +230,9 @@ npm test --workspace packages/enterprise-gateway-console
 
 ### Goal 13: Package Open-Core Dev Profiles
 
-- Add SaaS-dev and private-dev Docker Compose profiles.
-- Add local/dev Helm chart skeleton.
-- Document dependency toggles for PostgreSQL, NATS, object storage, and Secret Provider.
+- Added SaaS-dev and private-dev Docker Compose profiles.
+- Added local/dev Helm chart skeleton.
+- Documented dependency toggles for PostgreSQL, NATS, object storage, and Secret Provider.
 
 Verification:
 

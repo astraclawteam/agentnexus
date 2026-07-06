@@ -1,0 +1,41 @@
+{{- if .Values.services.connectorWorker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-connector-worker
+  labels:
+    app.kubernetes.io/name: agentnexus
+    app.kubernetes.io/component: connector-worker
+spec:
+  replicas: {{ .Values.services.connectorWorker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentnexus
+      app.kubernetes.io/component: connector-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentnexus
+        app.kubernetes.io/component: connector-worker
+    spec:
+      containers:
+        - name: connector-worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["{{ .Values.services.connectorWorker.command }}"]
+          env:
+            - name: AGENTNEXUS_ENV
+              value: "{{ .Values.runtime.env }}"
+            - name: AGENTNEXUS_PROFILE
+              value: "{{ .Values.runtime.profile }}"
+            - name: AGENTNEXUS_VERSION
+              value: "{{ .Values.runtime.version }}"
+            - name: AGENTNEXUS_POSTGRES_DSN
+              value: "{{ .Values.dependencies.postgres.dsn }}"
+            - name: AGENTNEXUS_NATS_URL
+              value: "{{ .Values.dependencies.nats.url }}"
+            - name: AGENTNEXUS_OBJECT_STORAGE_ENDPOINT
+              value: "{{ .Values.dependencies.objectStorage.endpoint }}"
+            - name: AGENTNEXUS_SECRET_PROVIDER
+              value: "{{ .Values.dependencies.secretProvider.mode }}"
+{{- end }}
