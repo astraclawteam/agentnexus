@@ -53,7 +53,7 @@ export function AgentNexusDashboard() {
             <span className="badge-dot" />
           </button>
           <div className={`data-source-chip source-${t.source.kind}`} aria-label={t.source.detail}>
-            <span className="dot dot-warn" aria-hidden="true" />
+            <span className={`dot ${t.source.kind === "api" ? "dot-ok" : "dot-warn"}`} aria-hidden="true" />
             <span>{t.source.label}</span>
           </div>
           <div className="locale-switch" role="group" aria-label="Language">

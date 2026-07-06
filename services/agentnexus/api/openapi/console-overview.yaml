@@ -1,0 +1,225 @@
+openapi: 3.1.0
+info:
+  title: AgentNexus Console Overview API
+  version: 0.1.0
+paths:
+  /api/console/overview:
+    get:
+      summary: Get admin console overview data
+      description: Returns open-core development overview data for the admin console. The response never contains customer-specific fixtures.
+      parameters:
+        - name: locale
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [zh, en]
+            default: en
+      responses:
+        "200":
+          description: Console overview.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleOverview"
+components:
+  schemas:
+    ConsoleOverview:
+      type: object
+      required:
+        - source
+        - title
+        - subtitle
+        - enterprise
+        - enterpriseAlt
+        - privateEnv
+        - topbar
+        - pulse
+        - metrics
+        - resourceMap
+        - tickets
+        - connectors
+        - agent
+      properties:
+        source:
+          $ref: "#/components/schemas/ConsoleOverviewSource"
+        title:
+          type: string
+        subtitle:
+          type: string
+        enterprise:
+          type: string
+        enterpriseAlt:
+          type: string
+        privateEnv:
+          type: string
+        topbar:
+          $ref: "#/components/schemas/ConsoleTopbar"
+        pulse:
+          $ref: "#/components/schemas/ConsolePulse"
+        metrics:
+          $ref: "#/components/schemas/StringMatrix"
+        resourceMap:
+          $ref: "#/components/schemas/ConsoleResourceMap"
+        tickets:
+          $ref: "#/components/schemas/ConsoleTickets"
+        connectors:
+          $ref: "#/components/schemas/ConsoleConnectors"
+        agent:
+          $ref: "#/components/schemas/ConsoleAgent"
+    ConsoleOverviewSource:
+      type: object
+      required: [kind, label, detail, updatedAt]
+      properties:
+        kind:
+          type: string
+          enum: [api, development_fixture]
+        label:
+          type: string
+        detail:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+    ConsoleTopbar:
+      type: object
+      required: [enterpriseLabel, search, sync, notifications, avatar, exportAudit]
+      properties:
+        enterpriseLabel:
+          type: string
+        search:
+          type: string
+        sync:
+          type: string
+        notifications:
+          type: string
+        avatar:
+          type: string
+        exportAudit:
+          type: string
+    ConsolePulse:
+      type: object
+      required:
+        - brandName
+        - brandSub
+        - currentEnterprise
+        - orgSnapshot
+        - todayPulse
+        - pendingSignals
+        - recentEvents
+        - statusOnline
+        - policyPending
+        - orgVersion
+        - stats
+        - pulseStats
+        - signals
+        - events
+      properties:
+        brandName:
+          type: string
+        brandSub:
+          type: string
+        currentEnterprise:
+          type: string
+        orgSnapshot:
+          type: string
+        todayPulse:
+          type: string
+        pendingSignals:
+          type: string
+        recentEvents:
+          type: string
+        statusOnline:
+          type: string
+        policyPending:
+          type: string
+        orgVersion:
+          type: string
+        stats:
+          $ref: "#/components/schemas/StringMatrix"
+        pulseStats:
+          $ref: "#/components/schemas/StringMatrix"
+        signals:
+          $ref: "#/components/schemas/StringMatrix"
+        events:
+          type: array
+          items:
+            type: string
+    ConsoleResourceMap:
+      type: object
+      required: [title, desc, tabs, aria, nodes]
+      properties:
+        title:
+          type: string
+        desc:
+          type: string
+        tabs:
+          type: array
+          items:
+            type: string
+        aria:
+          type: string
+        nodes:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+    ConsoleTickets:
+      type: object
+      required: [title, desc, filter, columns, rows]
+      properties:
+        title:
+          type: string
+        desc:
+          type: string
+        filter:
+          type: string
+        columns:
+          type: array
+          items:
+            type: string
+        rows:
+          $ref: "#/components/schemas/StringMatrix"
+    ConsoleConnectors:
+      type: object
+      required: [title, desc, smoke, rows]
+      properties:
+        title:
+          type: string
+        desc:
+          type: string
+        smoke:
+          type: string
+        rows:
+          $ref: "#/components/schemas/StringMatrix"
+    ConsoleAgent:
+      type: object
+      required: [open, title, desc, close, intro, prompts, input, send, sentPrefix]
+      properties:
+        open:
+          type: string
+        title:
+          type: string
+        desc:
+          type: string
+        close:
+          type: string
+        intro:
+          type: string
+        prompts:
+          type: array
+          items:
+            type: string
+        input:
+          type: string
+        send:
+          type: string
+        sentPrefix:
+          type: string
+    StringMatrix:
+      type: array
+      items:
+        type: array
+        items:
+          type: string

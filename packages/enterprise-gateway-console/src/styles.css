@@ -414,6 +414,12 @@ p {
   white-space: nowrap;
 }
 
+.data-source-chip.source-api {
+  border-color: rgba(110, 135, 101, 0.36);
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+
 .locale-switch button,
 .segmented button {
   border: 0;

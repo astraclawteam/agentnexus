@@ -16,7 +16,11 @@ const (
 )
 
 type Policy struct {
-	Rules []Rule
+	// EnforceAdmins controls whether administrator actors still need an
+	// explicit matching rule. The zero value is false so local/admin operators
+	// can recover access unless a deployment opts into strict enforcement.
+	EnforceAdmins bool
+	Rules         []Rule
 }
 
 type Rule struct {
@@ -29,6 +33,7 @@ type Rule struct {
 }
 
 type Request struct {
+	ActorRoles   []string
 	ResourceType string
 	ResourceID   string
 	Action       string

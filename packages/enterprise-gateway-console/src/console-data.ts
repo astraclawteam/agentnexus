@@ -300,7 +300,7 @@ type ViteImportMeta = ImportMeta & {
   };
 };
 
-const overviewEndpoint = (import.meta as ViteImportMeta).env?.VITE_AGENTNEXUS_CONSOLE_OVERVIEW_URL;
+const overviewEndpoint = (import.meta as ViteImportMeta).env?.VITE_AGENTNEXUS_CONSOLE_OVERVIEW_URL ?? "/api/console/overview";
 
 export async function loadConsoleOverview(locale: Locale, endpoint = overviewEndpoint): Promise<ConsoleOverview> {
   if (!endpoint) {
