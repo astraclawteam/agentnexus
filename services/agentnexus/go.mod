@@ -3,12 +3,15 @@ module github.com/astraclawteam/agentnexus/services/agentnexus
 go 1.25.0
 
 require (
+	github.com/astraclawteam/agentnexus/sdk/go/connector v0.0.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/nats-io/nats.go v1.52.0
 	github.com/xuri/excelize/v2 v2.10.1
 	google.golang.org/adk/v2 v2.0.0
 	google.golang.org/genai v1.57.0
 )
+
+replace github.com/astraclawteam/agentnexus/sdk/go/connector => ../../sdk/go/connector
 
 require (
 	cloud.google.com/go v0.123.0 // indirect

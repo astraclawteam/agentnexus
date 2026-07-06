@@ -169,11 +169,11 @@ go test ./internal/connectors/orgsource
 
 ### Goal 8: Build Connector Manifest Runtime L0/L1
 
-- Define public Connector Manifest SDK types.
-- Validate manifests.
-- Enforce default deny for undeclared resources and fields.
-- Enforce read-only defaults.
-- Implement HTTP/OpenAPI, readonly database, and file storage adapters.
+- Completed public Connector Manifest SDK types.
+- Completed manifest validation.
+- Completed default deny for undeclared resources and fields.
+- Completed read-only defaults.
+- Completed HTTP/OpenAPI, readonly database, and file storage adapters.
 
 Verification:
 
