@@ -1,0 +1,16 @@
+:root {
+  --an-bg: #f6f8fb;
+  --an-surface: #ffffff;
+  --an-surface-muted: #eef3f6;
+  --an-text: #17212b;
+  --an-muted: #667481;
+  --an-border: #d9e1e7;
+  --an-accent: #147d7e;
+  --an-accent-soft: #dff2f1;
+  --an-warn: #b7791f;
+  --an-warn-soft: #fff4d7;
+  --an-danger: #b42318;
+  --an-radius: 8px;
+  --an-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+  --an-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}

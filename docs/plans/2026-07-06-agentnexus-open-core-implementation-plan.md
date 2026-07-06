@@ -218,9 +218,9 @@ go test ./internal/receipts
 
 ### Goal 12: Implement Admin Console With Claw Runtime UI Reuse
 
-- Create shared Claw-runtime-style UI package.
-- Create admin console shell with Enterprise Pulse, dashboard metrics, resource map, Access Ticket table, Connector Health, and Gateway Agent launcher.
-- Add frontend rendering tests.
+- Completed shared Claw-runtime-style UI package.
+- Completed admin console shell with Enterprise Pulse, dashboard metrics, resource map, Access Ticket table, Connector Health, and Gateway Agent launcher.
+- Added frontend rendering tests.
 
 Verification:
 

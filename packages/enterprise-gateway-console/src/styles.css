@@ -1,0 +1,283 @@
+@import "../../claw-runtime-ui/src/tokens.css";
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--an-bg);
+  color: var(--an-text);
+  font-family: var(--an-font);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.console-shell {
+  display: grid;
+  grid-template-columns: 248px 1fr;
+  min-height: 100vh;
+}
+
+.pulse {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 24px 16px;
+  background: #17212b;
+  color: #f8fafc;
+}
+
+.brand {
+  font-size: 20px;
+  font-weight: 750;
+}
+
+.pulse nav {
+  display: grid;
+  gap: 8px;
+}
+
+.pulse-item,
+.an-button {
+  min-height: 38px;
+  border: 0;
+  border-radius: var(--an-radius);
+  cursor: pointer;
+}
+
+.pulse-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #dce7ef;
+  background: transparent;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.pulse-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #35b9b6;
+}
+
+.pulse-footer {
+  margin-top: auto;
+  display: grid;
+  gap: 4px;
+  color: #b8c7d3;
+  font-size: 13px;
+}
+
+.workspace {
+  padding: 24px;
+}
+
+.topbar,
+.topbar-actions,
+.panel-head,
+.health-row {
+  display: flex;
+  align-items: center;
+}
+
+.topbar {
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 28px;
+}
+
+h2 {
+  font-size: 16px;
+}
+
+.topbar p,
+.panel-head span,
+.metric span,
+.metric small {
+  color: var(--an-muted);
+}
+
+.topbar-actions {
+  gap: 10px;
+}
+
+.an-input {
+  width: 240px;
+  height: 38px;
+  border: 1px solid var(--an-border);
+  border-radius: var(--an-radius);
+  padding: 0 12px;
+}
+
+.an-button {
+  padding: 0 14px;
+  color: white;
+  background: var(--an-accent);
+  font-weight: 650;
+}
+
+.an-button-ghost {
+  color: var(--an-accent);
+  background: var(--an-accent-soft);
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.metric,
+.panel {
+  background: var(--an-surface);
+  border: 1px solid var(--an-border);
+  border-radius: var(--an-radius);
+  box-shadow: var(--an-shadow);
+}
+
+.metric {
+  display: grid;
+  gap: 4px;
+  padding: 16px;
+}
+
+.metric strong {
+  font-size: 26px;
+}
+
+.main-grid,
+.lower-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.main-grid {
+  grid-template-columns: 1.6fr 0.9fr;
+  margin-bottom: 12px;
+}
+
+.lower-grid {
+  grid-template-columns: 1.35fr 0.8fr;
+}
+
+.panel {
+  padding: 16px;
+}
+
+.panel-head {
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.map-canvas {
+  position: relative;
+  min-height: 310px;
+  border-radius: var(--an-radius);
+  background: linear-gradient(180deg, #f9fbfc, #eef5f6);
+  overflow: hidden;
+}
+
+.map-node {
+  position: absolute;
+  z-index: 2;
+  min-width: 110px;
+  padding: 12px;
+  border: 1px solid var(--an-border);
+  border-radius: var(--an-radius);
+  background: white;
+  font-weight: 700;
+}
+
+.node-0 { left: 40px; top: 44px; }
+.node-1 { right: 64px; top: 62px; }
+.node-2 { left: 44%; top: 130px; }
+.node-3 { left: 120px; bottom: 48px; }
+.node-4 { right: 82px; bottom: 58px; }
+
+.edge {
+  position: absolute;
+  height: 2px;
+  background: #9ac9c8;
+  transform-origin: left center;
+}
+
+.edge-a { left: 150px; top: 92px; width: 340px; transform: rotate(9deg); }
+.edge-b { left: 260px; top: 180px; width: 230px; transform: rotate(-23deg); }
+.edge-c { left: 245px; bottom: 100px; width: 290px; transform: rotate(7deg); }
+
+.command-box,
+.health-row {
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--an-border);
+  border-radius: var(--an-radius);
+  margin-bottom: 10px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--an-border);
+  text-align: left;
+  font-size: 14px;
+}
+
+.status {
+  display: inline-flex;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--an-warn-soft);
+  color: var(--an-warn);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.health-row strong {
+  color: var(--an-accent);
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .console-shell,
+  .main-grid,
+  .lower-grid,
+  .metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .pulse {
+    min-height: auto;
+  }
+
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
