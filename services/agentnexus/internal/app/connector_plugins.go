@@ -31,7 +31,12 @@ type connectorInstanceSmokeRequest struct {
 type connectorInstanceSmokeResponse struct {
 	OK                 bool   `json:"ok"`
 	Adapter            string `json:"adapter"`
+	Resource           string `json:"resource,omitempty"`
+	Operation          string `json:"operation,omitempty"`
 	CredentialResolved bool   `json:"credential_resolved"`
+	SchemaValid        bool   `json:"schema_valid"`
+	MaskingValid       bool   `json:"masking_valid"`
+	AuditEventID       string `json:"audit_event_id,omitempty"`
 	Error              string `json:"error,omitempty"`
 }
 
@@ -90,7 +95,12 @@ func HandleConnectorInstanceSmoke() http.HandlerFunc {
 		writeJSON(w, http.StatusOK, connectorInstanceSmokeResponse{
 			OK:                 true,
 			Adapter:            result.Adapter,
+			Resource:           result.Resource,
+			Operation:          req.Operation,
 			CredentialResolved: result.Audit.CredentialResolved,
+			SchemaValid:        connectorruntime.ValidateOutputSchema(connectorResource(req.Manifest, req.Resource)),
+			MaskingValid:       connectorruntime.ValidateMasking(connectorResource(req.Manifest, req.Resource), req.Fields),
+			AuditEventID:       "dev_smoke",
 		})
 	}
 }
@@ -109,6 +119,15 @@ func connectorResourceNames(parsed connector.Manifest) []string {
 		resources = append(resources, resource.Name)
 	}
 	return resources
+}
+
+func connectorResource(parsed connector.Manifest, name string) connector.Resource {
+	for _, resource := range parsed.Resources {
+		if resource.Name == name {
+			return resource
+		}
+	}
+	return connector.Resource{}
 }
 
 type devSmokeSecretResolver struct{}

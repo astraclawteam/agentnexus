@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
+	connectorinstance "github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/instance"
 	connectorruntime "github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/runtime"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/iam"
 )
@@ -12,9 +13,10 @@ import (
 type GatewayAPIOption func(*gatewayAPIConfig)
 
 type gatewayAPIConfig struct {
-	secretResolver connectorruntime.SecretResolver
-	iamService     *iam.Service
-	auditSink      audit.Sink
+	secretResolver     connectorruntime.SecretResolver
+	iamService         *iam.Service
+	auditSink          audit.Sink
+	connectorInstances *connectorinstance.Service
 }
 
 func WithGatewayAPISecretResolver(resolver connectorruntime.SecretResolver) GatewayAPIOption {
@@ -35,6 +37,12 @@ func WithGatewayAPIAuditSink(sink audit.Sink) GatewayAPIOption {
 	}
 }
 
+func WithGatewayAPIConnectorInstanceService(service *connectorinstance.Service) GatewayAPIOption {
+	return func(config *gatewayAPIConfig) {
+		config.connectorInstances = service
+	}
+}
+
 func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOption) http.Handler {
 	config := gatewayAPIConfig{}
 	for _, option := range options {
@@ -42,6 +50,12 @@ func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOptio
 	}
 	if config.iamService == nil {
 		config.iamService = iam.NewService(iam.NewMemoryStore())
+	}
+	if config.connectorInstances == nil {
+		config.connectorInstances = connectorinstance.NewService(connectorinstance.NewMemoryStore(), connectorinstance.ServiceConfig{
+			SecretResolver: connectorinstance.StaticSecretResolver{},
+			AuditSink:      connectorinstance.NewMemoryAuditSink(),
+		})
 	}
 
 	mux := http.NewServeMux()
@@ -61,6 +75,8 @@ func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOptio
 	mux.HandleFunc("GET /api/org/graph", HandleOrgGraph(config.iamService))
 	mux.HandleFunc("POST /api/connectors/packages/validate", HandleConnectorPackageValidate())
 	mux.HandleFunc("POST /api/connectors/instances/smoke", HandleConnectorInstanceSmoke())
+	mux.HandleFunc("POST /api/connectors/instances/draft", HandleConnectorInstanceDraft(config.connectorInstances))
+	mux.HandleFunc("POST /api/connectors/instances/", HandleConnectorInstanceAction(config.connectorInstances))
 	RegisterRuntimeAPIRoutes(mux, NewDefaultAuthorizedRuntimeAPI())
 
 	return mux

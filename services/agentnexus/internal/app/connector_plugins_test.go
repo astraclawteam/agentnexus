@@ -71,7 +71,12 @@ func TestConnectorPluginSmokeAPI(t *testing.T) {
 	var resp struct {
 		OK                 bool   `json:"ok"`
 		Adapter            string `json:"adapter"`
+		Resource           string `json:"resource"`
+		Operation          string `json:"operation"`
 		CredentialResolved bool   `json:"credential_resolved"`
+		SchemaValid        bool   `json:"schema_valid"`
+		MaskingValid       bool   `json:"masking_valid"`
+		AuditEventID       string `json:"audit_event_id"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("response json error = %v", err)
@@ -82,8 +87,14 @@ func TestConnectorPluginSmokeAPI(t *testing.T) {
 	if resp.Adapter != "file_storage" {
 		t.Fatalf("adapter = %q, want file_storage", resp.Adapter)
 	}
+	if resp.Resource != "legal_contracts" || resp.Operation != "read" {
+		t.Fatalf("resource/operation = %q/%q, want legal_contracts/read", resp.Resource, resp.Operation)
+	}
 	if !resp.CredentialResolved {
 		t.Fatal("credential_resolved = false, want true")
+	}
+	if !resp.SchemaValid || !resp.MaskingValid || resp.AuditEventID != "dev_smoke" {
+		t.Fatalf("validation/audit = %+v", resp)
 	}
 	if bytes.Contains(rec.Body.Bytes(), []byte("resolved-dev-credential")) {
 		t.Fatal("response leaked resolved secret value")

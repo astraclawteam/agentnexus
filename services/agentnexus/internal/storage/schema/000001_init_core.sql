@@ -109,6 +109,7 @@ CREATE TABLE connector_packages (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     manifest_version TEXT NOT NULL,
+    manifest_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -118,7 +119,8 @@ CREATE TABLE connector_instances (
     connector_package_id TEXT NOT NULL REFERENCES connector_packages(id),
     name TEXT NOT NULL,
     status TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE connector_instance_versions (

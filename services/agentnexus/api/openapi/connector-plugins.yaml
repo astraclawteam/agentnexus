@@ -46,6 +46,77 @@ paths:
                 $ref: '#/components/schemas/ConnectorInstanceSmokeResponse'
         '400':
           description: Invalid manifest, resource, operation, or field.
+  /api/connectors/instances/draft:
+    post:
+      operationId: draftConnectorInstance
+      summary: Draft a connector package and enterprise-scoped instance.
+      description: Stores connector configuration and credential refs only; resolved secret values are never persisted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorInstanceDraftRequest'
+      responses:
+        '200':
+          description: Draft connector instance created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorInstanceDraftResponse'
+        '400':
+          description: Invalid manifest or instance configuration.
+  /api/connectors/instances/{id}:smoke:
+    post:
+      operationId: smokeDraftConnectorInstance
+      summary: Run a smoke check for a drafted connector instance.
+      description: Resolves credential refs at runtime, validates declared schema and masking metadata, and returns an audit event id.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorInstanceLifecycleSmokeRequest'
+      responses:
+        '200':
+          description: Draft instance smoke check completed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorInstanceSmokeResponse'
+        '400':
+          description: Invalid instance, resource, operation, field, or credential ref.
+  /api/connectors/instances/{id}:confirm:
+    post:
+      operationId: confirmConnectorInstance
+      summary: Publish a drafted connector instance after human confirmation.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorInstanceConfirmRequest'
+      responses:
+        '200':
+          description: Connector instance published.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorInstanceConfirmResponse'
+        '400':
+          description: Missing confirmation or unknown instance.
 components:
   schemas:
     ConnectorPackageValidateResponse:
@@ -98,10 +169,113 @@ components:
           type: boolean
         adapter:
           type: string
+        resource:
+          type: string
+        operation:
+          type: string
         credential_resolved:
           type: boolean
+        schema_valid:
+          type: boolean
+        masking_valid:
+          type: boolean
+        audit_event_id:
+          type: string
         error:
           type: string
+    ConnectorInstanceDraftRequest:
+      type: object
+      required:
+        - enterprise_id
+        - manifest
+      properties:
+        enterprise_id:
+          type: string
+        manifest:
+          $ref: '#/components/schemas/ConnectorManifest'
+        base_url:
+          type: string
+        account_set:
+          type: array
+          items:
+            type: string
+        field_mapping:
+          type: object
+          additionalProperties:
+            type: string
+        data_scope:
+          type: array
+          items:
+            type: string
+        credential_refs:
+          type: object
+          description: Secret references only, for example secret://agentnexus/dev/file-storage.
+          additionalProperties:
+            type: string
+    ConnectorInstanceDraftResponse:
+      type: object
+      required:
+        - connector_package_id
+        - connector_instance_id
+        - package_name
+        - status
+        - credential_refs
+      properties:
+        connector_package_id:
+          type: string
+        connector_instance_id:
+          type: string
+        package_name:
+          type: string
+        status:
+          type: string
+          enum:
+            - draft
+            - published
+        credential_refs:
+          type: object
+          additionalProperties:
+            type: string
+    ConnectorInstanceLifecycleSmokeRequest:
+      type: object
+      required:
+        - enterprise_id
+        - resource
+        - operation
+      properties:
+        enterprise_id:
+          type: string
+        resource:
+          type: string
+        operation:
+          type: string
+        fields:
+          type: array
+          items:
+            type: string
+    ConnectorInstanceConfirmRequest:
+      type: object
+      required:
+        - enterprise_id
+        - human_confirmation_id
+      properties:
+        enterprise_id:
+          type: string
+        human_confirmation_id:
+          type: string
+    ConnectorInstanceConfirmResponse:
+      type: object
+      required:
+        - connector_instance_id
+        - status
+      properties:
+        connector_instance_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - draft
+            - published
     ConnectorManifest:
       type: object
       required:
@@ -148,6 +322,24 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ConnectorOperation'
+        scopes:
+          type: array
+          items:
+            type: string
+        input_schema:
+          type: object
+          additionalProperties: true
+        output_schema:
+          type: object
+          additionalProperties: true
+        smoke_tests:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectorSmokeTest'
+        risk:
+          $ref: '#/components/schemas/ConnectorRisk'
+        executable:
+          $ref: '#/components/schemas/ConnectorExecutable'
     ConnectorField:
       type: object
       required:
@@ -171,6 +363,37 @@ components:
           type: string
         path:
           type: string
+    ConnectorSmokeTest:
+      type: object
+      required:
+        - name
+        - operation
+      properties:
+        name:
+          type: string
+        operation:
+          type: string
+        fields:
+          type: array
+          items:
+            type: string
+    ConnectorRisk:
+      type: object
+      properties:
+        level:
+          type: string
+          enum:
+            - low
+            - medium
+            - high
+        requires_audit:
+          type: boolean
+    ConnectorExecutable:
+      type: object
+      description: Executable upload must remain false in open-core connector manifests.
+      properties:
+        upload:
+          type: boolean
     ConnectorCredential:
       type: object
       required:

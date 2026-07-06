@@ -28,6 +28,9 @@ func ValidateManifest(manifest Manifest) error {
 		if resource.Type == "" {
 			return fmt.Errorf("resource %q type is required", resource.Name)
 		}
+		if resource.Executable != nil && resource.Executable.Upload {
+			return fmt.Errorf("resource %q executable code upload is not allowed", resource.Name)
+		}
 		fieldNames := map[string]struct{}{}
 		for _, field := range resource.Fields {
 			if field.Name == "" {
@@ -37,6 +40,29 @@ func ValidateManifest(manifest Manifest) error {
 				return fmt.Errorf("resource %q duplicate field %q", resource.Name, field.Name)
 			}
 			fieldNames[field.Name] = struct{}{}
+		}
+		operationNames := map[string]struct{}{}
+		for _, operation := range resource.Operations {
+			if operation.Name == "" {
+				return fmt.Errorf("resource %q operation name is required", resource.Name)
+			}
+			operationNames[operation.Name] = struct{}{}
+		}
+		for _, smokeTest := range resource.SmokeTests {
+			if smokeTest.Operation == "" {
+				return fmt.Errorf("resource %q smoke test operation is required", resource.Name)
+			}
+			if _, ok := operationNames[smokeTest.Operation]; !ok {
+				return fmt.Errorf("resource %q undeclared smoke operation %q", resource.Name, smokeTest.Operation)
+			}
+			for _, field := range smokeTest.Fields {
+				if _, ok := fieldNames[field]; !ok {
+					return fmt.Errorf("resource %q undeclared smoke field %q", resource.Name, field)
+				}
+			}
+		}
+		if resource.Risk.Level == RiskHigh && (len(resource.InputSchema) == 0 || len(resource.OutputSchema) == 0) {
+			return fmt.Errorf("resource %q high-risk resource requires input_schema and output_schema", resource.Name)
 		}
 	}
 	return nil
