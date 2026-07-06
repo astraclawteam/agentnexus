@@ -195,9 +195,9 @@ go test ./internal/policy ./internal/tickets ./internal/audit
 
 ### Goal 10: Implement Lightweight Connector Agent
 
-- Implement outbound-only Connector Agent registration and execution.
-- Reject unknown connector instances and dynamic code payloads.
-- Return audit context with each result.
+- Completed outbound-only Connector Agent registration and execution.
+- Completed rejection of unknown connector instances and dynamic code payloads.
+- Completed audit context on each result.
 
 Verification:
 
