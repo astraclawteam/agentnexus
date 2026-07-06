@@ -179,6 +179,8 @@ components:
           type: boolean
         masking_valid:
           type: boolean
+        health_event_id:
+          type: string
         audit_event_id:
           type: string
         error:

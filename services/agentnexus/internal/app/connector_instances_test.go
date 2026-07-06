@@ -15,7 +15,7 @@ func TestConnectorInstanceLifecycleAPI(t *testing.T) {
 	service := instance.NewService(instance.NewMemoryStore(), instance.ServiceConfig{
 		SecretResolver: instance.StaticSecretResolver{"secret://agentnexus/dev/file-storage": "resolved-secret-value"},
 		AuditSink:      auditLog,
-		NewID:          sequenceIDs("pkg_1", "instance_1", "audit_1"),
+		NewID:          sequenceIDs("pkg_1", "instance_1", "health_1", "audit_1"),
 	})
 	router := NewGatewayAPIRouter("gateway-api", "test", WithGatewayAPIConnectorInstanceService(service))
 
@@ -64,12 +64,13 @@ func TestConnectorInstanceLifecycleAPI(t *testing.T) {
 		CredentialResolved bool   `json:"credential_resolved"`
 		SchemaValid        bool   `json:"schema_valid"`
 		MaskingValid       bool   `json:"masking_valid"`
+		HealthEventID      string `json:"health_event_id"`
 		AuditEventID       string `json:"audit_event_id"`
 	}
 	if err := json.Unmarshal(smokeRec.Body.Bytes(), &smokeResp); err != nil {
 		t.Fatalf("smoke json error: %v", err)
 	}
-	if !smokeResp.OK || smokeResp.Adapter != "file_storage" || !smokeResp.CredentialResolved || !smokeResp.SchemaValid || !smokeResp.MaskingValid || smokeResp.AuditEventID != "audit_1" {
+	if !smokeResp.OK || smokeResp.Adapter != "file_storage" || !smokeResp.CredentialResolved || !smokeResp.SchemaValid || !smokeResp.MaskingValid || smokeResp.HealthEventID != "health_1" || smokeResp.AuditEventID != "audit_1" {
 		t.Fatalf("smoke response = %+v", smokeResp)
 	}
 

@@ -42,6 +42,7 @@ type connectorInstanceLifecycleSmokeResponse struct {
 	CredentialResolved bool   `json:"credential_resolved"`
 	SchemaValid        bool   `json:"schema_valid"`
 	MaskingValid       bool   `json:"masking_valid"`
+	HealthEventID      string `json:"health_event_id"`
 	AuditEventID       string `json:"audit_event_id"`
 	Error              string `json:"error,omitempty"`
 }
@@ -110,6 +111,7 @@ func HandleConnectorInstanceLifecycleSmoke(service *instance.Service) http.Handl
 			CredentialResolved: result.CredentialResolved,
 			SchemaValid:        result.SchemaValid,
 			MaskingValid:       result.MaskingValid,
+			HealthEventID:      result.HealthEventID,
 			AuditEventID:       result.AuditEventID,
 		})
 	}

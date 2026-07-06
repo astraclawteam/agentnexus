@@ -65,6 +65,18 @@ func (s *PostgresStore) CreateInstance(ctx context.Context, cfg Config) (Config,
 	return cfg, nil
 }
 
+func (s *PostgresStore) CreateHealthEvent(ctx context.Context, event HealthEvent) (HealthEvent, error) {
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO connector_health_events (id, enterprise_id, connector_instance_id, status, message, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING created_at
+	`, event.ID, event.EnterpriseID, event.InstanceID, event.Status, event.Message, event.CreatedAt).Scan(&event.CreatedAt)
+	if err != nil {
+		return HealthEvent{}, err
+	}
+	return event, nil
+}
+
 func (s *PostgresStore) GetPackage(ctx context.Context, id string) (Package, error) {
 	var pkg Package
 	var manifestJSON []byte

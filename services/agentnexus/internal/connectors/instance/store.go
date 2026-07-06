@@ -7,9 +7,10 @@ import (
 )
 
 type MemoryStore struct {
-	mu        sync.Mutex
-	packages  map[string]Package
-	instances map[string]Config
+	mu           sync.Mutex
+	packages     map[string]Package
+	instances    map[string]Config
+	healthEvents []HealthEvent
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -33,6 +34,14 @@ func (s *MemoryStore) CreateInstance(_ context.Context, instance Config) (Config
 
 	s.instances[instanceKey(instance.EnterpriseID, instance.ID)] = instance
 	return instance, nil
+}
+
+func (s *MemoryStore) CreateHealthEvent(_ context.Context, event HealthEvent) (HealthEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.healthEvents = append(s.healthEvents, event)
+	return event, nil
 }
 
 func (s *MemoryStore) GetPackage(_ context.Context, id string) (Package, error) {
@@ -73,6 +82,13 @@ func (s *MemoryStore) UpdateInstanceStatus(_ context.Context, enterpriseID, id, 
 
 func instanceKey(enterpriseID, id string) string {
 	return enterpriseID + ":" + id
+}
+
+func (s *MemoryStore) HealthEvents() []HealthEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]HealthEvent(nil), s.healthEvents...)
 }
 
 type MemoryAuditSink struct {

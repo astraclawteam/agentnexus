@@ -10,10 +10,11 @@ import (
 func TestServiceDraftSmokeConfirmLifecycle(t *testing.T) {
 	ctx := context.Background()
 	auditLog := NewMemoryAuditSink()
-	service := NewService(NewMemoryStore(), ServiceConfig{
+	store := NewMemoryStore()
+	service := NewService(store, ServiceConfig{
 		SecretResolver: StaticSecretResolver{"secret://agentnexus/dev/file-storage": "resolved-secret-value"},
 		AuditSink:      auditLog,
-		NewID:          sequenceIDs("pkg_1", "instance_1", "audit_1"),
+		NewID:          sequenceIDs("pkg_1", "instance_1", "health_1", "audit_1"),
 	})
 
 	draft, err := service.DraftInstance(ctx, DraftInstanceInput{
@@ -50,8 +51,11 @@ func TestServiceDraftSmokeConfirmLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SmokeInstance returned error: %v", err)
 	}
-	if !smoke.OK || smoke.Adapter != "file_storage" || !smoke.CredentialResolved || !smoke.SchemaValid || !smoke.MaskingValid || smoke.AuditEventID != "audit_1" {
+	if !smoke.OK || smoke.Adapter != "file_storage" || !smoke.CredentialResolved || !smoke.SchemaValid || !smoke.MaskingValid || smoke.HealthEventID != "health_1" || smoke.AuditEventID != "audit_1" {
 		t.Fatalf("smoke = %+v", smoke)
+	}
+	if events := store.HealthEvents(); len(events) != 1 || events[0].Status != HealthStatusHealthy || events[0].InstanceID != draft.Instance.ID {
+		t.Fatalf("health events = %+v", events)
 	}
 
 	confirmed, err := service.ConfirmInstance(ctx, ConfirmInstanceInput{

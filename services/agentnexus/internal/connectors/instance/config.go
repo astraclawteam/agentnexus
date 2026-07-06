@@ -15,6 +15,11 @@ const (
 	StatusPublished = "published"
 )
 
+const (
+	HealthStatusHealthy   = "healthy"
+	HealthStatusUnhealthy = "unhealthy"
+)
+
 type Package struct {
 	ID        string
 	Name      string
@@ -67,6 +72,7 @@ type SmokeInstanceResult struct {
 	CredentialResolved bool
 	SchemaValid        bool
 	MaskingValid       bool
+	HealthEventID      string
 	AuditEventID       string
 }
 
@@ -79,6 +85,7 @@ type ConfirmInstanceInput struct {
 type Store interface {
 	CreatePackage(context.Context, Package) (Package, error)
 	CreateInstance(context.Context, Config) (Config, error)
+	CreateHealthEvent(context.Context, HealthEvent) (HealthEvent, error)
 	GetPackage(context.Context, string) (Package, error)
 	GetInstance(context.Context, string, string) (Config, error)
 	UpdateInstanceStatus(context.Context, string, string, string) (Config, error)
@@ -109,6 +116,15 @@ type ConnectorAuditEvent struct {
 	Resource     string
 	Operation    string
 	Decision     string
+	CreatedAt    time.Time
+}
+
+type HealthEvent struct {
+	ID           string
+	EnterpriseID string
+	InstanceID   string
+	Status       string
+	Message      string
 	CreatedAt    time.Time
 }
 
@@ -189,11 +205,23 @@ func (s *Service) SmokeInstance(ctx context.Context, input SmokeInstanceInput) (
 		SecretResolver: secretResolverAdapter{s.secretResolver},
 	})
 	result, err := runtime.Execute(ctx, connectorruntime.Request{
-		Resource:      input.Resource,
-		Operation:     input.Operation,
-		Action:        connectorruntime.ActionRead,
-		Fields:        input.Fields,
-		CredentialRef: credentialRef,
+		ConnectorInstanceID: input.InstanceID,
+		Resource:            input.Resource,
+		Operation:           input.Operation,
+		Action:              connectorruntime.ActionRead,
+		Fields:              input.Fields,
+		CredentialRef:       credentialRef,
+	})
+	if err != nil {
+		return SmokeInstanceResult{}, err
+	}
+	health, err := s.store.CreateHealthEvent(ctx, HealthEvent{
+		ID:           s.newID(),
+		EnterpriseID: input.EnterpriseID,
+		InstanceID:   input.InstanceID,
+		Status:       HealthStatusHealthy,
+		Message:      "smoke read ok",
+		CreatedAt:    s.now(),
 	})
 	if err != nil {
 		return SmokeInstanceResult{}, err
@@ -220,6 +248,7 @@ func (s *Service) SmokeInstance(ctx context.Context, input SmokeInstanceInput) (
 		CredentialResolved: result.Audit.CredentialResolved,
 		SchemaValid:        validateOutputSchema(pkg.Manifest, input.Resource),
 		MaskingValid:       validateMasking(pkg.Manifest, input.Resource, input.Fields),
+		HealthEventID:      health.ID,
 		AuditEventID:       auditID,
 	}, nil
 }

@@ -44,7 +44,7 @@ func TestPostgresConnectorInstancePersistsRefsOnly(t *testing.T) {
 		t.Fatalf("insert enterprise: %v", err)
 	}
 
-	ids := connectorInstanceSequenceIDs("pkg_1", "instance_1", "audit_1")
+	ids := connectorInstanceSequenceIDs("pkg_1", "instance_1", "health_1", "audit_1")
 	service := instance.NewService(instance.NewPostgresStore(pool), instance.ServiceConfig{
 		SecretResolver: instance.StaticSecretResolver{"secret://agentnexus/dev/file-storage": "resolved-secret-value"},
 		AuditSink:      instance.NewMemoryAuditSink(),
@@ -87,6 +87,13 @@ func TestPostgresConnectorInstancePersistsRefsOnly(t *testing.T) {
 	}
 	if !smoke.OK || !smoke.CredentialResolved || !smoke.SchemaValid || !smoke.MaskingValid {
 		t.Fatalf("smoke = %+v", smoke)
+	}
+	var healthStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM connector_health_events WHERE id = $1`, smoke.HealthEventID).Scan(&healthStatus); err != nil {
+		t.Fatalf("select connector health event: %v", err)
+	}
+	if smoke.HealthEventID != "health_1" || healthStatus != instance.HealthStatusHealthy {
+		t.Fatalf("health event id/status = %q/%q", smoke.HealthEventID, healthStatus)
 	}
 
 	confirmed, err := service.ConfirmInstance(ctx, instance.ConfirmInstanceInput{
