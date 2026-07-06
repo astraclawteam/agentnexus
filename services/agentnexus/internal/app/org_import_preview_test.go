@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
 	connectorruntime "github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/runtime"
 )
 
@@ -28,12 +29,13 @@ func TestOrgImportPreviewAPI(t *testing.T) {
 	}))
 	defer oaServer.Close()
 
+	auditLog := audit.NewHashChainLog()
 	router := NewGatewayAPIRouter("gateway-api", "test", WithGatewayAPISecretResolver(connectorruntime.SecretResolverFunc(func(_ context.Context, ref string) (string, error) {
 		if ref != "secret://agentnexus/dev/oa-token" {
 			t.Fatalf("secret ref = %q, want secret://agentnexus/dev/oa-token", ref)
 		}
 		return "test-token", nil
-	})))
+	})), WithGatewayAPIAuditSink(auditLog))
 
 	body := []byte(`{
 		"provider": "oa_http",
@@ -56,6 +58,7 @@ func TestOrgImportPreviewAPI(t *testing.T) {
 
 	var resp struct {
 		Provider                  string   `json:"provider"`
+		SnapshotHash              string   `json:"snapshot_hash"`
 		RequiresConfirmation      bool     `json:"requires_confirmation"`
 		AutoImportableEmployeeIDs []string `json:"auto_importable_employee_ids"`
 		Conflicts                 []any    `json:"conflicts"`
@@ -66,6 +69,9 @@ func TestOrgImportPreviewAPI(t *testing.T) {
 	if resp.Provider != "oa_http" {
 		t.Fatalf("provider = %q, want oa_http", resp.Provider)
 	}
+	if resp.SnapshotHash == "" {
+		t.Fatal("snapshot_hash is empty")
+	}
 	if resp.RequiresConfirmation {
 		t.Fatal("requires_confirmation = true, want false")
 	}
@@ -74,5 +80,8 @@ func TestOrgImportPreviewAPI(t *testing.T) {
 	}
 	if len(resp.Conflicts) != 0 {
 		t.Fatalf("conflicts = %#v, want none", resp.Conflicts)
+	}
+	if len(auditLog.Events()) != 1 {
+		t.Fatalf("audit events = %d, want 1", len(auditLog.Events()))
 	}
 }

@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: AgentNexus Organization Import API
   version: 0.1.0
-  description: Preview-only open-core organization import endpoints. Requests use token_ref only; raw credentials are not accepted.
+  description: Open-core organization import endpoints. Requests use token_ref or credential_ref only; raw credentials are not accepted.
 paths:
   /api/org/import/preview:
     post:
@@ -26,6 +26,47 @@ paths:
           description: Invalid request or unsupported provider.
         '502':
           description: Upstream OA source or secret resolution failed.
+  /api/org/import/confirm:
+    post:
+      operationId: confirmOrgImport
+      summary: Confirm and persist an organization import snapshot.
+      description: Persists departments, employees, memberships, external identity bindings, and a new org_version. If the snapshot has conflicts, human_confirmation_id is required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrgImportConfirmRequest'
+      responses:
+        '200':
+          description: Confirmed import result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgImportConfirmResponse'
+        '400':
+          description: Invalid request or snapshot hash mismatch.
+        '409':
+          description: Import conflicts require human confirmation.
+  /api/org/graph:
+    get:
+      operationId: getOrgGraph
+      summary: Get persisted organization graph for an enterprise.
+      parameters:
+        - name: enterprise_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Persisted organization graph.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgGraph'
+        '400':
+          description: Missing enterprise_id.
 components:
   schemas:
     OrgImportPreviewRequest:
@@ -54,12 +95,16 @@ components:
       type: object
       required:
         - provider
+        - snapshot_hash
         - requires_confirmation
         - auto_importable_employee_ids
         - conflicts
       properties:
         provider:
           type: string
+        snapshot_hash:
+          type: string
+          description: Hash of the normalized source snapshot. Use this when confirming a snapshot.
         requires_confirmation:
           type: boolean
         auto_importable_employee_ids:
@@ -81,3 +126,131 @@ components:
           type: string
         description:
           type: string
+    OrgImportConfirmRequest:
+      type: object
+      required:
+        - enterprise_id
+        - enterprise_name
+        - provider
+        - snapshot
+      properties:
+        enterprise_id:
+          type: string
+        enterprise_name:
+          type: string
+        provider:
+          type: string
+          enum:
+            - oa_http
+            - wecom
+            - feishu
+            - dingtalk
+        snapshot_hash:
+          type: string
+        human_confirmation_id:
+          type: string
+        snapshot:
+          $ref: '#/components/schemas/OrgSnapshot'
+    OrgImportConfirmResponse:
+      type: object
+      required:
+        - provider
+        - org_version_id
+        - version_number
+        - imported_departments
+        - imported_employees
+        - imported_memberships
+      properties:
+        provider:
+          type: string
+        org_version_id:
+          type: string
+        version_number:
+          type: integer
+          format: int64
+        imported_departments:
+          type: integer
+        imported_employees:
+          type: integer
+        imported_memberships:
+          type: integer
+        requires_confirmation:
+          type: boolean
+    OrgSnapshot:
+      type: object
+      properties:
+        departments:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrgDepartment'
+        employees:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrgEmployee'
+        memberships:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrgMembership'
+    OrgDepartment:
+      type: object
+      properties:
+        id:
+          type: string
+        parent_id:
+          type: string
+        name:
+          type: string
+        manager_employee_id:
+          type: string
+    OrgEmployee:
+      type: object
+      properties:
+        id:
+          type: string
+        display_name:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+        manager_employee_id:
+          type: string
+        department_ids:
+          type: array
+          items:
+            type: string
+    OrgMembership:
+      type: object
+      properties:
+        employee_id:
+          type: string
+        department_id:
+          type: string
+        role:
+          type: string
+          enum:
+            - member
+            - manager
+    OrgGraph:
+      type: object
+      properties:
+        departments:
+          type: array
+          items:
+            type: object
+        users:
+          type: array
+          items:
+            type: object
+        memberships:
+          type: array
+          items:
+            type: object
+        external_identities:
+          type: array
+          items:
+            type: object
+        versions:
+          type: array
+          items:
+            type: object

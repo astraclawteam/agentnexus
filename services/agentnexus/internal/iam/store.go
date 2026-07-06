@@ -2,7 +2,10 @@ package iam
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -21,6 +24,8 @@ type Store interface {
 	AddOrgMembership(context.Context, OrgMembership) (OrgMembership, error)
 	CreateOrgEvent(context.Context, OrgEvent) (OrgEvent, error)
 	CreateOrgVersion(context.Context, OrgVersion) (OrgVersion, error)
+	GetOrgGraph(context.Context, string) (OrgGraph, error)
+	NextOrgVersionNumber(context.Context, string) (int64, error)
 }
 
 type MemoryStore struct {
@@ -132,6 +137,53 @@ func (s *MemoryStore) CreateOrgVersion(_ context.Context, version OrgVersion) (O
 	return version, nil
 }
 
+func (s *MemoryStore) GetOrgGraph(_ context.Context, enterpriseID string) (OrgGraph, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	graph := OrgGraph{}
+	for _, user := range s.users {
+		if user.EnterpriseID == enterpriseID {
+			graph.Users = append(graph.Users, user)
+		}
+	}
+	for _, identity := range s.identities {
+		if identity.EnterpriseID == enterpriseID {
+			graph.ExternalIdentities = append(graph.ExternalIdentities, identity)
+		}
+	}
+	for _, unit := range s.orgUnits {
+		if unit.EnterpriseID == enterpriseID {
+			graph.Departments = append(graph.Departments, unit)
+		}
+	}
+	for _, membership := range s.memberships {
+		if membership.EnterpriseID == enterpriseID {
+			graph.Memberships = append(graph.Memberships, membership)
+		}
+	}
+	for _, version := range s.orgVersions {
+		if version.EnterpriseID == enterpriseID {
+			graph.Versions = append(graph.Versions, version)
+		}
+	}
+	sortOrgGraph(&graph)
+	return graph, nil
+}
+
+func (s *MemoryStore) NextOrgVersionNumber(_ context.Context, enterpriseID string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var maxVersion int64
+	for _, version := range s.orgVersions {
+		if version.EnterpriseID == enterpriseID && version.VersionNumber > maxVersion {
+			maxVersion = version.VersionNumber
+		}
+	}
+	return maxVersion + 1, nil
+}
+
 type PostgresStore struct {
 	pool *pgxpool.Pool
 }
@@ -209,6 +261,122 @@ VALUES ($1, $2, $3, $4)
 RETURNING id, enterprise_id, version_number, source_event_id, created_at`,
 		version.ID, version.EnterpriseID, version.VersionNumber, nullText(version.SourceEventID))
 	return scanOrgVersion(row)
+}
+
+func (s *PostgresStore) GetOrgGraph(ctx context.Context, enterpriseID string) (OrgGraph, error) {
+	var graph OrgGraph
+
+	userRows, err := s.pool.Query(ctx, `
+SELECT id, enterprise_id, display_name, email, phone, created_at
+FROM enterprise_users
+WHERE enterprise_id = $1
+ORDER BY id`, enterpriseID)
+	if err != nil {
+		return OrgGraph{}, err
+	}
+	defer userRows.Close()
+	for userRows.Next() {
+		user, err := scanEnterpriseUser(userRows)
+		if err != nil {
+			return OrgGraph{}, err
+		}
+		graph.Users = append(graph.Users, user)
+	}
+	if err := userRows.Err(); err != nil {
+		return OrgGraph{}, err
+	}
+
+	identityRows, err := s.pool.Query(ctx, `
+SELECT id, enterprise_id, enterprise_user_id, provider, external_subject, created_at
+FROM external_identities
+WHERE enterprise_id = $1
+ORDER BY provider, external_subject`, enterpriseID)
+	if err != nil {
+		return OrgGraph{}, err
+	}
+	defer identityRows.Close()
+	for identityRows.Next() {
+		identity, err := scanExternalIdentity(identityRows)
+		if err != nil {
+			return OrgGraph{}, err
+		}
+		graph.ExternalIdentities = append(graph.ExternalIdentities, identity)
+	}
+	if err := identityRows.Err(); err != nil {
+		return OrgGraph{}, err
+	}
+
+	unitRows, err := s.pool.Query(ctx, `
+SELECT id, enterprise_id, parent_id, name, unit_type, created_at
+FROM org_units
+WHERE enterprise_id = $1
+ORDER BY id`, enterpriseID)
+	if err != nil {
+		return OrgGraph{}, err
+	}
+	defer unitRows.Close()
+	for unitRows.Next() {
+		unit, err := scanOrgUnit(unitRows)
+		if err != nil {
+			return OrgGraph{}, err
+		}
+		graph.Departments = append(graph.Departments, unit)
+	}
+	if err := unitRows.Err(); err != nil {
+		return OrgGraph{}, err
+	}
+
+	membershipRows, err := s.pool.Query(ctx, `
+SELECT enterprise_id, enterprise_user_id, org_unit_id, role, created_at
+FROM org_memberships
+WHERE enterprise_id = $1
+ORDER BY enterprise_user_id, org_unit_id, role`, enterpriseID)
+	if err != nil {
+		return OrgGraph{}, err
+	}
+	defer membershipRows.Close()
+	for membershipRows.Next() {
+		membership, err := scanOrgMembership(membershipRows)
+		if err != nil {
+			return OrgGraph{}, err
+		}
+		graph.Memberships = append(graph.Memberships, membership)
+	}
+	if err := membershipRows.Err(); err != nil {
+		return OrgGraph{}, err
+	}
+
+	versionRows, err := s.pool.Query(ctx, `
+SELECT id, enterprise_id, version_number, source_event_id, created_at
+FROM org_versions
+WHERE enterprise_id = $1
+ORDER BY version_number`, enterpriseID)
+	if err != nil {
+		return OrgGraph{}, err
+	}
+	defer versionRows.Close()
+	for versionRows.Next() {
+		version, err := scanOrgVersion(versionRows)
+		if err != nil {
+			return OrgGraph{}, err
+		}
+		graph.Versions = append(graph.Versions, version)
+	}
+	if err := versionRows.Err(); err != nil {
+		return OrgGraph{}, err
+	}
+	return graph, nil
+}
+
+func (s *PostgresStore) NextOrgVersionNumber(ctx context.Context, enterpriseID string) (int64, error) {
+	var next int64
+	if err := s.pool.QueryRow(ctx, `
+SELECT COALESCE(MAX(version_number), 0) + 1
+FROM org_versions
+WHERE enterprise_id = $1`, enterpriseID).Scan(&next); err != nil {
+		return 0, err
+	}
+	return next, nil
 }
 
 type rowScanner interface {
@@ -303,4 +471,30 @@ func nullText(value string) *string {
 
 func key(enterpriseID, id string) string {
 	return enterpriseID + ":" + id
+}
+
+func randomID(prefix string) string {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return prefix + "_" + hex.EncodeToString([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
+	}
+	return prefix + "_" + hex.EncodeToString(bytes[:])
+}
+
+func sortOrgGraph(graph *OrgGraph) {
+	sort.Slice(graph.Users, func(i, j int) bool { return graph.Users[i].ID < graph.Users[j].ID })
+	sort.Slice(graph.ExternalIdentities, func(i, j int) bool {
+		if graph.ExternalIdentities[i].Provider == graph.ExternalIdentities[j].Provider {
+			return graph.ExternalIdentities[i].ExternalSubject < graph.ExternalIdentities[j].ExternalSubject
+		}
+		return graph.ExternalIdentities[i].Provider < graph.ExternalIdentities[j].Provider
+	})
+	sort.Slice(graph.Departments, func(i, j int) bool { return graph.Departments[i].ID < graph.Departments[j].ID })
+	sort.Slice(graph.Memberships, func(i, j int) bool {
+		if graph.Memberships[i].EnterpriseUserID == graph.Memberships[j].EnterpriseUserID {
+			return graph.Memberships[i].OrgUnitID < graph.Memberships[j].OrgUnitID
+		}
+		return graph.Memberships[i].EnterpriseUserID < graph.Memberships[j].EnterpriseUserID
+	})
+	sort.Slice(graph.Versions, func(i, j int) bool { return graph.Versions[i].VersionNumber < graph.Versions[j].VersionNumber })
 }

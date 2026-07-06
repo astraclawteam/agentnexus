@@ -10,31 +10,31 @@ const (
 )
 
 type Department struct {
-	ID                string
-	ParentID          string
-	Name              string
-	ManagerEmployeeID string
+	ID                string `json:"id"`
+	ParentID          string `json:"parent_id"`
+	Name              string `json:"name"`
+	ManagerEmployeeID string `json:"manager_employee_id"`
 }
 
 type Employee struct {
-	ID                string
-	DisplayName       string
-	Email             string
-	Phone             string
-	ManagerEmployeeID string
-	DepartmentIDs     []string
+	ID                string   `json:"id"`
+	DisplayName       string   `json:"display_name"`
+	Email             string   `json:"email"`
+	Phone             string   `json:"phone"`
+	ManagerEmployeeID string   `json:"manager_employee_id"`
+	DepartmentIDs     []string `json:"department_ids"`
 }
 
 type Membership struct {
-	EmployeeID   string
-	DepartmentID string
-	Role         Role
+	EmployeeID   string `json:"employee_id"`
+	DepartmentID string `json:"department_id"`
+	Role         Role   `json:"role"`
 }
 
 type Snapshot struct {
-	Departments []Department
-	Employees   []Employee
-	Memberships []Membership
+	Departments []Department `json:"departments"`
+	Employees   []Employee   `json:"employees"`
+	Memberships []Membership `json:"memberships"`
 }
 
 type Provider interface {

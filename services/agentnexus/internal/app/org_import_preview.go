@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/orgsource"
 	connectorruntime "github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/runtime"
 )
@@ -18,12 +19,13 @@ type orgImportPreviewRequest struct {
 
 type orgImportPreviewResponse struct {
 	Provider                  string               `json:"provider"`
+	SnapshotHash              string               `json:"snapshot_hash"`
 	RequiresConfirmation      bool                 `json:"requires_confirmation"`
 	AutoImportableEmployeeIDs []string             `json:"auto_importable_employee_ids"`
 	Conflicts                 []orgsource.Conflict `json:"conflicts"`
 }
 
-func HandleOrgImportPreview(secretResolver connectorruntime.SecretResolver) http.HandlerFunc {
+func HandleOrgImportPreview(secretResolver connectorruntime.SecretResolver, auditSink audit.Sink) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req orgImportPreviewRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -49,19 +51,29 @@ func HandleOrgImportPreview(secretResolver connectorruntime.SecretResolver) http
 			token = resolved
 		}
 
-		preview, err := BuildOrgImportPreview(r.Context(), orgsource.NewOAHTTPProvider(orgsource.OAHTTPConfig{
+		provider := orgsource.NewOAHTTPProvider(orgsource.OAHTTPConfig{
 			BaseURL:         req.BaseURL,
 			DepartmentsPath: req.DepartmentsPath,
 			EmployeesPath:   req.EmployeesPath,
 			Token:           token,
-		}))
+		})
+		snapshot, err := provider.Fetch(r.Context())
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to build org import preview"})
 			return
 		}
+		preview := orgsource.PreviewImport(snapshot)
+		snapshotHash := hashRuntimeValue(snapshot)
+		appendOrgImportAudit(r, auditSink, audit.EventInput{
+			Action:     "org_import_preview",
+			Decision:   "preview",
+			InputHash:  hashRuntimeValue(req),
+			OutputHash: snapshotHash,
+		})
 
 		writeJSON(w, http.StatusOK, orgImportPreviewResponse{
 			Provider:                  req.Provider,
+			SnapshotHash:              snapshotHash,
 			RequiresConfirmation:      preview.RequiresConfirmation,
 			AutoImportableEmployeeIDs: preview.AutoImportableEmployeeIDs,
 			Conflicts:                 preview.Conflicts,

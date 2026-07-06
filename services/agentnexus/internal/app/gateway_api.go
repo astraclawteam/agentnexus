@@ -4,13 +4,17 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
 	connectorruntime "github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/runtime"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/iam"
 )
 
 type GatewayAPIOption func(*gatewayAPIConfig)
 
 type gatewayAPIConfig struct {
 	secretResolver connectorruntime.SecretResolver
+	iamService     *iam.Service
+	auditSink      audit.Sink
 }
 
 func WithGatewayAPISecretResolver(resolver connectorruntime.SecretResolver) GatewayAPIOption {
@@ -19,10 +23,25 @@ func WithGatewayAPISecretResolver(resolver connectorruntime.SecretResolver) Gate
 	}
 }
 
+func WithGatewayAPIIAMService(service *iam.Service) GatewayAPIOption {
+	return func(config *gatewayAPIConfig) {
+		config.iamService = service
+	}
+}
+
+func WithGatewayAPIAuditSink(sink audit.Sink) GatewayAPIOption {
+	return func(config *gatewayAPIConfig) {
+		config.auditSink = sink
+	}
+}
+
 func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOption) http.Handler {
 	config := gatewayAPIConfig{}
 	for _, option := range options {
 		option(&config)
+	}
+	if config.iamService == nil {
+		config.iamService = iam.NewService(iam.NewMemoryStore())
 	}
 
 	mux := http.NewServeMux()
@@ -37,7 +56,9 @@ func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOptio
 	mux.HandleFunc("GET /api/console/overview", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, NewConsoleOverview(r.URL.Query().Get("locale")))
 	})
-	mux.HandleFunc("POST /api/org/import/preview", HandleOrgImportPreview(config.secretResolver))
+	mux.HandleFunc("POST /api/org/import/preview", HandleOrgImportPreview(config.secretResolver, config.auditSink))
+	mux.HandleFunc("POST /api/org/import/confirm", HandleOrgImportConfirm(config.iamService, config.auditSink))
+	mux.HandleFunc("GET /api/org/graph", HandleOrgGraph(config.iamService))
 	mux.HandleFunc("POST /api/connectors/packages/validate", HandleConnectorPackageValidate())
 	mux.HandleFunc("POST /api/connectors/instances/smoke", HandleConnectorInstanceSmoke())
 	RegisterRuntimeAPIRoutes(mux, NewDefaultAuthorizedRuntimeAPI())

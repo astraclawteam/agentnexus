@@ -13,13 +13,17 @@ func NewService(store Store, opts ...Option) *Service {
 	service := &Service{
 		store: store,
 		newID: func() string {
-			return "generated_id"
+			return randomID("iam")
 		},
 	}
 	for _, opt := range opts {
 		opt(service)
 	}
 	return service
+}
+
+func (s *Service) GetOrgGraph(ctx context.Context, enterpriseID string) (OrgGraph, error) {
+	return s.store.GetOrgGraph(ctx, enterpriseID)
 }
 
 func WithIDGenerator(newID func() string) Option {
