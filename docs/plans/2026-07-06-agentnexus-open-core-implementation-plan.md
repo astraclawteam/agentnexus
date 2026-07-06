@@ -121,9 +121,9 @@ go test ./tests/integration -run TestPostgresCore
 
 ### Goal 4: Implement ADK Go v2 And llmrouter Adapter Spike
 
-- Add ADK Go v2 dependency.
-- Implement `adk-llmrouter-model` message, stream, tool call, usage, and error mappings.
-- Add network-free mapping tests and env-gated integration tests.
+- Completed ADK Go v2 dependency setup.
+- Completed `adk-llmrouter-model` message, stream, tool call, usage, and error mappings.
+- Completed network-free mapping tests and env-gated integration tests.
 
 Verification:
 
