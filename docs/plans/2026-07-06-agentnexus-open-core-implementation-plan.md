@@ -133,9 +133,9 @@ go test ./internal/llmroutermodel
 
 ### Goal 5: Build Task Orchestrator On PostgreSQL And NATS JetStream
 
-- Implement durable task runs, task steps, confirmation checkpoints, and valid state transitions.
-- Add NATS JetStream subjects for task events.
-- Gate infrastructure-dependent tests with explicit environment variables.
+- Completed durable task runs, task steps, confirmation checkpoints, and valid state transitions.
+- Completed NATS JetStream subjects for task events.
+- Completed infrastructure-dependent test gates with explicit environment variables.
 
 Verification:
 
