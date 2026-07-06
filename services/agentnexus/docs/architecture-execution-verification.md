@@ -11,20 +11,18 @@ cd E:\xiaozhiclaw\agentnexus\services\agentnexus
 go test ./...
 go test ./tests/e2e/...
 go build ./cmd/gateway-api ./cmd/gateway-agent ./cmd/connector-worker ./cmd/connector-agent
-docker compose -f services\agentnexus\deploy\compose\compose.private-dev.yaml config
+helm template agentnexus .\deploy\helm\agentnexus
 
 cd E:\xiaozhiclaw\agentnexus
+docker compose -f services\agentnexus\deploy\compose\compose.private-dev.yaml config
 npm test --workspace packages/enterprise-gateway-console
 npm run build --workspace packages/enterprise-gateway-console
 ```
 
-## Not Run
+## Tooling
 
-```powershell
-helm template agentnexus .\deploy\helm\agentnexus
-```
-
-The local machine does not currently have `helm` on PATH. The chart files were updated to include `connector-agent`, but Helm rendering still needs to be run in an environment with Helm installed.
+Helm was installed locally with `winget install --id Helm.Helm -e --accept-package-agreements --accept-source-agreements`.
+The verified Helm version is `v4.2.2`.
 
 ## Scan Notes
 
