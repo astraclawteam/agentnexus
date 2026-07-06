@@ -2,8 +2,78 @@ openapi: 3.0.3
 info:
   title: AgentNexus Gateway Agent API
   version: 0.1.0
-  description: Implemented Gateway Agent entrypoints. Agent run, message, and confirmation APIs are tracked for M5 and should be added only with matching handlers.
+  description: Implemented Gateway Agent entrypoints for dry-run planning and durable Agent run state. Model execution remains routed through llmrouter/adk integration work.
 paths:
+  /v1/agent/runs:
+    post:
+      operationId: startAgentRun
+      summary: Start a durable Gateway Agent run.
+      description: Creates a task-backed Agent run and returns the allow-listed internal tools available to the run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentRunStartRequest'
+      responses:
+        '200':
+          description: Agent run started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRunStartResponse'
+        '400':
+          description: Invalid request.
+  /v1/agent/runs/{id}/messages:
+    post:
+      operationId: appendAgentRunMessage
+      summary: Append a message to a Gateway Agent run.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentRunMessageRequest'
+      responses:
+        '200':
+          description: Message step appended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRunMessageResponse'
+        '400':
+          description: Invalid run or message.
+  /v1/agent/runs/{id}/confirmations:
+    post:
+      operationId: requestAgentRunConfirmation
+      summary: Put a Gateway Agent run into waiting confirmation state.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentRunConfirmationRequest'
+      responses:
+        '200':
+          description: Confirmation checkpoint created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRunConfirmationResponse'
+        '400':
+          description: Invalid run or confirmation request.
   /v1/agent/deployments/first-run:plan:
     post:
       operationId: planFirstDeployment
@@ -24,6 +94,106 @@ paths:
                 $ref: '#/components/schemas/DeploymentPlan'
 components:
   schemas:
+    AgentRunStartRequest:
+      type: object
+      required:
+        - enterprise_id
+        - actor_user_id
+        - request_id
+      properties:
+        enterprise_id:
+          type: string
+        actor_user_id:
+          type: string
+        request_id:
+          type: string
+        trace_id:
+          type: string
+        goal:
+          type: string
+    AgentRunStartResponse:
+      type: object
+      required:
+        - agent_run_id
+        - task_run_id
+        - status
+        - tools
+      properties:
+        agent_run_id:
+          type: string
+        task_run_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - running
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentTool'
+    AgentTool:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          enum:
+            - org_import_preview
+            - connector_package_validate
+            - connector_instance_smoke
+            - deployment_first_run_plan
+            - audit_append
+            - confirmation_wait
+        description:
+          type: string
+    AgentRunMessageRequest:
+      type: object
+      required:
+        - enterprise_id
+        - message
+      properties:
+        enterprise_id:
+          type: string
+        message:
+          type: string
+    AgentRunMessageResponse:
+      type: object
+      required:
+        - agent_run_id
+        - step_id
+        - status
+      properties:
+        agent_run_id:
+          type: string
+        step_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - running
+    AgentRunConfirmationRequest:
+      type: object
+      required:
+        - enterprise_id
+        - reason
+      properties:
+        enterprise_id:
+          type: string
+        reason:
+          type: string
+    AgentRunConfirmationResponse:
+      type: object
+      required:
+        - agent_run_id
+        - status
+      properties:
+        agent_run_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - waiting_confirmation
     FirstDeploymentPlanRequest:
       type: object
       properties:
