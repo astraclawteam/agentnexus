@@ -9,6 +9,7 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/authorization"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tasks"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
 )
 
@@ -24,28 +25,31 @@ type RuntimeDataProvider interface {
 }
 
 type AuthorizedRuntimeConfig struct {
-	Authorizer      authorization.Authorizer
-	PolicyEvaluator RuntimePolicyEvaluator
-	TicketService   *tickets.Service
-	AuditSink       audit.Sink
-	DataProvider    RuntimeDataProvider
+	Authorizer       authorization.Authorizer
+	PolicyEvaluator  RuntimePolicyEvaluator
+	TicketService    *tickets.Service
+	AuditSink        audit.Sink
+	DataProvider     RuntimeDataProvider
+	TaskOrchestrator *tasks.Orchestrator
 }
 
 type AuthorizedRuntimeAPI struct {
-	authorizer      authorization.Authorizer
-	policyEvaluator RuntimePolicyEvaluator
-	ticketService   *tickets.Service
-	auditSink       audit.Sink
-	dataProvider    RuntimeDataProvider
+	authorizer       authorization.Authorizer
+	policyEvaluator  RuntimePolicyEvaluator
+	ticketService    *tickets.Service
+	auditSink        audit.Sink
+	dataProvider     RuntimeDataProvider
+	taskOrchestrator *tasks.Orchestrator
 }
 
 func NewAuthorizedRuntimeAPI(cfg AuthorizedRuntimeConfig) *AuthorizedRuntimeAPI {
 	return &AuthorizedRuntimeAPI{
-		authorizer:      cfg.Authorizer,
-		policyEvaluator: cfg.PolicyEvaluator,
-		ticketService:   cfg.TicketService,
-		auditSink:       cfg.AuditSink,
-		dataProvider:    cfg.DataProvider,
+		authorizer:       cfg.Authorizer,
+		policyEvaluator:  cfg.PolicyEvaluator,
+		ticketService:    cfg.TicketService,
+		auditSink:        cfg.AuditSink,
+		dataProvider:     cfg.DataProvider,
+		taskOrchestrator: cfg.TaskOrchestrator,
 	}
 }
 
@@ -70,8 +74,9 @@ func NewDefaultAuthorizedRuntimeAPI() *AuthorizedRuntimeAPI {
 			Decision:     policy.DecisionAllow,
 			RiskLevel:    policy.RiskLow,
 		}}}),
-		TicketService: tickets.NewService(tickets.NewMemoryStore()),
-		AuditSink:     audit.NewHashChainLog(),
+		TicketService:    tickets.NewService(tickets.NewMemoryStore()),
+		AuditSink:        audit.NewHashChainLog(),
+		TaskOrchestrator: tasks.NewOrchestrator(tasks.NewMemoryStore(), nil),
 		DataProvider: StaticRuntimeDataProvider{ReadData: map[string]any{
 			"resource_id": "resource_dev_preview",
 		}},
@@ -83,6 +88,10 @@ func (api *AuthorizedRuntimeAPI) Locate(r *http.Request, req RuntimeLocateReques
 		return RuntimeLocateResponse{}, fmt.Errorf("ticket service is required")
 	}
 	ctx := requestContext(r)
+	taskRunID, err := api.createTaskRun(ctx, req)
+	if err != nil {
+		return RuntimeLocateResponse{}, err
+	}
 	ticket, err := api.ticketService.CreateCaseTicket(tickets.CreateCaseTicketInput{
 		EnterpriseID: req.EnterpriseID,
 		ActorUserID:  req.ActorUserID,
@@ -111,6 +120,7 @@ func (api *AuthorizedRuntimeAPI) Locate(r *http.Request, req RuntimeLocateReques
 	}
 	return RuntimeLocateResponse{
 		CaseTicketID: ticket.ID,
+		TaskRunID:    taskRunID,
 		Resources: []RuntimeLocatedResource{{
 			Resource: RuntimeResourceRef{
 				Type: resourceType,
@@ -119,6 +129,22 @@ func (api *AuthorizedRuntimeAPI) Locate(r *http.Request, req RuntimeLocateReques
 			Summary: "runtime location requires authorization before read or act",
 		}},
 	}, nil
+}
+
+func (api *AuthorizedRuntimeAPI) createTaskRun(ctx context.Context, req RuntimeLocateRequest) (string, error) {
+	if api.taskOrchestrator == nil {
+		return "", nil
+	}
+	run, err := api.taskOrchestrator.CreateTaskRun(ctx, tasks.CreateTaskRunInput{
+		EnterpriseID: req.EnterpriseID,
+		ActorUserID:  req.ActorUserID,
+		RequestID:    req.RequestID,
+		TraceID:      req.TraceID,
+	})
+	if err != nil {
+		return "", err
+	}
+	return run.ID, nil
 }
 
 func (api *AuthorizedRuntimeAPI) Read(r *http.Request, req RuntimeReadRequest) (RuntimeReadResponse, error) {

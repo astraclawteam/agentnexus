@@ -52,6 +52,7 @@ type RuntimeActRequest struct {
 
 type RuntimeLocateResponse struct {
 	CaseTicketID string                   `json:"case_ticket_id"`
+	TaskRunID    string                   `json:"task_run_id,omitempty"`
 	Resources    []RuntimeLocatedResource `json:"resources"`
 }
 
