@@ -277,7 +277,7 @@ p {
 
 .topbar {
   display: grid;
-  grid-template-columns: 240px minmax(320px, 1fr) 34px 34px auto 34px;
+  grid-template-columns: 240px minmax(320px, 1fr) 34px 34px auto auto 34px;
   align-items: center;
   gap: 10px;
 }
@@ -398,6 +398,22 @@ p {
   background: rgba(245, 244, 236, 0.72);
 }
 
+.data-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  justify-self: end;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(200, 160, 0, 0.34);
+  border-radius: 11px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
 .locale-switch button,
 .segmented button {
   border: 0;
@@ -451,6 +467,12 @@ h1 {
   color: var(--muted);
   font-size: 14px;
   line-height: 1.55;
+}
+
+.page-head .source-note {
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 680;
 }
 
 .head-actions {
@@ -896,6 +918,7 @@ h1 {
 
   .company-switcher,
   .topbar .icon-button:nth-of-type(2),
+  .data-source-chip,
   .avatar {
     display: none;
   }

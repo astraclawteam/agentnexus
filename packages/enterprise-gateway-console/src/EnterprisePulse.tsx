@@ -2,6 +2,7 @@ type PulseCopy = {
   enterprise: string;
   privateEnv: string;
   pulse: {
+    brandName: string;
     brandSub: string;
     currentEnterprise: string;
     orgSnapshot: string;
@@ -24,7 +25,7 @@ export function EnterprisePulse({ copy }: { copy: PulseCopy }) {
       <div className="brand">
         <div className="brand-mark" aria-hidden="true" />
         <div>
-          <div className="brand-name">企业网关</div>
+          <div className="brand-name">{copy.pulse.brandName}</div>
           <div className="brand-sub">{copy.pulse.brandSub}</div>
         </div>
       </div>
