@@ -157,9 +157,9 @@ go test ./internal/iam
 
 ### Goal 7: Implement Agent-First Organization Import
 
-- Implement normalized org source structures and provider interfaces.
-- Implement mocked WeCom, Feishu, and DingTalk org source providers.
-- Implement Excel/CSV import, preview, conflict detection, confidence rules, and confirmation checkpoints.
+- Completed normalized org source structures and provider interfaces.
+- Completed mocked WeCom, Feishu, and DingTalk org source providers.
+- Completed Excel/CSV import, preview, conflict detection, confidence rules, and confirmation checkpoints.
 
 Verification:
 
