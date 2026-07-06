@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package agentnexus.tasks.v1;
+
+option go_package = "github.com/astraclawteam/agentnexus/services/agentnexus/api/proto/agentnexus/tasks/v1;tasksv1";
+
+message TaskRun {
+  string id = 1;
+  string enterprise_id = 2;
+  string actor_user_id = 3;
+  string request_id = 4;
+  string trace_id = 5;
+  TaskStatus status = 6;
+  repeated TaskStep steps = 7;
+  repeated Checkpoint checkpoints = 8;
+}
+
+message TaskStep {
+  string id = 1;
+  string task_run_id = 2;
+  string name = 3;
+  TaskStatus status = 4;
+  string input_hash = 5;
+  string output_hash = 6;
+}
+
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_QUEUED = 1;
+  TASK_STATUS_RUNNING = 2;
+  TASK_STATUS_WAITING_CONFIRMATION = 3;
+  TASK_STATUS_SUCCEEDED = 4;
+  TASK_STATUS_FAILED = 5;
+  TASK_STATUS_CANCELLED = 6;
+}
+
+message Checkpoint {
+  string id = 1;
+  string task_run_id = 2;
+  string task_step_id = 3;
+  string reason = 4;
+  CheckpointStatus status = 5;
+}
+
+enum CheckpointStatus {
+  CHECKPOINT_STATUS_UNSPECIFIED = 0;
+  CHECKPOINT_STATUS_WAITING = 1;
+  CHECKPOINT_STATUS_APPROVED = 2;
+  CHECKPOINT_STATUS_DENIED = 3;
+  CHECKPOINT_STATUS_NARROWED = 4;
+  CHECKPOINT_STATUS_INSTRUCTED = 5;
+}

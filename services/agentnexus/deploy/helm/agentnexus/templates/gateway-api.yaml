@@ -1,0 +1,59 @@
+{{- if .Values.services.gatewayApi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-gateway-api
+  labels:
+    app.kubernetes.io/name: agentnexus
+    app.kubernetes.io/component: gateway-api
+spec:
+  replicas: {{ .Values.services.gatewayApi.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentnexus
+      app.kubernetes.io/component: gateway-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentnexus
+        app.kubernetes.io/component: gateway-api
+    spec:
+      containers:
+        - name: gateway-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["{{ .Values.services.gatewayApi.command }}"]
+          env:
+            - name: AGENTNEXUS_ENV
+              value: "{{ .Values.runtime.env }}"
+            - name: AGENTNEXUS_PROFILE
+              value: "{{ .Values.runtime.profile }}"
+            - name: AGENTNEXUS_VERSION
+              value: "{{ .Values.runtime.version }}"
+            - name: AGENTNEXUS_POSTGRES_DSN
+              value: "{{ .Values.dependencies.postgres.dsn }}"
+            - name: AGENTNEXUS_NATS_URL
+              value: "{{ .Values.dependencies.nats.url }}"
+            - name: AGENTNEXUS_OBJECT_STORAGE_ENDPOINT
+              value: "{{ .Values.dependencies.objectStorage.endpoint }}"
+            - name: AGENTNEXUS_SECRET_PROVIDER
+              value: "{{ .Values.dependencies.secretProvider.mode }}"
+          ports:
+            - containerPort: {{ .Values.services.gatewayApi.port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-gateway-api
+  labels:
+    app.kubernetes.io/name: agentnexus
+    app.kubernetes.io/component: gateway-api
+spec:
+  selector:
+    app.kubernetes.io/name: agentnexus
+    app.kubernetes.io/component: gateway-api
+  ports:
+    - name: http
+      port: {{ .Values.services.gatewayApi.port }}
+      targetPort: {{ .Values.services.gatewayApi.port }}
+{{- end }}

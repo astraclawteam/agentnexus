@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package agentnexus.connectors.v1;
+
+option go_package = "github.com/astraclawteam/agentnexus/services/agentnexus/api/proto/agentnexus/connectors/v1;connectorsv1";
+
+message ExecuteConnectorRequest {
+  string enterprise_id = 1;
+  string actor_user_id = 2;
+  string request_id = 3;
+  string trace_id = 4;
+  string connector_instance_id = 5;
+  string resource_name = 6;
+  string action = 7;
+  string step_grant_id = 8;
+  CredentialRef credential_ref = 9;
+  bytes input_json = 10;
+}
+
+message ConnectorResult {
+  string connector_instance_id = 1;
+  string resource_name = 2;
+  string action = 3;
+  ConnectorStatus status = 4;
+  bytes output_json = 5;
+  string output_hash = 6;
+  string audit_context_json = 7;
+}
+
+enum ConnectorStatus {
+  CONNECTOR_STATUS_UNSPECIFIED = 0;
+  CONNECTOR_STATUS_SUCCEEDED = 1;
+  CONNECTOR_STATUS_DENIED = 2;
+  CONNECTOR_STATUS_FAILED = 3;
+  CONNECTOR_STATUS_WAITING_EXTERNAL_RECEIPT = 4;
+}
+
+message CredentialRef {
+  string provider = 1;
+  string ref = 2;
+  string version = 3;
+}

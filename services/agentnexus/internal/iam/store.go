@@ -1,0 +1,306 @@
+package iam
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+var ErrNotFound = errors.New("iam record not found")
+
+type Store interface {
+	CreateEnterprise(context.Context, Enterprise) (Enterprise, error)
+	UpsertEnterpriseUser(context.Context, EnterpriseUser) (EnterpriseUser, error)
+	BindExternalIdentity(context.Context, ExternalIdentity) (ExternalIdentity, error)
+	UpsertOrgUnit(context.Context, OrgUnit) (OrgUnit, error)
+	AddOrgMembership(context.Context, OrgMembership) (OrgMembership, error)
+	CreateOrgEvent(context.Context, OrgEvent) (OrgEvent, error)
+	CreateOrgVersion(context.Context, OrgVersion) (OrgVersion, error)
+}
+
+type MemoryStore struct {
+	mu                 sync.Mutex
+	enterprises        map[string]Enterprise
+	users              map[string]EnterpriseUser
+	identities         map[string]ExternalIdentity
+	identityByExternal map[string]string
+	orgUnits           map[string]OrgUnit
+	memberships        map[string]OrgMembership
+	orgEvents          map[string]OrgEvent
+	orgVersions        map[string]OrgVersion
+	now                func() time.Time
+}
+
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{
+		enterprises:        map[string]Enterprise{},
+		users:              map[string]EnterpriseUser{},
+		identities:         map[string]ExternalIdentity{},
+		identityByExternal: map[string]string{},
+		orgUnits:           map[string]OrgUnit{},
+		memberships:        map[string]OrgMembership{},
+		orgEvents:          map[string]OrgEvent{},
+		orgVersions:        map[string]OrgVersion{},
+		now:                time.Now,
+	}
+}
+
+func (s *MemoryStore) CreateEnterprise(_ context.Context, enterprise Enterprise) (Enterprise, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.enterprises[enterprise.ID]; ok {
+		return existing, nil
+	}
+	enterprise.CreatedAt = s.now().UTC()
+	s.enterprises[enterprise.ID] = enterprise
+	return enterprise, nil
+}
+
+func (s *MemoryStore) UpsertEnterpriseUser(_ context.Context, user EnterpriseUser) (EnterpriseUser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.users[key(user.EnterpriseID, user.ID)]; ok {
+		user.CreatedAt = existing.CreatedAt
+	} else {
+		user.CreatedAt = s.now().UTC()
+	}
+	s.users[key(user.EnterpriseID, user.ID)] = user
+	return user, nil
+}
+
+func (s *MemoryStore) BindExternalIdentity(_ context.Context, identity ExternalIdentity) (ExternalIdentity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	externalKey := key(identity.EnterpriseID, identity.Provider+":"+identity.ExternalSubject)
+	if existingID, ok := s.identityByExternal[externalKey]; ok {
+		existing := s.identities[existingID]
+		identity.ID = existing.ID
+		identity.CreatedAt = existing.CreatedAt
+	} else {
+		identity.CreatedAt = s.now().UTC()
+	}
+	s.identities[identity.ID] = identity
+	s.identityByExternal[externalKey] = identity.ID
+	return identity, nil
+}
+
+func (s *MemoryStore) UpsertOrgUnit(_ context.Context, unit OrgUnit) (OrgUnit, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.orgUnits[key(unit.EnterpriseID, unit.ID)]; ok {
+		unit.CreatedAt = existing.CreatedAt
+	} else {
+		unit.CreatedAt = s.now().UTC()
+	}
+	s.orgUnits[key(unit.EnterpriseID, unit.ID)] = unit
+	return unit, nil
+}
+
+func (s *MemoryStore) AddOrgMembership(_ context.Context, membership OrgMembership) (OrgMembership, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	membership.CreatedAt = s.now().UTC()
+	s.memberships[key(membership.EnterpriseID, membership.EnterpriseUserID+":"+membership.OrgUnitID+":"+string(membership.Role))] = membership
+	return membership, nil
+}
+
+func (s *MemoryStore) CreateOrgEvent(_ context.Context, event OrgEvent) (OrgEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	event.CreatedAt = s.now().UTC()
+	s.orgEvents[key(event.EnterpriseID, event.ID)] = event
+	return event, nil
+}
+
+func (s *MemoryStore) CreateOrgVersion(_ context.Context, version OrgVersion) (OrgVersion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	version.CreatedAt = s.now().UTC()
+	s.orgVersions[key(version.EnterpriseID, version.ID)] = version
+	return version, nil
+}
+
+type PostgresStore struct {
+	pool *pgxpool.Pool
+}
+
+func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
+	return &PostgresStore{pool: pool}
+}
+
+func (s *PostgresStore) CreateEnterprise(ctx context.Context, enterprise Enterprise) (Enterprise, error) {
+	row := s.pool.QueryRow(ctx, `
+INSERT INTO enterprises (id, name)
+VALUES ($1, $2)
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+RETURNING id, name, created_at`, enterprise.ID, enterprise.Name)
+	return scanEnterprise(row)
+}
+
+func (s *PostgresStore) UpsertEnterpriseUser(ctx context.Context, user EnterpriseUser) (EnterpriseUser, error) {
+	row := s.pool.QueryRow(ctx, `
+INSERT INTO enterprise_users (id, enterprise_id, display_name, email, phone)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (id) DO UPDATE
+SET display_name = EXCLUDED.display_name, email = EXCLUDED.email, phone = EXCLUDED.phone
+RETURNING id, enterprise_id, display_name, email, phone, created_at`,
+		user.ID, user.EnterpriseID, user.DisplayName, nullText(user.Email), nullText(user.Phone))
+	return scanEnterpriseUser(row)
+}
+
+func (s *PostgresStore) BindExternalIdentity(ctx context.Context, identity ExternalIdentity) (ExternalIdentity, error) {
+	row := s.pool.QueryRow(ctx, `
+INSERT INTO external_identities (id, enterprise_id, enterprise_user_id, provider, external_subject)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (enterprise_id, provider, external_subject) DO UPDATE
+SET enterprise_user_id = EXCLUDED.enterprise_user_id
+RETURNING id, enterprise_id, enterprise_user_id, provider, external_subject, created_at`,
+		identity.ID, identity.EnterpriseID, identity.EnterpriseUserID, identity.Provider, identity.ExternalSubject)
+	return scanExternalIdentity(row)
+}
+
+func (s *PostgresStore) UpsertOrgUnit(ctx context.Context, unit OrgUnit) (OrgUnit, error) {
+	row := s.pool.QueryRow(ctx, `
+INSERT INTO org_units (id, enterprise_id, parent_id, name, unit_type)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (id) DO UPDATE
+SET parent_id = EXCLUDED.parent_id, name = EXCLUDED.name, unit_type = EXCLUDED.unit_type
+RETURNING id, enterprise_id, parent_id, name, unit_type, created_at`,
+		unit.ID, unit.EnterpriseID, nullText(unit.ParentID), unit.Name, unit.UnitType)
+	return scanOrgUnit(row)
+}
+
+func (s *PostgresStore) AddOrgMembership(ctx context.Context, membership OrgMembership) (OrgMembership, error) {
+	row := s.pool.QueryRow(ctx, `
+INSERT INTO org_memberships (enterprise_id, enterprise_user_id, org_unit_id, role)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (enterprise_id, enterprise_user_id, org_unit_id, role) DO UPDATE
+SET role = EXCLUDED.role
+RETURNING enterprise_id, enterprise_user_id, org_unit_id, role, created_at`,
+		membership.EnterpriseID, membership.EnterpriseUserID, membership.OrgUnitID, membership.Role)
+	return scanOrgMembership(row)
+}
+
+func (s *PostgresStore) CreateOrgEvent(ctx context.Context, event OrgEvent) (OrgEvent, error) {
+	row := s.pool.QueryRow(ctx, `
+INSERT INTO org_events (id, enterprise_id, event_type, source_hash)
+VALUES ($1, $2, $3, $4)
+RETURNING id, enterprise_id, event_type, source_hash, created_at`,
+		event.ID, event.EnterpriseID, event.EventType, nullText(event.SourceHash))
+	return scanOrgEvent(row)
+}
+
+func (s *PostgresStore) CreateOrgVersion(ctx context.Context, version OrgVersion) (OrgVersion, error) {
+	row := s.pool.QueryRow(ctx, `
+INSERT INTO org_versions (id, enterprise_id, version_number, source_event_id)
+VALUES ($1, $2, $3, $4)
+RETURNING id, enterprise_id, version_number, source_event_id, created_at`,
+		version.ID, version.EnterpriseID, version.VersionNumber, nullText(version.SourceEventID))
+	return scanOrgVersion(row)
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanEnterprise(row rowScanner) (Enterprise, error) {
+	var enterprise Enterprise
+	if err := row.Scan(&enterprise.ID, &enterprise.Name, &enterprise.CreatedAt); err != nil {
+		return Enterprise{}, mapNotFound(err)
+	}
+	return enterprise, nil
+}
+
+func scanEnterpriseUser(row rowScanner) (EnterpriseUser, error) {
+	var user EnterpriseUser
+	var email, phone pgtype.Text
+	if err := row.Scan(&user.ID, &user.EnterpriseID, &user.DisplayName, &email, &phone, &user.CreatedAt); err != nil {
+		return EnterpriseUser{}, mapNotFound(err)
+	}
+	user.Email = textValue(email)
+	user.Phone = textValue(phone)
+	return user, nil
+}
+
+func scanExternalIdentity(row rowScanner) (ExternalIdentity, error) {
+	var identity ExternalIdentity
+	if err := row.Scan(&identity.ID, &identity.EnterpriseID, &identity.EnterpriseUserID, &identity.Provider, &identity.ExternalSubject, &identity.CreatedAt); err != nil {
+		return ExternalIdentity{}, mapNotFound(err)
+	}
+	return identity, nil
+}
+
+func scanOrgUnit(row rowScanner) (OrgUnit, error) {
+	var unit OrgUnit
+	var parentID pgtype.Text
+	if err := row.Scan(&unit.ID, &unit.EnterpriseID, &parentID, &unit.Name, &unit.UnitType, &unit.CreatedAt); err != nil {
+		return OrgUnit{}, mapNotFound(err)
+	}
+	unit.ParentID = textValue(parentID)
+	return unit, nil
+}
+
+func scanOrgMembership(row rowScanner) (OrgMembership, error) {
+	var membership OrgMembership
+	if err := row.Scan(&membership.EnterpriseID, &membership.EnterpriseUserID, &membership.OrgUnitID, &membership.Role, &membership.CreatedAt); err != nil {
+		return OrgMembership{}, mapNotFound(err)
+	}
+	return membership, nil
+}
+
+func scanOrgEvent(row rowScanner) (OrgEvent, error) {
+	var event OrgEvent
+	var sourceHash pgtype.Text
+	if err := row.Scan(&event.ID, &event.EnterpriseID, &event.EventType, &sourceHash, &event.CreatedAt); err != nil {
+		return OrgEvent{}, mapNotFound(err)
+	}
+	event.SourceHash = textValue(sourceHash)
+	return event, nil
+}
+
+func scanOrgVersion(row rowScanner) (OrgVersion, error) {
+	var version OrgVersion
+	var sourceEventID pgtype.Text
+	if err := row.Scan(&version.ID, &version.EnterpriseID, &version.VersionNumber, &sourceEventID, &version.CreatedAt); err != nil {
+		return OrgVersion{}, mapNotFound(err)
+	}
+	version.SourceEventID = textValue(sourceEventID)
+	return version, nil
+}
+
+func mapNotFound(err error) error {
+	if err == pgx.ErrNoRows {
+		return ErrNotFound
+	}
+	return err
+}
+
+func textValue(value pgtype.Text) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.String
+}
+
+func nullText(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func key(enterpriseID, id string) string {
+	return enterpriseID + ":" + id
+}

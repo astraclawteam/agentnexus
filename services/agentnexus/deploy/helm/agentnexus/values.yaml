@@ -1,0 +1,49 @@
+image:
+  repository: ghcr.io/astraclawteam/agentnexus
+  tag: 0.1.0-dev
+  pullPolicy: IfNotPresent
+
+runtime:
+  env: dev
+  profile: private-dev
+  version: 0.1.0-dev
+
+services:
+  gatewayApi:
+    enabled: true
+    replicas: 1
+    port: 8080
+    command: /app/gateway-api
+  gatewayAgent:
+    enabled: true
+    replicas: 1
+    command: /app/gateway-agent
+  connectorWorker:
+    enabled: true
+    replicas: 1
+    command: /app/connector-worker
+
+dependencies:
+  postgres:
+    enabled: true
+    external: false
+    image: postgres:16-alpine
+    database: agentnexus
+    username: agentnexus
+    password: agentnexus
+    dsn: postgres://agentnexus:agentnexus@agentnexus-postgres:5432/agentnexus?sslmode=disable
+  nats:
+    enabled: true
+    external: false
+    image: nats:2.10-alpine
+    url: nats://agentnexus-nats:4222
+  objectStorage:
+    enabled: true
+    external: false
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    endpoint: http://agentnexus-object-storage:9000
+    rootUser: agentnexus
+    rootPassword: agentnexus-dev-secret
+  secretProvider:
+    external: false
+    mode: local-dev
