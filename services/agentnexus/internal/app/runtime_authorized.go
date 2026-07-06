@@ -426,7 +426,7 @@ func (api *AuthorizedRuntimeAPI) hasActiveCaseTicket(enterpriseID, caseTicketID 
 	if err != nil {
 		return false
 	}
-	return ticket.Status == tickets.TicketStatusActive
+	return api.ticketService.IsTicketActive(ticket)
 }
 
 func (api *AuthorizedRuntimeAPI) appendDecisionAndGrantAudit(ctx context.Context, risk int, envelope RequestEnvelope, caseTicketID, stepGrantID string, resource RuntimeResourceRef, action string, result policy.Result) error {
@@ -458,15 +458,10 @@ func (api *AuthorizedRuntimeAPI) appendDecisionAndGrantAudit(ctx context.Context
 
 func (api *AuthorizedRuntimeAPI) appendAudit(ctx context.Context, risk int, input audit.EventInput) error {
 	if api.auditSink == nil {
-		if risk == policy.RiskHigh {
-			return fmt.Errorf("audit sink is required for high-risk runtime action")
-		}
-		return nil
+		return fmt.Errorf("audit sink is required for runtime action")
 	}
 	if _, err := api.auditSink.Append(ctx, input); err != nil {
-		if risk == policy.RiskHigh {
-			return fmt.Errorf("audit append failed for high-risk runtime action: %w", err)
-		}
+		return fmt.Errorf("audit append failed for runtime action: %w", err)
 	}
 	return nil
 }

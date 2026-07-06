@@ -99,3 +99,7 @@ func (s *Service) CreateCaseTicket(input CreateCaseTicketInput) (CaseTicket, err
 	}
 	return s.store.CreateCaseTicket(ticket)
 }
+
+func (s *Service) IsTicketActive(ticket CaseTicket) bool {
+	return ticket.Status == TicketStatusActive && s.now().Before(ticket.ExpiresAt)
+}

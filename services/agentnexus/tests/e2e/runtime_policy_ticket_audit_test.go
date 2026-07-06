@@ -166,6 +166,92 @@ func TestRuntimeHighRiskAuditFailClosed(t *testing.T) {
 	}
 }
 
+func TestRuntimeAuditFailureAlwaysFailClosed(t *testing.T) {
+	checker := authorization.NewInMemoryRelationshipChecker()
+	writeRuntimeRelation(t, context.Background(), checker, "user_ada", authorization.RelationViewer, "knowledge_space", "ks_legal")
+	ticketService := tickets.NewService(tickets.NewMemoryStore(), tickets.WithIDGenerator(sequenceIDs("case_ticket_1", "grant_ignored")))
+	if _, err := ticketService.CreateCaseTicket(tickets.CreateCaseTicketInput{
+		EnterpriseID: "ent_1",
+		ActorUserID:  "user_ada",
+		RequestID:    "req_locate",
+		TTL:          30 * time.Minute,
+	}); err != nil {
+		t.Fatalf("CreateCaseTicket returned error: %v", err)
+	}
+
+	runtime := app.NewAuthorizedRuntimeAPI(app.AuthorizedRuntimeConfig{
+		Authorizer: authorization.NewAuthorizer(checker),
+		PolicyEvaluator: policy.NewEvaluator(policy.Policy{Rules: []policy.Rule{{
+			ResourceType: "knowledge_space",
+			Action:       "read",
+			Decision:     policy.DecisionAllow,
+			RiskLevel:    policy.RiskLow,
+		}}}),
+		TicketService: ticketService,
+		AuditSink:     failingAuditSink{err: errors.New("audit unavailable")},
+		DataProvider:  app.StaticRuntimeDataProvider{ReadData: map[string]any{"title": "Legal Contract"}},
+	})
+
+	resp, err := runtime.Read(nil, app.RuntimeReadRequest{
+		RequestEnvelope: app.RequestEnvelope{EnterpriseID: "ent_1", ActorUserID: "user_ada", RequestID: "req_read"},
+		CaseTicketID:    "case_ticket_1",
+		Resource:        app.RuntimeResourceRef{Type: "knowledge_space", ID: "ks_legal"},
+		Fields:          []string{"title"},
+	})
+	if err == nil {
+		t.Fatal("Read returned nil error when audit append failed")
+	}
+	if resp.Decision != string(policy.DecisionDeny) || resp.Data != nil {
+		t.Fatalf("fail-closed response = %+v, want deny without data", resp)
+	}
+}
+
+func TestRuntimeRejectsExpiredCaseTicket(t *testing.T) {
+	checker := authorization.NewInMemoryRelationshipChecker()
+	writeRuntimeRelation(t, context.Background(), checker, "user_ada", authorization.RelationViewer, "knowledge_space", "ks_legal")
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	ticketService := tickets.NewService(
+		tickets.NewMemoryStore(),
+		tickets.WithClock(func() time.Time { return now }),
+		tickets.WithIDGenerator(sequenceIDs("case_ticket_1")),
+	)
+	if _, err := ticketService.CreateCaseTicket(tickets.CreateCaseTicketInput{
+		EnterpriseID: "ent_1",
+		ActorUserID:  "user_ada",
+		RequestID:    "req_locate",
+		TTL:          time.Minute,
+	}); err != nil {
+		t.Fatalf("CreateCaseTicket returned error: %v", err)
+	}
+	now = now.Add(2 * time.Minute)
+
+	runtime := app.NewAuthorizedRuntimeAPI(app.AuthorizedRuntimeConfig{
+		Authorizer: authorization.NewAuthorizer(checker),
+		PolicyEvaluator: policy.NewEvaluator(policy.Policy{Rules: []policy.Rule{{
+			ResourceType: "knowledge_space",
+			Action:       "read",
+			Decision:     policy.DecisionAllow,
+			RiskLevel:    policy.RiskLow,
+		}}}),
+		TicketService: ticketService,
+		AuditSink:     audit.NewHashChainLog(),
+		DataProvider:  app.StaticRuntimeDataProvider{ReadData: map[string]any{"title": "Legal Contract"}},
+	})
+
+	resp, err := runtime.Read(nil, app.RuntimeReadRequest{
+		RequestEnvelope: app.RequestEnvelope{EnterpriseID: "ent_1", ActorUserID: "user_ada", RequestID: "req_read"},
+		CaseTicketID:    "case_ticket_1",
+		Resource:        app.RuntimeResourceRef{Type: "knowledge_space", ID: "ks_legal"},
+		Fields:          []string{"title"},
+	})
+	if err != nil {
+		t.Fatalf("Read returned error: %v", err)
+	}
+	if resp.Decision != string(policy.DecisionDeny) || resp.Data != nil {
+		t.Fatalf("expired ticket response = %+v, want deny without data", resp)
+	}
+}
+
 func TestRuntimeRejectsUnknownCaseTicket(t *testing.T) {
 	checker := authorization.NewInMemoryRelationshipChecker()
 	writeRuntimeRelation(t, context.Background(), checker, "user_ada", authorization.RelationViewer, "knowledge_space", "ks_legal")
