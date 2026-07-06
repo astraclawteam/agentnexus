@@ -72,7 +72,7 @@ Packages under `services/agentnexus/internal/*` are private implementation detai
 Verification:
 
 ```powershell
-Select-String -Path 'docs/plans/2026-07-06-agentnexus-open-core-implementation-plan.md' -Pattern '鏈喅绛東鏈敹鏁泑寰呮媿鏉?
+Select-String -Path '<architecture-spec.md>' -Pattern '未决策|未收敛|待拍板'
 ```
 
 Expected: no matches.
