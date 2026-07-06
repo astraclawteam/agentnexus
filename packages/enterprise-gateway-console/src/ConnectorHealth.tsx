@@ -1,19 +1,37 @@
-const connectors = ["File storage", "Knowledge base", "CRM readonly"];
+import { Button } from "@agentnexus/claw-runtime-ui";
 
-export function ConnectorHealth() {
+type ConnectorCopy = {
+  title: string;
+  desc: string;
+  smoke: string;
+  rows: string[][];
+};
+
+export function ConnectorHealth({ copy }: { copy: ConnectorCopy }) {
   return (
     <section className="panel health">
-      <div className="panel-head">
-        <h2>Connector Health</h2>
-        <span>3 online</span>
-      </div>
-      {connectors.map((connector) => (
-        <div className="health-row" key={connector}>
-          <span className="dot" />
-          <span>{connector}</span>
-          <strong>healthy</strong>
+      <div className="panel-header">
+        <div>
+          <h2>{copy.title}</h2>
+          <p>{copy.desc}</p>
         </div>
-      ))}
+        <Button className="ghost-button small" type="button" variant="ghost">
+          <span className="icon icon-play" aria-hidden="true" />
+          {copy.smoke}
+        </Button>
+      </div>
+      <div className="connector-list">
+        {copy.rows.map(([title, subtitle, status, tone], index) => (
+          <div className="connector-item" key={title}>
+            <span className={`connector-mark connector-${index}`} aria-hidden="true" />
+            <div>
+              <div className="connector-title">{title}</div>
+              <div className="connector-sub">{subtitle}</div>
+            </div>
+            <strong className={`health-state ${tone}`}>{status}</strong>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

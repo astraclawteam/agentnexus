@@ -1,36 +1,42 @@
-const rows = [
-  ["TCK-1042", "Legal knowledge", "need_external_receipt"],
-  ["TCK-1041", "Finance files", "allow_with_masking"],
-  ["TCK-1040", "CRM account", "deny"]
-];
+import { Button } from "@agentnexus/claw-runtime-ui";
 
-export function AccessTicketsTable() {
+type TicketsCopy = {
+  title: string;
+  desc: string;
+  filter: string;
+  columns: string[];
+  rows: string[][];
+};
+
+export function AccessTicketsTable({ copy }: { copy: TicketsCopy }) {
   return (
     <section className="panel tickets">
-      <div className="panel-head">
-        <h2>Access Tickets</h2>
-        <span>live</span>
+      <div className="panel-header">
+        <div>
+          <h2>{copy.title}</h2>
+          <p>{copy.desc}</p>
+        </div>
+        <Button className="ghost-button small" type="button" variant="ghost">
+          <span className="icon icon-filter" aria-hidden="true" />
+          {copy.filter}
+        </Button>
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Ticket</th>
-            <th>Resource</th>
-            <th>Decision</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(([ticket, resource, decision]) => (
-            <tr key={ticket}>
-              <td>{ticket}</td>
-              <td>{resource}</td>
-              <td>
-                <span className="status">{decision}</span>
-              </td>
-            </tr>
+      <div className="ticket-table">
+        <div className="table-head">
+          {copy.columns.map((column) => (
+            <span key={column}>{column}</span>
           ))}
-        </tbody>
-      </table>
+        </div>
+        {copy.rows.map(([ticket, employee, intent, resource, decision, tone]) => (
+          <div className="ticket-row" key={ticket}>
+            <span className="ticket-id">{ticket}</span>
+            <span>{employee}</span>
+            <span>{intent}</span>
+            <span>{resource}</span>
+            <span className={`status-chip ${tone}`}>{decision}</span>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

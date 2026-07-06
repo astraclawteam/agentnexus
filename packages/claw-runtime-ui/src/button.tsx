@@ -3,9 +3,11 @@ import "./tokens.css";
 
 type ButtonProps = PropsWithChildren<ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "ghost" }>;
 
-export function Button({ children, variant = "primary", ...props }: ButtonProps) {
+export function Button({ children, className, variant = "primary", ...props }: ButtonProps) {
+  const classes = ["an-button", `an-button-${variant}`, className].filter(Boolean).join(" ");
+
   return (
-    <button className={`an-button an-button-${variant}`} {...props}>
+    <button className={classes} {...props}>
       {children}
     </button>
   );
