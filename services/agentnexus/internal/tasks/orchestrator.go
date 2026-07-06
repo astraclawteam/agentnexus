@@ -132,7 +132,7 @@ func (o *Orchestrator) WaitForConfirmation(ctx context.Context, input WaitForCon
 		ID:           o.newID(),
 		EnterpriseID: input.EnterpriseID,
 		TaskRunID:    input.TaskRunID,
-		Status:       "pending",
+		Status:       ConfirmationStatusPending,
 		Reason:       input.Reason,
 	})
 	if err != nil {

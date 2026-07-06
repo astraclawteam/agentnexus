@@ -38,6 +38,10 @@ spec:
               value: "{{ .Values.dependencies.objectStorage.endpoint }}"
             - name: AGENTNEXUS_SECRET_PROVIDER
               value: "{{ .Values.dependencies.secretProvider.mode }}"
+            - name: LLMROUTER_BASE_URL
+              value: "{{ .Values.llmrouter.baseURL }}"
+            - name: LLMROUTER_MODEL
+              value: "{{ .Values.llmrouter.model }}"
           ports:
             - containerPort: {{ .Values.services.gatewayApi.port }}
 ---

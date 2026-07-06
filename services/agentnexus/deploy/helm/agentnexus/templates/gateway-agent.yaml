@@ -36,4 +36,28 @@ spec:
               value: "{{ .Values.dependencies.nats.url }}"
             - name: AGENTNEXUS_SECRET_PROVIDER
               value: "{{ .Values.dependencies.secretProvider.mode }}"
+            - name: AGENTNEXUS_HTTP_ADDR
+              value: ":{{ .Values.services.gatewayAgent.port }}"
+            - name: LLMROUTER_BASE_URL
+              value: "{{ .Values.llmrouter.baseURL }}"
+            - name: LLMROUTER_MODEL
+              value: "{{ .Values.llmrouter.model }}"
+          ports:
+            - containerPort: {{ .Values.services.gatewayAgent.port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-gateway-agent
+  labels:
+    app.kubernetes.io/name: agentnexus
+    app.kubernetes.io/component: gateway-agent
+spec:
+  selector:
+    app.kubernetes.io/name: agentnexus
+    app.kubernetes.io/component: gateway-agent
+  ports:
+    - name: http
+      port: {{ .Values.services.gatewayAgent.port }}
+      targetPort: {{ .Values.services.gatewayAgent.port }}
 {{- end }}

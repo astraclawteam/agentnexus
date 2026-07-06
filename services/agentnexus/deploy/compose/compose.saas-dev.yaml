@@ -17,6 +17,8 @@ x-agentnexus-service: &agentnexus-service
     AGENTNEXUS_OBJECT_STORAGE_ENDPOINT: http://object-storage:9000
     AGENTNEXUS_SECRET_PROVIDER: local-dev
     AGENTNEXUS_SECRET_PROVIDER_EXTERNAL: "false"
+    LLMROUTER_BASE_URL: "${LLMROUTER_BASE_URL:-}"
+    LLMROUTER_MODEL: "${LLMROUTER_MODEL:-agentnexus-dev}"
   depends_on:
     postgres:
       condition: service_healthy

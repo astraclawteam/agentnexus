@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -39,13 +38,8 @@ func TestPostgresCore(t *testing.T) {
 	}
 	defer pool.Close()
 
-	migration, err := os.ReadFile("../../db/migrations/000001_init_core.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	upSQL := extractGooseUpMigration(string(migration))
-	if _, err := pool.Exec(ctx, upSQL); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	if err := storage.ApplyEmbeddedMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply embedded migrations: %v", err)
 	}
 
 	if _, err := pool.Exec(ctx, `INSERT INTO enterprises (id, name) VALUES ($1, $2)`, "ent_test", "Test Enterprise"); err != nil {
@@ -70,16 +64,8 @@ func TestPostgresCore(t *testing.T) {
 	if userName != "Test User" {
 		t.Fatalf("user name = %q, want %q", userName, "Test User")
 	}
-}
 
-func extractGooseUpMigration(migration string) string {
-	start := strings.Index(migration, "-- +goose Up")
-	end := strings.Index(migration, "-- +goose Down")
-	if start == -1 {
-		return migration
+	if _, err := pool.Exec(ctx, `INSERT INTO audit_hash_heads (enterprise_id, event_hash) VALUES ($1, $2)`, "ent_test", "sha256:test"); err != nil {
+		t.Fatalf("insert audit hash head: %v", err)
 	}
-	if end == -1 {
-		return migration[start:]
-	}
-	return migration[start:end]
 }

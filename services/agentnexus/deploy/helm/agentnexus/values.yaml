@@ -17,6 +17,7 @@ services:
   gatewayAgent:
     enabled: true
     replicas: 1
+    port: 8081
     command: /app/gateway-agent
   connectorWorker:
     enabled: true
@@ -47,3 +48,8 @@ dependencies:
   secretProvider:
     external: false
     mode: local-dev
+
+llmrouter:
+  baseURL: ""
+  model: agentnexus-dev
+  apiKeySecretRef: ""

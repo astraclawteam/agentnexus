@@ -21,6 +21,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RuntimeLocateResponse'
+        '400':
+          description: Missing or invalid request envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /v1/runtime/read:
     post:
       operationId: readRuntimeResource
@@ -38,6 +44,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RuntimeReadResponse'
+        '400':
+          description: Missing or invalid request envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /v1/runtime/act:
     post:
       operationId: actOnRuntimeResource
@@ -55,6 +67,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RuntimeActResponse'
+        '400':
+          description: Missing or invalid request envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /v1/runtime/tickets/{id}:
     get:
       operationId: getRuntimeTicket
@@ -222,3 +240,10 @@ components:
         - deny
         - need_external_receipt
         - allow_with_masking
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string

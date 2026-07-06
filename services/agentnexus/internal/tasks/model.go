@@ -17,6 +17,12 @@ const (
 )
 
 const (
+	ConfirmationStatusPending  = "pending"
+	ConfirmationStatusApproved = "approved"
+	ConfirmationStatusRejected = "rejected"
+)
+
+const (
 	SubjectTaskCreated   = "agentnexus.tasks.created"
 	SubjectTaskStep      = "agentnexus.tasks.step"
 	SubjectTaskCompleted = "agentnexus.tasks.completed"
