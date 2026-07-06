@@ -145,9 +145,9 @@ go test ./internal/tasks
 
 ### Goal 6: Implement IAM, Org Graph, And OpenFGA Checks
 
-- Implement enterprise, user, external identity, org unit, membership, and org version logic.
-- Define OpenFGA relationship model and checks.
-- Add unit tests and env-gated OpenFGA integration tests.
+- Completed enterprise, user, external identity, org unit, membership, and org version logic.
+- Completed OpenFGA relationship model and checks.
+- Completed unit tests and env-gated OpenFGA integration tests.
 
 Verification:
 
