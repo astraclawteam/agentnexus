@@ -48,6 +48,10 @@ paths:
           description: Invalid request or snapshot hash mismatch.
         '409':
           description: Import conflicts require human confirmation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgImportConfirmationRequiredResponse'
   /api/org/graph:
     get:
       operationId: getOrgGraph
@@ -176,6 +180,28 @@ components:
           type: integer
         requires_confirmation:
           type: boolean
+    OrgImportConfirmationRequiredResponse:
+      type: object
+      required:
+        - error
+        - requires_confirmation
+        - confirmation_reason
+        - conflicts
+      properties:
+        error:
+          type: string
+          enum:
+            - org import confirmation required
+        requires_confirmation:
+          type: boolean
+          enum:
+            - true
+        confirmation_reason:
+          type: string
+        conflicts:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrgImportConflict'
     OrgSnapshot:
       type: object
       properties:

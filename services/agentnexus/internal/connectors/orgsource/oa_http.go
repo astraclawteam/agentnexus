@@ -11,6 +11,7 @@ import (
 )
 
 const oaHTTPProviderName = "oa_http"
+const oaHTTPMaxPages = 100
 
 type OAHTTPConfig struct {
 	BaseURL         string
@@ -74,13 +75,38 @@ func (p oaHTTPProvider) Fetch(ctx context.Context) (Snapshot, error) {
 }
 
 func (p oaHTTPProvider) fetchSnapshotPayload(ctx context.Context, endpointPath string) (Snapshot, error) {
+	var snapshot Snapshot
+	nextPath := endpointPath
+	visited := map[string]struct{}{}
+	for page := 0; nextPath != ""; page++ {
+		if page >= oaHTTPMaxPages {
+			return Snapshot{}, fmt.Errorf("oa_http %s exceeded max page count %d", endpointPath, oaHTTPMaxPages)
+		}
+		if _, ok := visited[nextPath]; ok {
+			return Snapshot{}, fmt.Errorf("oa_http %s returned repeated next_page_path %q", endpointPath, nextPath)
+		}
+		visited[nextPath] = struct{}{}
+		payload, err := p.fetchOneSnapshotPayload(ctx, nextPath)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		pageSnapshot := payload.toSnapshot()
+		snapshot.Departments = append(snapshot.Departments, pageSnapshot.Departments...)
+		snapshot.Employees = append(snapshot.Employees, pageSnapshot.Employees...)
+		snapshot.Memberships = append(snapshot.Memberships, pageSnapshot.Memberships...)
+		nextPath = payload.NextPagePath
+	}
+	return snapshot, nil
+}
+
+func (p oaHTTPProvider) fetchOneSnapshotPayload(ctx context.Context, endpointPath string) (oaHTTPSnapshotPayload, error) {
 	endpoint, err := p.endpointURL(endpointPath)
 	if err != nil {
-		return Snapshot{}, err
+		return oaHTTPSnapshotPayload{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return Snapshot{}, err
+		return oaHTTPSnapshotPayload{}, err
 	}
 	if p.config.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+p.config.Token)
@@ -88,18 +114,18 @@ func (p oaHTTPProvider) fetchSnapshotPayload(ctx context.Context, endpointPath s
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return Snapshot{}, err
+		return oaHTTPSnapshotPayload{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return Snapshot{}, fmt.Errorf("oa_http %s returned status %d", endpointPath, resp.StatusCode)
+		return oaHTTPSnapshotPayload{}, fmt.Errorf("oa_http %s returned status %d", endpointPath, resp.StatusCode)
 	}
 
 	var payload oaHTTPSnapshotPayload
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return Snapshot{}, err
+		return oaHTTPSnapshotPayload{}, err
 	}
-	return payload.toSnapshot(), nil
+	return payload, nil
 }
 
 func (p oaHTTPProvider) endpointURL(endpointPath string) (string, error) {
@@ -114,9 +140,10 @@ func (p oaHTTPProvider) endpointURL(endpointPath string) (string, error) {
 }
 
 type oaHTTPSnapshotPayload struct {
-	Departments []oaHTTPDepartment `json:"departments"`
-	Employees   []oaHTTPEmployee   `json:"employees"`
-	Memberships []oaHTTPMembership `json:"memberships"`
+	Departments  []oaHTTPDepartment `json:"departments"`
+	Employees    []oaHTTPEmployee   `json:"employees"`
+	Memberships  []oaHTTPMembership `json:"memberships"`
+	NextPagePath string             `json:"next_page_path"`
 }
 
 type oaHTTPDepartment struct {

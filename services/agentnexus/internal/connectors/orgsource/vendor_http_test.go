@@ -61,3 +61,53 @@ func TestVendorHTTPProvidersFetchNormalizedSnapshotWithCredentialRef(t *testing.
 		})
 	}
 }
+
+func TestVendorHTTPProviderFollowsNormalizedNextPagePath(t *testing.T) {
+	var requestedPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPaths = append(requestedPaths, r.URL.RequestURI())
+		if r.Header.Get("Authorization") != "Bearer resolved-token" {
+			t.Fatalf("Authorization header = %q, want Bearer resolved-token", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.RequestURI() {
+		case "/org?page=1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"departments":    []map[string]any{{"id": "dept_rd", "name": "R&D"}},
+				"next_page_path": "/org?page=2",
+			})
+		case "/org?page=2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"employees":   []map[string]any{{"id": "user_ada", "display_name": "Ada", "email": "ada@example.test", "department_ids": []string{"dept_rd"}}},
+				"memberships": []map[string]any{{"employee_id": "user_ada", "department_id": "dept_rd"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewWeComHTTPProvider(VendorHTTPConfig{
+		BaseURL:         server.URL,
+		DepartmentsPath: "/org?page=1",
+		EmployeesPath:   "/org?page=1",
+		CredentialRef:   "secret://agentnexus/dev/wecom",
+		TokenResolver: TokenResolverFunc(func(context.Context, string) (string, error) {
+			return "resolved-token", nil
+		}),
+	})
+
+	snapshot, err := provider.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch returned error: %v", err)
+	}
+	if len(requestedPaths) != 2 {
+		t.Fatalf("requested paths = %#v, want first and next page only", requestedPaths)
+	}
+	if len(snapshot.Departments) != 1 || len(snapshot.Employees) != 1 || len(snapshot.Memberships) != 1 {
+		t.Fatalf("snapshot = %+v, want paged departments, employees, memberships", snapshot)
+	}
+	if snapshot.Memberships[0].Role != RoleMember {
+		t.Fatalf("membership role = %q, want default member", snapshot.Memberships[0].Role)
+	}
+}

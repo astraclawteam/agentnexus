@@ -84,6 +84,31 @@ func TestOrgImportConfirmAPIRejectsUnconfirmedConflicts(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	var resp struct {
+		Error                string `json:"error"`
+		RequiresConfirmation bool   `json:"requires_confirmation"`
+		ConfirmationReason   string `json:"confirmation_reason"`
+		Conflicts            []struct {
+			Code       string `json:"code"`
+			EmployeeID string `json:"employee_id"`
+			RelatedID  string `json:"related_id"`
+		} `json:"conflicts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response json error = %v", err)
+	}
+	if resp.Error != "org import confirmation required" || !resp.RequiresConfirmation {
+		t.Fatalf("response = %+v, want structured confirmation required response", resp)
+	}
+	if resp.ConfirmationReason == "" {
+		t.Fatalf("confirmation_reason is empty in response %+v", resp)
+	}
+	if len(resp.Conflicts) != 1 {
+		t.Fatalf("conflicts = %+v, want one duplicate email conflict", resp.Conflicts)
+	}
+	if resp.Conflicts[0].Code != "duplicate_email" || resp.Conflicts[0].EmployeeID != "user_2" || resp.Conflicts[0].RelatedID != "user_1" {
+		t.Fatalf("conflict = %+v, want duplicate_email user_2 related user_1", resp.Conflicts[0])
+	}
 }
 
 func sequenceIDs(ids ...string) func() string {

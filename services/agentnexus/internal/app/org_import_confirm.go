@@ -29,6 +29,13 @@ type orgImportConfirmResponse struct {
 	RequiresConfirmation bool   `json:"requires_confirmation"`
 }
 
+type orgImportConfirmationRequiredResponse struct {
+	Error                string               `json:"error"`
+	RequiresConfirmation bool                 `json:"requires_confirmation"`
+	ConfirmationReason   string               `json:"confirmation_reason"`
+	Conflicts            []orgsource.Conflict `json:"conflicts"`
+}
+
 func HandleOrgImportConfirm(service *iam.Service, auditSink audit.Sink) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req orgImportConfirmRequest
@@ -58,7 +65,13 @@ func HandleOrgImportConfirm(service *iam.Service, auditSink audit.Sink) http.Han
 			Snapshot:            req.Snapshot,
 		})
 		if errors.Is(err, iam.ErrOrgImportConfirmationRequired) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "org import confirmation required"})
+			preview := orgsource.PreviewImport(req.Snapshot)
+			writeJSON(w, http.StatusConflict, orgImportConfirmationRequiredResponse{
+				Error:                "org import confirmation required",
+				RequiresConfirmation: true,
+				ConfirmationReason:   preview.ConfirmationReason,
+				Conflicts:            preview.Conflicts,
+			})
 			return
 		}
 		if err != nil {
