@@ -1,0 +1,46 @@
+{
+  "Departments": [
+    {
+      "ID": "dept_legal",
+      "ParentID": "",
+      "Name": "Legal",
+      "ManagerEmployeeID": "user_ada"
+    },
+    {
+      "ID": "dept_ops",
+      "ParentID": "",
+      "Name": "Operations",
+      "ManagerEmployeeID": "user_ben"
+    }
+  ],
+  "Employees": [
+    {
+      "ID": "user_ada",
+      "DisplayName": "Ada Chen",
+      "Email": "ada.chen@example.com",
+      "Phone": "+8613800000001",
+      "ManagerEmployeeID": "",
+      "DepartmentIDs": ["dept_legal"]
+    },
+    {
+      "ID": "user_ben",
+      "DisplayName": "Ben Lin",
+      "Email": "ben.lin@example.com",
+      "Phone": "+8613800000002",
+      "ManagerEmployeeID": "user_ada",
+      "DepartmentIDs": ["dept_ops"]
+    }
+  ],
+  "Memberships": [
+    {
+      "EmployeeID": "user_ada",
+      "DepartmentID": "dept_legal",
+      "Role": "manager"
+    },
+    {
+      "EmployeeID": "user_ben",
+      "DepartmentID": "dept_ops",
+      "Role": "manager"
+    }
+  ]
+}

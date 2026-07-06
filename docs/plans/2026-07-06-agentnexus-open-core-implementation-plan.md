@@ -242,11 +242,11 @@ docker compose -f compose.private-dev.yaml config
 
 ### Goal 14: Run End-To-End MVP Scenario
 
-- Seed an enterprise.
-- Simulate Gateway Agent organization import.
-- Create org version, case ticket, policy decision, step grant, connector read, and audit events.
-- Verify audit hash chain.
-- Write demo instructions.
+- Seeded an enterprise.
+- Simulated Gateway Agent organization import.
+- Created org version, case ticket, policy decision, step grant, connector read, and audit events.
+- Verified audit hash chain.
+- Wrote demo instructions.
 
 Verification:
 

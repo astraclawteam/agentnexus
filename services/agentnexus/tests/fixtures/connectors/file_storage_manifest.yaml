@@ -1,0 +1,25 @@
+schema_version: "2026-07-06"
+name: legal_file_storage
+version: "0.1.0"
+resources:
+  - name: legal_contracts
+    type: file_storage
+    read_only: true
+    file:
+      bucket: agentnexus-demo
+      prefix: legal/contracts
+    fields:
+      - name: title
+        type: string
+      - name: body
+        type: string
+      - name: owner_email
+        type: string
+        mask: true
+    operations:
+      - name: read
+        method: GET
+        path: /legal/contracts
+credentials:
+  - name: file_storage_reader
+    credential_ref: secret://agentnexus/dev/file-storage

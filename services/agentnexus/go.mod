@@ -9,6 +9,7 @@ require (
 	github.com/xuri/excelize/v2 v2.10.1
 	google.golang.org/adk/v2 v2.0.0
 	google.golang.org/genai v1.57.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 replace github.com/astraclawteam/agentnexus/sdk/go/connector => ../../sdk/go/connector
