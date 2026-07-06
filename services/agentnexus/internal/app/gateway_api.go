@@ -8,6 +8,7 @@ import (
 	connectorinstance "github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/instance"
 	connectorruntime "github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/runtime"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/iam"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/receipts"
 )
 
 type GatewayAPIOption func(*gatewayAPIConfig)
@@ -17,6 +18,7 @@ type gatewayAPIConfig struct {
 	iamService         *iam.Service
 	auditSink          audit.Sink
 	connectorInstances *connectorinstance.Service
+	receiptRelay       *receipts.Relay
 }
 
 func WithGatewayAPISecretResolver(resolver connectorruntime.SecretResolver) GatewayAPIOption {
@@ -43,6 +45,12 @@ func WithGatewayAPIConnectorInstanceService(service *connectorinstance.Service) 
 	}
 }
 
+func WithGatewayAPIReceiptRelay(relay *receipts.Relay) GatewayAPIOption {
+	return func(config *gatewayAPIConfig) {
+		config.receiptRelay = relay
+	}
+}
+
 func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOption) http.Handler {
 	config := gatewayAPIConfig{}
 	for _, option := range options {
@@ -56,6 +64,9 @@ func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOptio
 			SecretResolver: connectorinstance.StaticSecretResolver{},
 			AuditSink:      connectorinstance.NewMemoryAuditSink(),
 		})
+	}
+	if config.receiptRelay == nil {
+		config.receiptRelay = receipts.NewRelay(nil)
 	}
 
 	mux := http.NewServeMux()
@@ -77,6 +88,8 @@ func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOptio
 	mux.HandleFunc("POST /api/connectors/instances/smoke", HandleConnectorInstanceSmoke())
 	mux.HandleFunc("POST /api/connectors/instances/draft", HandleConnectorInstanceDraft(config.connectorInstances))
 	mux.HandleFunc("POST /api/connectors/instances/", HandleConnectorInstanceAction(config.connectorInstances))
+	mux.HandleFunc("POST /api/receipts/requests", HandleReceiptRequestCreate(config.receiptRelay))
+	mux.HandleFunc("POST /api/receipts/requests/", HandleReceiptRequestCallback(config.receiptRelay))
 	RegisterRuntimeAPIRoutes(mux, NewDefaultAuthorizedRuntimeAPI())
 
 	return mux

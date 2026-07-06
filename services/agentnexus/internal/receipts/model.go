@@ -21,9 +21,15 @@ const (
 type RequestStatus string
 
 const (
-	RequestStatusPending   RequestStatus = "pending"
-	RequestStatusDelivered RequestStatus = "delivered"
-	RequestStatusReceived  RequestStatus = "received"
+	RequestStatusPending    RequestStatus = "pending"
+	RequestStatusDelivered  RequestStatus = "delivered"
+	RequestStatusReceived   RequestStatus = "received"
+	RequestStatusApproved   RequestStatus = "approved"
+	RequestStatusDenied     RequestStatus = "denied"
+	RequestStatusNarrowed   RequestStatus = "narrowed"
+	RequestStatusInstructed RequestStatus = "instructed"
+	RequestStatusExpired    RequestStatus = "expired"
+	RequestStatusRevoked    RequestStatus = "revoked"
 )
 
 type ReceiptResult string
@@ -66,4 +72,12 @@ type Receipt struct {
 	Result    ReceiptResult
 	Evidence  string
 	CreatedAt time.Time
+}
+
+type CallbackInput struct {
+	EnterpriseID string
+	RequestID    string
+	ReceiptID    string
+	Result       ReceiptResult
+	Evidence     string
 }

@@ -1,0 +1,158 @@
+openapi: 3.0.3
+info:
+  title: AgentNexus External Receipt Relay API
+  version: 0.1.0
+  description: Open-core fake relay endpoints for creating external receipt requests and receiving verified callbacks. Real IM/Claw delivery adapters remain deployment-specific.
+paths:
+  /api/receipts/requests:
+    post:
+      operationId: createReceiptRequest
+      summary: Create and deliver an external receipt request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReceiptRequestCreateRequest'
+      responses:
+        '200':
+          description: Receipt request created and delivered by the configured relay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReceiptRequestResponse'
+        '400':
+          description: Invalid request or delivery failure.
+  /api/receipts/requests/{id}:callback:
+    post:
+      operationId: callbackReceiptRequest
+      summary: Receive an external receipt callback.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReceiptCallbackRequest'
+      responses:
+        '200':
+          description: Receipt callback accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReceiptCallbackResponse'
+        '400':
+          description: Invalid callback, evidence, result, or request id.
+components:
+  schemas:
+    ReceiptTarget:
+      type: object
+      required:
+        - id
+        - source
+        - channel
+        - address
+      properties:
+        id:
+          type: string
+        source:
+          type: string
+          enum:
+            - external_source
+            - connector_config
+            - policy_org_rule
+            - user_selection
+        channel:
+          type: string
+          enum:
+            - claw
+            - im
+        address:
+          type: string
+    ReceiptRequestCreateRequest:
+      type: object
+      required:
+        - id
+        - enterprise_id
+        - target
+      properties:
+        id:
+          type: string
+        enterprise_id:
+          type: string
+        case_ticket_id:
+          type: string
+        step_grant_id:
+          type: string
+        target:
+          $ref: '#/components/schemas/ReceiptTarget'
+    ReceiptRequestResponse:
+      type: object
+      required:
+        - id
+        - enterprise_id
+        - target
+        - status
+      properties:
+        id:
+          type: string
+        enterprise_id:
+          type: string
+        case_ticket_id:
+          type: string
+        step_grant_id:
+          type: string
+        target:
+          $ref: '#/components/schemas/ReceiptTarget'
+        status:
+          type: string
+          enum:
+            - pending
+            - delivered
+            - received
+            - approved
+            - denied
+            - narrowed
+            - instructed
+            - expired
+            - revoked
+    ReceiptCallbackRequest:
+      type: object
+      required:
+        - enterprise_id
+        - receipt_id
+        - result
+        - evidence
+      properties:
+        enterprise_id:
+          type: string
+        receipt_id:
+          type: string
+        result:
+          type: string
+          enum:
+            - approved
+            - denied
+            - narrowed
+            - instructed
+        evidence:
+          type: string
+          description: Evidence hash or pointer. Raw private content should not be submitted.
+    ReceiptCallbackResponse:
+      type: object
+      required:
+        - id
+        - request_id
+        - result
+      properties:
+        id:
+          type: string
+        request_id:
+          type: string
+        result:
+          type: string

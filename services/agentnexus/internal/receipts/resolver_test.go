@@ -32,8 +32,8 @@ func TestCreateRequestAndDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAndDeliver returned error: %v", err)
 	}
-	if req.Status != RequestStatusPending {
-		t.Fatalf("status = %q, want pending", req.Status)
+	if req.Status != RequestStatusDelivered {
+		t.Fatalf("status = %q, want delivered", req.Status)
 	}
 	if deliverer.last.ID != req.ID || deliverer.last.Target.ID != target.ID {
 		t.Fatalf("delivered request = %+v, want request target", deliverer.last)
