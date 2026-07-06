@@ -1,6 +1,8 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -214,4 +216,10 @@ func runtimeID(prefix, enterpriseID, requestID string) string {
 	cleanEnterprise := strings.NewReplacer("/", "_", ":", "_", " ", "_").Replace(enterpriseID)
 	cleanRequest := strings.NewReplacer("/", "_", ":", "_", " ", "_").Replace(requestID)
 	return prefix + "_" + cleanEnterprise + "_" + cleanRequest
+}
+
+func hashRuntimeValue(value any) string {
+	bytes, _ := json.Marshal(value)
+	sum := sha256.Sum256(bytes)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

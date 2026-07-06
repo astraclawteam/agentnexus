@@ -1,11 +1,16 @@
 package tickets
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 const (
 	TicketStatusActive = "active"
 	GrantStatusActive  = "active"
 )
+
+var ErrTicketNotFound = errors.New("ticket not found")
 
 type CaseTicket struct {
 	ID           string

@@ -27,12 +27,12 @@ func TestRuntimeAPIRejectsMissingEnvelope(t *testing.T) {
 	}
 }
 
-func TestRuntimeAPISkeletonRoutes(t *testing.T) {
+func TestRuntimeAPIAuthorizedRoutes(t *testing.T) {
 	router := NewGatewayAPIRouter("gateway-api", "test")
 
 	locateReq := []byte(`{
 		"enterprise_id": "ent_1",
-		"actor_user_id": "user_1",
+		"actor_user_id": "dev_user",
 		"request_id": "req_1",
 		"trace_id": "trace_1",
 		"intent": "find legal docs",
@@ -56,10 +56,10 @@ func TestRuntimeAPISkeletonRoutes(t *testing.T) {
 
 	readReq := []byte(`{
 		"enterprise_id": "ent_1",
-		"actor_user_id": "user_1",
+		"actor_user_id": "dev_user",
 		"request_id": "req_2",
 		"case_ticket_id": "` + locateResp.CaseTicketID + `",
-		"resource": {"type":"connector_resource","id":"res_1","connector_instance_id":"conn_1","resource_name":"legal_contracts"},
+		"resource": {"type":"connector_resource","id":"resource_dev_preview","connector_instance_id":"conn_1","resource_name":"legal_contracts"},
 		"fields": ["title"]
 	}`)
 	readRec := httptest.NewRecorder()
@@ -80,10 +80,10 @@ func TestRuntimeAPISkeletonRoutes(t *testing.T) {
 
 	actReq := []byte(`{
 		"enterprise_id": "ent_1",
-		"actor_user_id": "user_1",
+		"actor_user_id": "dev_user",
 		"request_id": "req_3",
 		"case_ticket_id": "` + locateResp.CaseTicketID + `",
-		"resource": {"type":"connector_resource","id":"res_1"},
+		"resource": {"type":"connector_resource","id":"resource_dev_preview"},
 		"action": "read"
 	}`)
 	actRec := httptest.NewRecorder()

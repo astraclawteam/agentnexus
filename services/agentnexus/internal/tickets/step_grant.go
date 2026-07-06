@@ -2,6 +2,10 @@ package tickets
 
 import "time"
 
+func (s *Service) GetCaseTicket(enterpriseID, id string) (CaseTicket, error) {
+	return s.store.GetCaseTicket(enterpriseID, id)
+}
+
 func (s *Service) CreateStepGrant(input CreateStepGrantInput) (StepGrant, error) {
 	now := s.now()
 	grant := StepGrant{
@@ -24,6 +28,7 @@ func (s *Service) IsGrantExpired(grant StepGrant, at time.Time) bool {
 
 type Store interface {
 	CreateCaseTicket(CaseTicket) (CaseTicket, error)
+	GetCaseTicket(string, string) (CaseTicket, error)
 	CreateStepGrant(StepGrant) (StepGrant, error)
 }
 
@@ -41,6 +46,14 @@ func NewMemoryStore() *MemoryStore {
 
 func (s *MemoryStore) CreateCaseTicket(ticket CaseTicket) (CaseTicket, error) {
 	s.tickets[ticketKey(ticket.EnterpriseID, ticket.ID)] = ticket
+	return ticket, nil
+}
+
+func (s *MemoryStore) GetCaseTicket(enterpriseID, id string) (CaseTicket, error) {
+	ticket, ok := s.tickets[ticketKey(enterpriseID, id)]
+	if !ok {
+		return CaseTicket{}, ErrTicketNotFound
+	}
 	return ticket, nil
 }
 

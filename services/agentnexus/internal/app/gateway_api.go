@@ -40,7 +40,7 @@ func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOptio
 	mux.HandleFunc("POST /api/org/import/preview", HandleOrgImportPreview(config.secretResolver))
 	mux.HandleFunc("POST /api/connectors/packages/validate", HandleConnectorPackageValidate())
 	mux.HandleFunc("POST /api/connectors/instances/smoke", HandleConnectorInstanceSmoke())
-	RegisterRuntimeAPIRoutes(mux, NewRuntimeAPISkeleton())
+	RegisterRuntimeAPIRoutes(mux, NewDefaultAuthorizedRuntimeAPI())
 
 	return mux
 }

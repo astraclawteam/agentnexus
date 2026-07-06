@@ -1,10 +1,12 @@
 package audit
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sync"
 )
 
 func ComputeHash(event Event) string {
@@ -56,4 +58,55 @@ func VerifyHashChain(events []Event) error {
 		prev = event.EventHash
 	}
 	return nil
+}
+
+type Sink interface {
+	Append(context.Context, EventInput) (Event, error)
+}
+
+type HashChainLog struct {
+	mu     sync.Mutex
+	events []Event
+	newID  func() string
+}
+
+type LogOption func(*HashChainLog)
+
+func NewHashChainLog(opts ...LogOption) *HashChainLog {
+	log := &HashChainLog{
+		newID: func() string { return "audit_generated" },
+	}
+	for _, opt := range opts {
+		opt(log)
+	}
+	return log
+}
+
+func WithIDGenerator(newID func() string) LogOption {
+	return func(log *HashChainLog) {
+		log.newID = newID
+	}
+}
+
+func (log *HashChainLog) Append(_ context.Context, input EventInput) (Event, error) {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+
+	if input.ID == "" {
+		input.ID = log.newID()
+	}
+	prevHash := ""
+	if len(log.events) > 0 {
+		prevHash = log.events[len(log.events)-1].EventHash
+	}
+	event := NewEvent(input, prevHash)
+	log.events = append(log.events, event)
+	return event, nil
+}
+
+func (log *HashChainLog) Events() []Event {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+
+	return append([]Event(nil), log.events...)
 }

@@ -39,7 +39,7 @@ paths:
               $ref: '#/components/schemas/RuntimeReadRequest'
       responses:
         '200':
-          description: Normalized read result or waiting state.
+          description: Runtime authorization decision. `deny` and `need_external_receipt` are returned as decision states without resource data.
           content:
             application/json:
               schema:
@@ -62,7 +62,7 @@ paths:
               $ref: '#/components/schemas/RuntimeActRequest'
       responses:
         '200':
-          description: Action result, denial, or external receipt state.
+          description: Runtime authorization decision. `deny` and `need_external_receipt` are returned as decision states without executing the action.
           content:
             application/json:
               schema:
