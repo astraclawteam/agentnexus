@@ -183,9 +183,9 @@ go test ./internal/connectors/...
 
 ### Goal 9: Implement Policy DSL, Tickets, Grants, And Audit Hash Chain
 
-- Implement Policy DSL decisions.
-- Implement Access Ticket and Step Grant lifecycle.
-- Implement append-only audit hash chains.
+- Completed Policy DSL decisions.
+- Completed Access Ticket and Step Grant lifecycle.
+- Completed append-only audit hash chains.
 
 Verification:
 
