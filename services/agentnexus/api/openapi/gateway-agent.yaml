@@ -2,71 +2,8 @@ openapi: 3.0.3
 info:
   title: AgentNexus Gateway Agent API
   version: 0.1.0
-  description: Agent Control Plane entrypoints for task runs, messages, and confirmations.
+  description: Implemented Gateway Agent entrypoints. Agent run, message, and confirmation APIs are tracked for M5 and should be added only with matching handlers.
 paths:
-  /v1/agent/runs:
-    post:
-      operationId: createAgentRun
-      summary: Create a Gateway Agent run.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateRunRequest'
-      responses:
-        '200':
-          description: Created run.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AgentRunResponse'
-  /v1/agent/runs/{id}/messages:
-    post:
-      operationId: appendAgentRunMessage
-      summary: Append a user or system message to a run.
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AppendMessageRequest'
-      responses:
-        '200':
-          description: Updated run.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AgentRunResponse'
-  /v1/agent/runs/{id}/confirmations:
-    post:
-      operationId: confirmAgentRunCheckpoint
-      summary: Confirm or reject a human-in-the-loop checkpoint.
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ConfirmCheckpointRequest'
-      responses:
-        '200':
-          description: Updated checkpoint state.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CheckpointResponse'
   /v1/agent/deployments/first-run:plan:
     post:
       operationId: planFirstDeployment
@@ -87,97 +24,6 @@ paths:
                 $ref: '#/components/schemas/DeploymentPlan'
 components:
   schemas:
-    RequestEnvelope:
-      type: object
-      required:
-        - enterprise_id
-        - actor_user_id
-        - request_id
-      properties:
-        enterprise_id:
-          type: string
-        actor_user_id:
-          type: string
-        request_id:
-          type: string
-        trace_id:
-          type: string
-    CreateRunRequest:
-      allOf:
-        - $ref: '#/components/schemas/RequestEnvelope'
-        - type: object
-          required:
-            - intent
-          properties:
-            intent:
-              type: string
-            attachments:
-              type: array
-              items:
-                $ref: '#/components/schemas/ArtifactRef'
-    AppendMessageRequest:
-      allOf:
-        - $ref: '#/components/schemas/RequestEnvelope'
-        - type: object
-          required:
-            - role
-            - content
-          properties:
-            role:
-              type: string
-              enum:
-                - user
-                - assistant
-                - system
-            content:
-              type: string
-            attachments:
-              type: array
-              items:
-                $ref: '#/components/schemas/ArtifactRef'
-    ConfirmCheckpointRequest:
-      allOf:
-        - $ref: '#/components/schemas/RequestEnvelope'
-        - type: object
-          required:
-            - checkpoint_id
-            - decision
-          properties:
-            checkpoint_id:
-              type: string
-            decision:
-              type: string
-              enum:
-                - approved
-                - denied
-                - narrowed
-                - instructed
-            comment:
-              type: string
-    AgentRunResponse:
-      type: object
-      required:
-        - run_id
-        - status
-      properties:
-        run_id:
-          type: string
-        task_run_id:
-          type: string
-        status:
-          type: string
-        trace_id:
-          type: string
-    CheckpointResponse:
-      type: object
-      required:
-        - checkpoint_id
-        - status
-      properties:
-        checkpoint_id:
-          type: string
-        status:
-          type: string
     FirstDeploymentPlanRequest:
       type: object
       properties:
@@ -217,13 +63,4 @@ components:
         command:
           type: string
         description:
-          type: string
-    ArtifactRef:
-      type: object
-      required:
-        - artifact_id
-      properties:
-        artifact_id:
-          type: string
-        source_hash:
           type: string

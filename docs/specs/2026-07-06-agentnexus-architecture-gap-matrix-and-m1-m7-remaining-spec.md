@@ -14,7 +14,7 @@
 
 - Architecture document: `E:\xiaozhiclaw\docs\superpowers\specs\2026-07-06-enterprise-agent-gateway-technical-architecture.md`
 - Current implementation branch: `codex/week-one-dev-flows`
-- Current implementation commit: `f6e5372 Implement week-one dev verification flows`
+- Current implementation commit: `5908a4c Implement M3 connector lifecycle`
 - Week-One implementation spec: `E:\xiaozhiclaw\agentnexus\docs\specs\2026-07-06-agentnexus-week-one-next-step-spec.md`
 - Open-core implementation plan: `E:\xiaozhiclaw\agentnexus\docs\plans\2026-07-06-agentnexus-open-core-implementation-plan.md`
 
@@ -24,17 +24,21 @@ Completed in open-core:
 
 - `gateway-api` exposes health, readiness, console overview, organization import preview, connector manifest validation, and connector smoke endpoints.
 - `gateway-agent` runs as an HTTP service and exposes first-deployment dry-run planning.
+- `gateway-api` exposes runtime API route skeletons for locate, read, act, and ticket lookup, with M4 authorization loop foundations behind the default runtime API.
 - Generic `oa_http` organization provider can fetch departments, employees, and memberships from a generic HTTP source.
-- Mock WeCom, Feishu, and DingTalk organization providers exist for fixture-based tests.
-- Connector manifest validation and runtime smoke execution exist for file/db/http-style resources.
+- Organization import confirm persists departments, employees, memberships, external identity bindings, org events, and org versions.
+- Mock WeCom, Feishu, and DingTalk organization providers exist, and generic vendor HTTP wrappers exist for normalized vendor bridge endpoints.
+- Connector manifest validation, runtime smoke execution, instance draft/smoke/confirm APIs, and Postgres-backed connector instance persistence exist for file/db/http-style resources.
 - `internal/llmroutermodel` maps ADK model requests/responses/tools to llmrouter and has an env-gated integration test.
-- Policy DSL, ticket, task, connector agent registration, connector runtime, audit hash chain, and MVP e2e tests exist as foundations.
+- Policy DSL, OpenFGA-style in-memory relationship checks, ticket, task, connector agent registration, connector runtime, audit hash chain, runtime authorization e2e, and MVP e2e tests exist as foundations.
+- Minimal receipt model, target resolver, and receipt validation foundations exist.
 - React console renders a Claw-runtime-style admin view and can call `GET /api/console/overview`.
 - Docker Compose and Helm skeletons exist for dev profile validation.
 
 Important limitation:
 
-- The running console currently uses real local frontend/backend processes, but `GET /api/console/overview` returns open-core development overview data, not live enterprise data.
+- The running console currently uses real local frontend/backend processes, but `GET /api/console/overview` still returns open-core development overview data, not fully live enterprise aggregation.
+- `gateway-agent` OpenAPI must not advertise Agent run/message/confirmation operations until M5 implements the matching handlers.
 
 ## Architecture Gap Matrix
 
@@ -45,23 +49,23 @@ Important limitation:
 | Model entry | ADK calls models only through `adk-llmrouter-model`. | `internal/llmroutermodel` exists and integration test is env-gated. | Not wired into running `gateway-agent`; no service config for llmrouter. | M5 | P0 | `gateway-agent` can answer an agent run using `LLMROUTER_BASE_URL`, `LLMROUTER_API_KEY`, and `LLMROUTER_MODEL` without direct vendor SDK usage. |
 | Agent Tool Layer | Agent calls internal tools instead of bypassing gateway systems. | Connector validation/smoke handlers exist; no agent tool registry. | No tool catalog, no ADK tool declarations, no MCP tool bridge. | M5 | P0 | Tool registry exposes org preview, connector validate, connector smoke, deployment plan, and audit append as callable ADK tools. |
 | MCP / Skill configuration | Tool protocol selected as MCP Go SDK; internal/external tools share semantics. | No MCP server/client registry in `gateway-agent`. | Missing MCP config model, registry, and safe invocation path. | M5 | P1 | `gateway-agent` loads an MCP tool config and lists allowed tools in a test without executing arbitrary code. |
-| Task Orchestrator | Business task state is persisted in PostgreSQL and driven by NATS events. | Internal task package exists; tests exercise task concepts. | No DB-backed task runs for agent flows; no NATS-backed workflow events. | M1/M5 | P0 | Task run create/update/wait states persist across process restart in integration test. |
+| Task Orchestrator | Business task state is persisted in PostgreSQL and driven by NATS events. | Internal task package, Postgres store, and NATS publisher tests exist. | Real org, connector, receipt, and agent flows do not consistently create durable task runs or domain events yet. | M1/M5 | P0 | Task run create/update/wait states persist across process restart in integration test and are used by at least one real workflow. |
 | NATS JetStream | Unified async task, event, connector-agent communication substrate. | Integration tests exist for NATS; compose includes NATS. | Core flows do not publish/consume domain events. | M1/M5/M6 | P1 | Org import preview, connector smoke, and receipt wait emit domain events to configured NATS subjects in tests. |
 | PostgreSQL business store | Enterprise, users, org graph, connector config, policies, tickets, audit indexes persisted. | Storage foundations and pgx dependency exist. | Missing migrations and repositories for most business entities. | M1-M4 | P0 | `go test ./internal/storage/...` runs migrations and CRUD tests for enterprise, org, connector, policy, ticket, audit index. |
 | OpenFGA | ReBAC for organization and resource visibility. | OpenFGA validation appears in tests/plans; not a required runtime path. | Runtime read/act path does not enforce OpenFGA relations. | M4 | P0 | Runtime API test denies access when OpenFGA relation is absent and allows when relation exists. |
 | Policy DSL | Data scope, masking, risk, external receipt, explanation. | Policy DSL foundations exist. | Not fully bound to runtime API, org graph, connector fields, and receipt relay. | M4 | P0 | Runtime read test returns `allow_with_masking`, masked fields, matched rules, and explanation. |
 | Access Ticket Service | `case_ticket` and `step_grant` with TTL, revocation, audit, and high-risk DB validation. | Ticket foundations exist; e2e simulation covers parts. | No stable runtime API route and persistent signed ticket lifecycle. | M4 | P0 | `/v1/runtime/read` creates step grant and rejects revoked/expired ticket in integration tests. |
-| Gateway Runtime API | Stable API for Claw, AgentRag, business agents: locate/read/act/tickets. | OpenAPI exists; router does not expose these routes. | Runtime data plane is not implemented as API surface. | M1/M4 | P0 | `POST /v1/runtime/locate`, `/read`, `/act`, and `GET /v1/runtime/tickets/{id}` pass handler tests. |
-| Enterprise IAM / Org Graph | Enterprise users, external identities, departments, project groups, org versions. | Orgsource snapshot/preview exists; IAM import foundations exist. | No full persisted org graph or org_version generation wired to preview/confirm import. | M2 | P0 | Confirmed org import writes users/departments/memberships/external identity bindings and returns org_version. |
-| Organization import automation | Agent-first natural language import from WeCom/Feishu/DingTalk/OA, preview, conflict detection, confirmation. | Generic OA HTTP preview API exists; mock providers exist. | No natural language agent flow, no OAuth/vendor adapters, no confirmed import persistence. | M2/M5 | P0 | User prompt "import from WeCom" creates org import task, checks auth, fetches source, previews, confirms, persists. |
-| WeCom/Feishu/DingTalk organization sources | Built-in organization source adapters using official SDKs/OpenAPI. | Only mock providers and generic `oa_http` provider. | Missing vendor-specific adapters, auth config, field mapping, pagination, rate limits. | M2 | P0 | Env-gated tests fetch at least one department and employee from each configured vendor adapter. |
-| Connector Package Manifest | Package manifest validates resources/actions/scopes/schema/tests. | Manifest validation exists for basic resources. | Missing full schema, scope model, IO schema, test cases, version promotion. | M3 | P0 | JSON Schema validates package manifest including resources, operations, scopes, fields, credentials, and smoke tests. |
-| Connector Instance Config | Per-enterprise base_url, account set, field mapping, data scope, credential_ref. | Smoke API accepts manifest and credential_ref in-memory. | Missing instance config model, persistence, publish workflow, enterprise isolation. | M3 | P0 | Instance config can be drafted, validated, smoke tested, confirmed, and persisted without storing secrets. |
-| Connector Runtime safety | Schema validation, masking, rate limit, timeout, retry, audit event for calls. | Runtime validates declared resource/fields/read-only and resolves credentials. | Missing schema validation, masking pipeline, rate limit, retry, full audit write. | M3/M4 | P0 | Connector read test validates schema, masks configured fields, writes audit event, and rejects undeclared fields. |
+| Gateway Runtime API | Stable API for Claw, AgentRag, business agents: locate/read/act/tickets. | OpenAPI, router handlers, request envelope validation, and M4 authorization loop foundations exist. | Needs stronger persistent ticket/grant backing, real OpenFGA adapter path, and broader fail-closed audit coverage. | M1/M4 | P0 | `POST /v1/runtime/locate`, `/read`, `/act`, and `GET /v1/runtime/tickets/{id}` pass handler and closed-loop e2e tests. |
+| Enterprise IAM / Org Graph | Enterprise users, external identities, departments, project groups, org versions. | Confirmed import can persist users, departments, memberships, external identities, org events, and org versions. | Needs conflict workflow depth, project groups, manager relations, and Agent-first orchestration. | M2 | P0 | Confirmed org import writes users/departments/memberships/external identity bindings and returns org_version. |
+| Organization import automation | Agent-first natural language import from WeCom/Feishu/DingTalk/OA, preview, conflict detection, confirmation. | Generic OA preview and confirm APIs exist; mock providers and generic vendor HTTP wrappers exist. | No natural-language agent flow, OAuth setup, or full official-vendor API behavior yet. | M2/M5 | P0 | User prompt "import from WeCom" creates org import task, checks auth, fetches source, previews, confirms, persists. |
+| WeCom/Feishu/DingTalk organization sources | Built-in organization source adapters using official SDKs/OpenAPI. | Mock providers and normalized vendor HTTP wrappers exist. | Missing official/vendor-specific field mapping, pagination, auth config, rate limits, and real env-gated vendor tests. | M2 | P0 | Env-gated tests fetch at least one department and employee from each configured vendor adapter. |
+| Connector Package Manifest | Package manifest validates resources/actions/scopes/schema/tests. | Manifest now supports scopes, input schema, output schema, smoke tests, risk metadata, and rejects executable uploads. | Missing JSON Schema contract file and version promotion lifecycle. | M3 | P0 | JSON Schema validates package manifest including resources, operations, scopes, fields, credentials, and smoke tests. |
+| Connector Instance Config | Per-enterprise base_url, account set, field mapping, data scope, credential_ref. | Instance draft/smoke/confirm APIs and Postgres persistence exist; tests prove secret refs persist without secret values. | Needs package/instance version promotion, active version lookup, health events, and richer enterprise isolation checks. | M3 | P0 | Instance config can be drafted, validated, smoke tested, confirmed, and persisted without storing secrets. |
+| Connector Runtime safety | Schema validation, masking, rate limit, timeout, retry, audit event for calls. | Runtime validates resource/fields/read-only, resolves credentials, and has schema/masking/rate-limit helpers. | Helpers are not yet a complete execution pipeline; masking is not driven by Policy DSL result; timeout/retry/latency metrics missing. | M3/M4 | P0 | Connector read test validates schema, masks configured fields, writes audit event, and rejects undeclared fields. |
 | Connector Agent | Lightweight outbound enterprise-side agent for internal systems. | Registration signing and executor foundations exist. | No full NATS outbound proxy flow or SaaS-to-enterprise request lifecycle. | M7 | P1 | SaaS-side connector read request is delivered to connector-agent over NATS and returns a signed result. |
 | Gateway Agent Worker | Long tasks parse attachments, OpenAPI, schema, Excel, images, org docs; generate drafts/tests. | No worker implementation for agent-generated artifacts. | Missing artifact ingestion, parser sidecar integration, draft store, task pipeline. | M5 | P1 | Uploaded OpenAPI fixture produces connector manifest draft and smoke test plan in a persisted artifact. |
 | Artifact / Draft Store | Versioned generated drafts with source, input hash, and confirmation record. | Not implemented. | Missing object storage integration and draft metadata tables. | M5 | P1 | Draft records include version, source artifact hash, generated output hash, confirmation status. |
-| External Receipt Relay | Locate target in Claw/IM, send receipt, validate source, timeout/remind/revoke. | Not implemented. | Missing relay model, targets, vendor IM delivery, callbacks. | M6 | P1 | Policy decision requiring receipt creates receipt request and accepts signed callback to release waiting step. |
+| External Receipt Relay | Locate target in Claw/IM, send receipt, validate source, timeout/remind/revoke. | Minimal receipt model, target resolver, and validation foundations exist. | Missing store, delivery interfaces, callback API, timeout/remind/revoke, and runtime resume. | M6 | P1 | Policy decision requiring receipt creates receipt request and accepts signed callback to release waiting step. |
 | Audit Ledger | Append-only audit events, hash chain, queries, export, fail-closed for high risk. | Hash chain foundation exists and e2e verifies it. | Not enforced across every tool, connector, policy, receipt, and agent step. | M4/M6 | P0 | Tests fail high-risk read if audit append fails and verify hash chain across runtime and agent flows. |
 | Secret Provider | Vault/K8s Secret/local encrypted provider through abstraction. | Secret resolver interface and fake/dev resolvers exist. | No local encrypted provider, no route/service injection, no rotation story. | M1/M3/M7 | P0 | Gateway API resolves `secret://agentnexus/dev/...` through local encrypted provider in integration test. |
 | SaaS/private profiles | Same codebase with profile-specific dependencies and isolation. | Compose and Helm dev skeletons exist. | No production-grade profiles, no tenant isolation enforcement, no secret provider selection. | M7 | P1 | Compose private-dev and Helm render include gateway-api, gateway-agent, connector-worker, connector-agent, postgres, nats, object storage, secret provider config. |
@@ -72,10 +76,10 @@ Important limitation:
 
 | Milestone | Architecture Intent | Current Completion | Remaining Risk |
 | --- | --- | --- | --- |
-| M1: Gateway Skeleton | Entrypoints, runtime API, task/event/store baseline, static admin console API. | Partially complete. Service entrypoints, console API, Compose/Helm skeleton exist. | Runtime API routes, DB-backed task state, and persistent stores are incomplete. |
-| M2: Agent-first Organization Import | Vendor org connectors, natural-language import, preview, confirmation, persistence. | Partially complete. Generic OA HTTP preview and mock providers exist. | Vendor adapters, OAuth/auth config, Agent-first flow, confirmed import persistence are missing. |
-| M3: Connector Runtime | HTTP/OpenAPI, DB read-only, file adapters, manifest, instance config, smoke. | Partially complete. Basic manifest validation, runtime, and smoke API exist. | Instance config persistence, schema/scopes/masking/rate limit/retry/audit are incomplete. |
-| M4: Policy / Ticket / Audit Loop | OpenFGA + Policy DSL + ticket/step grant + audit chain. | Partially complete in foundations and simulation. | Not enforced as a stable runtime API chain with fail-closed audit. |
+| M1: Gateway Skeleton | Entrypoints, runtime API, task/event/store baseline, static admin console API. | Partially complete. Service entrypoints, console API, runtime API skeleton, Postgres task store, NATS publisher, Compose/Helm skeleton exist. | Runtime foundation still needs hardening as stable contract and real workflow event usage. |
+| M2: Agent-first Organization Import | Vendor org connectors, natural-language import, preview, confirmation, persistence. | Partially complete. Generic OA HTTP preview, confirm persistence, org graph store/service, mock providers, and vendor HTTP wrappers exist. | Official vendor behavior, OAuth/auth config, conflict workflow depth, and Agent-first flow are missing. |
+| M3: Connector Runtime | HTTP/OpenAPI, DB read-only, file adapters, manifest, instance config, smoke. | Partially complete. Manifest metadata, runtime, smoke API, instance lifecycle, and Postgres persistence exist. | Runtime safety pipeline, policy-bound masking, retry/timeout, health, version promotion, and full audit integration are incomplete. |
+| M4: Policy / Ticket / Audit Loop | OpenFGA + Policy DSL + ticket/step grant + audit chain. | Partially complete. In-memory OpenFGA-style checks, Policy DSL, ticket/grant foundations, runtime authorization e2e, and fail-closed high-risk audit test exist. | Real OpenFGA service path, persistent ticket/grant lifecycle, receipt resume, and all-flow audit coverage remain. |
 | M5: Gateway Agent Assistant | ADK agent with llmrouter, tool registry, document parsing, draft generation. | Mostly incomplete. llmrouter adapter exists but is not wired into agent service. | No ADK workflow, tool layer, MCP, artifact/draft store, or real agent run. |
 | M6: External Receipt Relay | Receipt target resolution, IM/Claw relay, callbacks, waiting states. | Not complete. | Entire relay workflow is missing. |
 | M7: Private Delivery Package | Compose/Helm, connector-agent, secret provider, profile strategy, ops. | Partially complete. Dev skeleton exists. | Production-grade delivery, secret provider, connector-agent proxy, observability are missing. |
@@ -412,15 +416,16 @@ helm template agentnexus .\deploy\helm\agentnexus
 
 ## Recommended PR Order
 
-1. M1 persistence/config/runtime API skeleton.
-2. M4 runtime authorization loop using in-memory and OpenFGA test implementations.
-3. M2 persisted org import with generic OA confirm.
-4. M2 vendor adapters for WeCom, Feishu, and DingTalk behind env-gated tests.
-5. M3 connector instance lifecycle and runtime safety.
+1. Rebaseline contracts and drift scan against the current commit chain through `5908a4c`.
+2. M1 runtime foundation hardening.
+3. M4 runtime authorization closed loop.
+4. M2 vendor OA import completion.
+5. M3 connector runtime safety completion.
 6. M5 gateway-agent ADK runtime and internal tool registry.
 7. M5 MCP config and artifact/draft store.
 8. M6 external receipt relay.
 9. M7 private-dev secret provider, connector-agent proxy, Helm/Compose hardening, observability.
+10. Frontend live integration and browser automation.
 
 ## Final Architecture Verification Checklist
 
