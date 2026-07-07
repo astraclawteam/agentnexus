@@ -8,6 +8,10 @@ export default defineConfig({
       "/api": {
         target: process.env.VITE_AGENTNEXUS_GATEWAY_API_TARGET ?? "http://127.0.0.1:8080",
         changeOrigin: true
+      },
+      "/v1": {
+        target: process.env.VITE_AGENTNEXUS_GATEWAY_AGENT_TARGET ?? "http://127.0.0.1:8081",
+        changeOrigin: true
       }
     }
   },

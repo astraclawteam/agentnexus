@@ -11,14 +11,15 @@ type Provider interface {
 	ResolveSecret(context.Context, string) (string, error)
 }
 
+const EnvRefPrefix = "secret://env/"
+
 type EnvProvider struct{}
 
 func (EnvProvider) ResolveSecret(_ context.Context, ref string) (string, error) {
-	const prefix = "secret://env/"
-	if !strings.HasPrefix(ref, prefix) {
-		return "", fmt.Errorf("secret ref must use %s", prefix)
+	if !strings.HasPrefix(ref, EnvRefPrefix) {
+		return "", fmt.Errorf("secret ref must use %s", EnvRefPrefix)
 	}
-	name := strings.TrimPrefix(ref, prefix)
+	name := strings.TrimPrefix(ref, EnvRefPrefix)
 	if name == "" {
 		return "", fmt.Errorf("secret env name is required")
 	}

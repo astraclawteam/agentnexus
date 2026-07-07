@@ -47,6 +47,7 @@ func (s *Service) ConfirmOrgImport(ctx context.Context, input ConfirmOrgImportIn
 	for _, membership := range snapshot.Memberships {
 		explicitMemberships[membership.EmployeeID+":"+membership.DepartmentID] = struct{}{}
 	}
+	importedMemberships := map[string]struct{}{}
 	for _, employee := range snapshot.Employees {
 		if _, err := s.UpsertEnterpriseUser(ctx, UpsertEnterpriseUserInput{
 			ID:           employee.ID,
@@ -72,6 +73,7 @@ func (s *Service) ConfirmOrgImport(ctx context.Context, input ConfirmOrgImportIn
 			}); err != nil {
 				return ConfirmOrgImportResult{}, err
 			}
+			importedMemberships[employee.ID+":"+departmentID] = struct{}{}
 		}
 	}
 	for _, membership := range snapshot.Memberships {
@@ -83,6 +85,7 @@ func (s *Service) ConfirmOrgImport(ctx context.Context, input ConfirmOrgImportIn
 		}); err != nil {
 			return ConfirmOrgImportResult{}, err
 		}
+		importedMemberships[membership.EmployeeID+":"+membership.DepartmentID] = struct{}{}
 	}
 
 	versionNumber, err := s.store.NextOrgVersionNumber(ctx, input.EnterpriseID)
@@ -102,7 +105,7 @@ func (s *Service) ConfirmOrgImport(ctx context.Context, input ConfirmOrgImportIn
 		OrgVersion:          version,
 		ImportedDepartments: len(snapshot.Departments),
 		ImportedEmployees:   len(snapshot.Employees),
-		ImportedMemberships: len(snapshot.Memberships),
+		ImportedMemberships: len(importedMemberships),
 	}, nil
 }
 

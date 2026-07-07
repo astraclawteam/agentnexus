@@ -3,7 +3,7 @@ type ResourceMapCopy = {
   desc: string;
   tabs: string[];
   aria: string;
-  nodes: Record<string, string[]>;
+  nodes: Partial<Record<string, string[]>>;
 };
 
 export function ResourceMap({ copy }: { copy: ResourceMapCopy }) {
@@ -59,12 +59,16 @@ function MapNode({
   y
 }: {
   className: string;
-  copy: string[];
+  copy?: string[];
   height?: number;
   width: number;
   x: number;
   y: number;
 }) {
+  if (!copy) {
+    return null;
+  }
+
   return (
     <g className={`map-node ${className}`} transform={`translate(${x} ${y})`}>
       <rect width={width} height={height} />

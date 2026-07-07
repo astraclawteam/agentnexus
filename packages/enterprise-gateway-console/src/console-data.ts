@@ -1,8 +1,9 @@
 export type Locale = "zh" | "en";
 
 export type ConsoleOverview = {
+  state?: string;
   source: {
-    kind: "api" | "development_fixture";
+    kind: "api" | "api_live" | "development_fixture";
     label: string;
     detail: string;
     updatedAt: string;
@@ -42,7 +43,7 @@ export type ConsoleOverview = {
     desc: string;
     tabs: string[];
     aria: string;
-    nodes: Record<string, string[]>;
+    nodes: Partial<Record<string, string[]>>;
   };
   tickets: {
     title: string;

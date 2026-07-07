@@ -7,7 +7,7 @@ type ConnectorCopy = {
   rows: string[][];
 };
 
-export function ConnectorHealth({ copy }: { copy: ConnectorCopy }) {
+export function ConnectorHealth({ copy, onSmoke, smokeStatus }: { copy: ConnectorCopy; onSmoke?: () => void; smokeStatus?: string }) {
   return (
     <section className="panel health">
       <div className="panel-header">
@@ -15,11 +15,12 @@ export function ConnectorHealth({ copy }: { copy: ConnectorCopy }) {
           <h2>{copy.title}</h2>
           <p>{copy.desc}</p>
         </div>
-        <Button className="ghost-button small" type="button" variant="ghost">
+        <Button className="ghost-button small" type="button" variant="ghost" onClick={onSmoke}>
           <span className="icon icon-play" aria-hidden="true" />
           {copy.smoke}
         </Button>
       </div>
+      {smokeStatus ? <p className="panel-status">{smokeStatus}</p> : null}
       <div className="connector-list">
         {copy.rows.map(([title, subtitle, status, tone], index) => (
           <div className="connector-item" key={title}>

@@ -2,17 +2,17 @@ package app
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
-	connectorruntime "github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/runtime"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/secrets"
 )
 
 func TestOrgImportPreviewAPI(t *testing.T) {
+	t.Setenv("AGENTNEXUS_TEST_OA_TOKEN", "test-token")
 	var authHeader string
 	oaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
@@ -30,19 +30,15 @@ func TestOrgImportPreviewAPI(t *testing.T) {
 	defer oaServer.Close()
 
 	auditLog := audit.NewHashChainLog()
-	router := NewGatewayAPIRouter("gateway-api", "test", WithGatewayAPISecretResolver(connectorruntime.SecretResolverFunc(func(_ context.Context, ref string) (string, error) {
-		if ref != "secret://agentnexus/dev/oa-token" {
-			t.Fatalf("secret ref = %q, want secret://agentnexus/dev/oa-token", ref)
-		}
-		return "test-token", nil
-	})), WithGatewayAPIAuditSink(auditLog))
+	router := NewGatewayAPIRouter("gateway-api", "test", WithGatewayAPISecretResolver(secrets.EnvProvider{}), WithGatewayAPIAuditSink(auditLog))
 
 	body := []byte(`{
+		"enterprise_id": "ent_dev",
 		"provider": "oa_http",
 		"base_url": "` + oaServer.URL + `",
 		"departments_path": "/departments",
 		"employees_path": "/employees",
-		"token_ref": "secret://agentnexus/dev/oa-token"
+		"token_ref": "secret://env/AGENTNEXUS_TEST_OA_TOKEN"
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/org/import/preview", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -59,6 +55,9 @@ func TestOrgImportPreviewAPI(t *testing.T) {
 	var resp struct {
 		Provider                  string   `json:"provider"`
 		SnapshotHash              string   `json:"snapshot_hash"`
+		DepartmentCount           int      `json:"department_count"`
+		EmployeeCount             int      `json:"employee_count"`
+		MembershipCount           int      `json:"membership_count"`
 		RequiresConfirmation      bool     `json:"requires_confirmation"`
 		AutoImportableEmployeeIDs []string `json:"auto_importable_employee_ids"`
 		Conflicts                 []any    `json:"conflicts"`
@@ -72,6 +71,9 @@ func TestOrgImportPreviewAPI(t *testing.T) {
 	if resp.SnapshotHash == "" {
 		t.Fatal("snapshot_hash is empty")
 	}
+	if resp.DepartmentCount != 1 || resp.EmployeeCount != 1 || resp.MembershipCount != 1 {
+		t.Fatalf("counts = departments %d employees %d memberships %d, want 1/1/1", resp.DepartmentCount, resp.EmployeeCount, resp.MembershipCount)
+	}
 	if resp.RequiresConfirmation {
 		t.Fatal("requires_confirmation = true, want false")
 	}
@@ -83,5 +85,26 @@ func TestOrgImportPreviewAPI(t *testing.T) {
 	}
 	if len(auditLog.Events()) != 1 {
 		t.Fatalf("audit events = %d, want 1", len(auditLog.Events()))
+	}
+}
+
+func TestOrgImportPreviewRejectsRawToken(t *testing.T) {
+	body := []byte(`{
+		"enterprise_id": "ent_dev",
+		"provider": "oa_http",
+		"base_url": "http://127.0.0.1:18080",
+		"departments_path": "/departments",
+		"employees_path": "/employees",
+		"token": "raw-secret-token"
+	}`)
+	rec := httptest.NewRecorder()
+
+	NewGatewayAPIRouter("gateway-api", "test").ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/org/import/preview", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s, want 400", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("raw-secret-token")) {
+		t.Fatalf("response leaked raw token: %s", rec.Body.String())
 	}
 }

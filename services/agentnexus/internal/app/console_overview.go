@@ -1,6 +1,13 @@
 package app
 
+import (
+	"strconv"
+
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/iam"
+)
+
 type ConsoleOverview struct {
+	State         string                `json:"state,omitempty"`
 	Source        ConsoleOverviewSource `json:"source"`
 	Title         string                `json:"title"`
 	Subtitle      string                `json:"subtitle"`
@@ -89,6 +96,218 @@ func NewConsoleOverview(locale string) ConsoleOverview {
 		return zhConsoleOverview()
 	}
 	return enConsoleOverview()
+}
+
+func NewDemoConsoleOverview(locale string) ConsoleOverview {
+	overview := NewConsoleOverview(locale)
+	overview.State = "demo"
+	overview.Source.Kind = "development_fixture"
+	return overview
+}
+
+func NewLiveConsoleOverview(locale string, setup setupEnterpriseContext, graph iam.OrgGraph) ConsoleOverview {
+	state := "configured_without_org"
+	if len(graph.Users) > 0 || len(graph.Departments) > 0 {
+		state = "configured"
+	}
+	if locale == "zh" {
+		return zhLiveConsoleOverview(setup, graph, state)
+	}
+	return enLiveConsoleOverview(setup, graph, state)
+}
+
+func NewUnconfiguredConsoleOverview(locale string) ConsoleOverview {
+	setup := setupEnterpriseContext{EnterpriseName: "Unconfigured enterprise"}
+	if locale == "zh" {
+		setup.EnterpriseName = "未配置企业"
+		return zhLiveConsoleOverview(setup, iam.OrgGraph{}, "unconfigured")
+	}
+	overview := enLiveConsoleOverview(setup, iam.OrgGraph{}, "unconfigured")
+	return overview
+}
+
+func enLiveConsoleOverview(setup setupEnterpriseContext, graph iam.OrgGraph, state string) ConsoleOverview {
+	enterpriseName := setup.EnterpriseName
+	if enterpriseName == "" {
+		enterpriseName = "Unconfigured enterprise"
+	}
+	userCount := strconv.Itoa(len(graph.Users))
+	departmentCount := strconv.Itoa(len(graph.Departments))
+	membershipCount := strconv.Itoa(len(graph.Memberships))
+	versionLabel := "No org import yet"
+	if len(graph.Versions) > 0 {
+		versionLabel = "Org version " + strconv.FormatInt(graph.Versions[len(graph.Versions)-1].VersionNumber, 10)
+	}
+	return ConsoleOverview{
+		State: state,
+		Source: ConsoleOverviewSource{
+			Kind:      "api_live",
+			Label:     "Gateway API live",
+			Detail:    "Live setup-aware overview from configured enterprise state.",
+			UpdatedAt: "2026-07-06T00:00:00+08:00",
+		},
+		Title:         "Enterprise Agent Command Center",
+		Subtitle:      "Configure organization, connectors, policy, and agent runs from a live gateway backend.",
+		Enterprise:    enterpriseName,
+		EnterpriseAlt: setup.EnvironmentLabel,
+		PrivateEnv:    "First-run configuration",
+		Topbar: ConsoleTopbar{
+			EnterpriseLabel: "Enterprise",
+			Search:          "Search employees, systems, policies, audit IDs",
+			Sync:            "Sync org",
+			Notifications:   "Notifications",
+			Avatar:          "AD",
+			ExportAudit:     "Export audit",
+		},
+		Pulse: ConsolePulse{
+			BrandName:         "Enterprise Gateway",
+			BrandSub:          "Agent Admin",
+			CurrentEnterprise: "Current enterprise",
+			OrgSnapshot:       "Org snapshot",
+			TodayPulse:        "Setup progress",
+			PendingSignals:    "Pending actions",
+			RecentEvents:      "Recent org events",
+			StatusOnline:      "gateway-api online",
+			PolicyPending:     "No policies published",
+			OrgVersion:        versionLabel,
+			Stats:             [][]string{{"Employees", userCount}, {"Departments", departmentCount}, {"Memberships", membershipCount}},
+			PulseStats:        [][]string{{"0", "New hires"}, {"0", "Org changes"}, {"0", "Project teams"}, {versionLabel, "Org version"}},
+			Signals:           [][]string{{"first_run", "Complete first-run configuration", "1", "warn"}},
+			Events:            []string{},
+		},
+		Metrics: [][]string{
+			{"Synced employees", userCount, "Live org graph", "neutral"},
+			{"Departments", departmentCount, "Live org graph", "neutral"},
+			{"Pending approvals", "0", "No live tickets yet", "neutral"},
+			{"Agent visits today", "0", "No live agent visits yet", "neutral"},
+		},
+		ResourceMap: ConsoleResourceMap{
+			Title: "Enterprise Resource Map",
+			Desc:  "Live relationships appear after first-run import.",
+			Tabs:  []string{"Org", "Systems", "Risk"},
+			Aria:  "Enterprise resource map",
+			Nodes: map[string][]string{
+				"core":   {"Enterprise IAM", userCount + " users"},
+				"source": {"Organization source", departmentCount + " departments"},
+			},
+		},
+		Tickets: ConsoleTickets{
+			Title:   "Recent Access Tickets",
+			Desc:    "Live task grants and approvals appear after runtime activity.",
+			Filter:  "Filter",
+			Columns: []string{"Ticket", "Employee", "Intent", "Resource", "Decision"},
+			Rows:    [][]string{},
+		},
+		Connectors: ConsoleConnectors{
+			Title: "Connector Health",
+			Desc:  "Connector smoke and health results appear after setup.",
+			Smoke: "Smoke",
+			Rows:  [][]string{},
+		},
+		Agent: ConsoleAgent{
+			Open:       "Open Agent chat",
+			Title:      "Gateway Agent",
+			Desc:       "Describe the integration, change, or issue you want to handle",
+			Close:      "Close",
+			Intro:      "Start a first-run configuration task to use allow-listed gateway tools.",
+			Prompts:    []string{"Configure org import", "Validate connector", "Plan deployment"},
+			Input:      "Type a setup request",
+			Send:       "Send",
+			SentPrefix: "Request captured",
+		},
+	}
+}
+
+func zhLiveConsoleOverview(setup setupEnterpriseContext, graph iam.OrgGraph, state string) ConsoleOverview {
+	enterpriseName := setup.EnterpriseName
+	if enterpriseName == "" {
+		enterpriseName = "未配置企业"
+	}
+	userCount := strconv.Itoa(len(graph.Users))
+	departmentCount := strconv.Itoa(len(graph.Departments))
+	membershipCount := strconv.Itoa(len(graph.Memberships))
+	versionLabel := "尚未导入组织"
+	if len(graph.Versions) > 0 {
+		versionLabel = "组织版本 " + strconv.FormatInt(graph.Versions[len(graph.Versions)-1].VersionNumber, 10)
+	}
+	return ConsoleOverview{
+		State: state,
+		Source: ConsoleOverviewSource{
+			Kind:      "api_live",
+			Label:     "Gateway API 实时数据",
+			Detail:    "来自已配置企业状态的实时总览数据。",
+			UpdatedAt: "2026-07-06T00:00:00+08:00",
+		},
+		Title:         "企业智能行政中枢",
+		Subtitle:      "配置组织、连接器、策略和 Agent 运行，让 Agent 安全地在企业内办事。",
+		Enterprise:    enterpriseName,
+		EnterpriseAlt: setup.EnvironmentLabel,
+		PrivateEnv:    "首次配置",
+		Topbar: ConsoleTopbar{
+			EnterpriseLabel: "企业",
+			Search:          "搜索员工、系统、策略、审计号",
+			Sync:            "同步组织",
+			Notifications:   "通知",
+			Avatar:          "管",
+			ExportAudit:     "导出审计",
+		},
+		Pulse: ConsolePulse{
+			BrandName:         "企业网关",
+			BrandSub:          "Agent 管理",
+			CurrentEnterprise: "当前企业",
+			OrgSnapshot:       "组织快照",
+			TodayPulse:        "配置进度",
+			PendingSignals:    "待处理事项",
+			RecentEvents:      "最近组织事件",
+			StatusOnline:      "gateway-api 在线",
+			PolicyPending:     "暂无已发布策略",
+			OrgVersion:        versionLabel,
+			Stats:             [][]string{{"员工", userCount}, {"部门", departmentCount}, {"成员关系", membershipCount}},
+			PulseStats:        [][]string{{"0", "新入职"}, {"0", "组织变更"}, {"0", "项目组"}, {versionLabel, "组织版本"}},
+			Signals:           [][]string{{"first_run", "完成首次配置", "1", "warn"}},
+			Events:            []string{},
+		},
+		Metrics: [][]string{
+			{"已同步员工", userCount, "实时组织图", "neutral"},
+			{"部门", departmentCount, "实时组织图", "neutral"},
+			{"待审批请求", "0", "暂无实时工单", "neutral"},
+			{"今日 Agent 访问", "0", "暂无实时访问", "neutral"},
+		},
+		ResourceMap: ConsoleResourceMap{
+			Title: "企业资源地图",
+			Desc:  "首次组织导入后展示实时关系。",
+			Tabs:  []string{"组织", "系统", "风险"},
+			Aria:  "企业资源地图",
+			Nodes: map[string][]string{
+				"core":   {"Enterprise IAM", userCount + " 名员工"},
+				"source": {"组织来源", departmentCount + " 个部门"},
+			},
+		},
+		Tickets: ConsoleTickets{
+			Title:   "最近 Access Tickets",
+			Desc:    "运行时活动产生后展示任务授权、审批和数据访问轨迹。",
+			Filter:  "过滤",
+			Columns: []string{"Ticket", "员工", "意图", "资源", "决策"},
+			Rows:    [][]string{},
+		},
+		Connectors: ConsoleConnectors{
+			Title: "连接器健康",
+			Desc:  "完成配置后展示连接器 smoke 和健康结果。",
+			Smoke: "Smoke",
+			Rows:  [][]string{},
+		},
+		Agent: ConsoleAgent{
+			Open:       "打开 Agent 对话",
+			Title:      "网关 Agent",
+			Desc:       "描述你要接入、变更或排查的事项",
+			Close:      "关闭",
+			Intro:      "启动首次配置任务，使用 allow-list 内的网关工具。",
+			Prompts:    []string{"配置组织导入", "校验连接器", "规划部署"},
+			Input:      "输入配置请求",
+			Send:       "发送",
+			SentPrefix: "请求已记录",
+		},
+	}
 }
 
 func zhConsoleOverview() ConsoleOverview {

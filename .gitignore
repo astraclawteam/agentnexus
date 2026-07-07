@@ -4,3 +4,6 @@ packages/*/dist/
 packages/*/tsconfig.tsbuildinfo
 coverage/
 .vite/
+
+# playwright run artifacts
+test-results/

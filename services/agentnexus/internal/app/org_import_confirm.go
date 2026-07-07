@@ -20,8 +20,10 @@ type orgImportConfirmRequest struct {
 }
 
 type orgImportConfirmResponse struct {
+	EnterpriseID         string `json:"enterprise_id"`
 	Provider             string `json:"provider"`
 	OrgVersionID         string `json:"org_version_id"`
+	OrgVersion           string `json:"org_version"`
 	VersionNumber        int64  `json:"version_number"`
 	ImportedDepartments  int    `json:"imported_departments"`
 	ImportedEmployees    int    `json:"imported_employees"`
@@ -36,7 +38,7 @@ type orgImportConfirmationRequiredResponse struct {
 	Conflicts            []orgsource.Conflict `json:"conflicts"`
 }
 
-func HandleOrgImportConfirm(service *iam.Service, auditSink audit.Sink) http.HandlerFunc {
+func HandleOrgImportConfirm(service *iam.Service, auditSink audit.Sink, previewStore orgImportPreviewStore, setupStore setupEnterpriseStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req orgImportConfirmRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -46,6 +48,22 @@ func HandleOrgImportConfirm(service *iam.Service, auditSink audit.Sink) http.Han
 		if service == nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "iam service is required"})
 			return
+		}
+		if req.SnapshotHash != "" && len(req.Snapshot.Departments) == 0 && len(req.Snapshot.Employees) == 0 && len(req.Snapshot.Memberships) == 0 && previewStore != nil {
+			if cached, ok := previewStore.Get(req.SnapshotHash); ok {
+				req.Snapshot = cached.Snapshot
+				if req.Provider == "" {
+					req.Provider = cached.Provider
+				}
+				if req.EnterpriseID == "" {
+					req.EnterpriseID = cached.EnterpriseID
+				}
+			}
+		}
+		if req.EnterpriseName == "" && setupStore != nil {
+			if setup, ok := setupStore.Get(req.EnterpriseID); ok {
+				req.EnterpriseName = setup.EnterpriseName
+			}
 		}
 		if req.EnterpriseID == "" || req.EnterpriseName == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enterprise_id and enterprise_name are required"})
@@ -86,8 +104,10 @@ func HandleOrgImportConfirm(service *iam.Service, auditSink audit.Sink) http.Han
 			OutputHash:   hashRuntimeValue(result),
 		})
 		writeJSON(w, http.StatusOK, orgImportConfirmResponse{
+			EnterpriseID:         req.EnterpriseID,
 			Provider:             req.Provider,
 			OrgVersionID:         result.OrgVersion.ID,
+			OrgVersion:           result.OrgVersion.ID,
 			VersionNumber:        result.OrgVersion.VersionNumber,
 			ImportedDepartments:  result.ImportedDepartments,
 			ImportedEmployees:    result.ImportedEmployees,

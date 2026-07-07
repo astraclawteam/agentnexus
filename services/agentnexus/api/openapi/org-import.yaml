@@ -85,6 +85,11 @@ components:
           type: string
           enum:
             - oa_http
+            - wecom
+            - feishu
+            - dingtalk
+        enterprise_id:
+          type: string
         base_url:
           type: string
           format: uri
@@ -95,6 +100,12 @@ components:
         token_ref:
           type: string
           description: Secret reference resolved by the service. Do not send raw tokens in this field.
+        credential_ref:
+          type: string
+          description: Alias for token_ref. Secret references only.
+        token:
+          type: string
+          description: Forbidden. Raw tokens are rejected.
     OrgImportPreviewResponse:
       type: object
       required:
@@ -109,6 +120,12 @@ components:
         snapshot_hash:
           type: string
           description: Hash of the normalized source snapshot. Use this when confirming a snapshot.
+        department_count:
+          type: integer
+        employee_count:
+          type: integer
+        membership_count:
+          type: integer
         requires_confirmation:
           type: boolean
         auto_importable_employee_ids:
@@ -134,14 +151,14 @@ components:
       type: object
       required:
         - enterprise_id
-        - enterprise_name
         - provider
-        - snapshot
+        - snapshot_hash
       properties:
         enterprise_id:
           type: string
         enterprise_name:
           type: string
+          description: Optional when a first-run enterprise context already exists.
         provider:
           type: string
           enum:

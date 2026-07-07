@@ -56,6 +56,10 @@ The dry-run plan returns commands and human confirmation requirements only. It d
 
 When the private-dev compose profile is running, the Gateway Agent dry-run endpoint is reachable on the host at `http://127.0.0.1:8081/v1/agent/deployments/first-run:plan`.
 
+## First-Run Configuration
+
+The console now starts from setup status when `gateway-api` is reachable. See [first-run-configuration.md](first-run-configuration.md) for the browser flow and secret-ref rules.
+
 ## Full Verification
 
 ```powershell

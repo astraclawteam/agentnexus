@@ -10,6 +10,7 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/iam"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/observability"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/receipts"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/secrets"
 )
 
 type GatewayAPIOption func(*gatewayAPIConfig)
@@ -20,6 +21,8 @@ type gatewayAPIConfig struct {
 	auditSink          audit.Sink
 	connectorInstances *connectorinstance.Service
 	receiptRelay       *receipts.Relay
+	setupStore         setupEnterpriseStore
+	orgImportPreviews  orgImportPreviewStore
 }
 
 func WithGatewayAPISecretResolver(resolver connectorruntime.SecretResolver) GatewayAPIOption {
@@ -69,6 +72,16 @@ func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOptio
 	if config.receiptRelay == nil {
 		config.receiptRelay = receipts.NewRelay(nil)
 	}
+	if config.secretResolver == nil {
+		config.secretResolver = secrets.EnvProvider{}
+	}
+	if config.setupStore == nil {
+		config.setupStore = newMemorySetupEnterpriseStore()
+	}
+	if config.orgImportPreviews == nil {
+		config.orgImportPreviews = newMemoryOrgImportPreviewStore()
+	}
+	setupService := NewSetupService(config.setupStore, config.iamService)
 
 	mux := http.NewServeMux()
 	health := NewHealthStatus(serviceName, version, true)
@@ -87,10 +100,38 @@ func NewGatewayAPIRouter(serviceName, version string, options ...GatewayAPIOptio
 		})))
 	})
 	mux.HandleFunc("GET /api/console/overview", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, NewConsoleOverview(r.URL.Query().Get("locale")))
+		locale := r.URL.Query().Get("locale")
+		if r.URL.Query().Get("demo") == "true" {
+			writeJSON(w, http.StatusOK, NewDemoConsoleOverview(locale))
+			return
+		}
+		enterpriseID := r.URL.Query().Get("enterprise_id")
+		if enterpriseID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enterprise_id is required for live console overview"})
+			return
+		}
+		setup, ok := config.setupStore.Get(enterpriseID)
+		if !ok {
+			writeJSON(w, http.StatusOK, NewUnconfiguredConsoleOverview(locale))
+			return
+		}
+		graph, err := config.iamService.GetOrgGraph(r.Context(), enterpriseID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load org graph"})
+			return
+		}
+		writeJSON(w, http.StatusOK, NewLiveConsoleOverview(locale, setup, graph))
 	})
-	mux.HandleFunc("POST /api/org/import/preview", HandleOrgImportPreview(config.secretResolver, config.auditSink))
-	mux.HandleFunc("POST /api/org/import/confirm", HandleOrgImportConfirm(config.iamService, config.auditSink))
+	mux.HandleFunc("GET /api/setup/status", HandleSetupStatus(setupService))
+	mux.HandleFunc("GET /api/setup/environment", HandleSetupEnvironment())
+	mux.HandleFunc("GET /api/setup/session", HandleSetupSession(setupService))
+	mux.HandleFunc("POST /api/setup/admin/init", HandleSetupAdminInit(setupService))
+	mux.HandleFunc("POST /api/setup/login", HandleSetupLogin(setupService))
+	mux.HandleFunc("GET /api/console/setup-checklist", HandleConsoleSetupChecklist(setupService))
+	mux.HandleFunc("POST /api/setup/enterprise", HandleSetupEnterprise(config.setupStore, config.iamService))
+	mux.HandleFunc("POST /api/setup/secrets/validate", HandleSetupSecretsValidate(config.secretResolver))
+	mux.HandleFunc("POST /api/org/import/preview", HandleOrgImportPreview(config.secretResolver, config.auditSink, config.orgImportPreviews))
+	mux.HandleFunc("POST /api/org/import/confirm", HandleOrgImportConfirm(config.iamService, config.auditSink, config.orgImportPreviews, config.setupStore))
 	mux.HandleFunc("GET /api/org/graph", HandleOrgGraph(config.iamService))
 	mux.HandleFunc("POST /api/connectors/packages/validate", HandleConnectorPackageValidate())
 	mux.HandleFunc("POST /api/connectors/instances/smoke", HandleConnectorInstanceSmoke())

@@ -1,0 +1,60 @@
+openapi: 3.0.3
+info:
+  title: AgentNexus First-Run Setup API
+  version: 0.1.0
+  description: First-run setup endpoints for enterprise context and secret reference validation. Raw secret values are never returned.
+paths:
+  /api/setup/status:
+    get:
+      operationId: getSetupStatus
+      summary: Get first-run setup status.
+      responses:
+        '200':
+          description: Setup status.
+  /api/setup/enterprise:
+    post:
+      operationId: saveEnterpriseSetup
+      summary: Create or update local first-run enterprise context.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enterprise_id, enterprise_name, admin_user_id]
+              properties:
+                enterprise_id:
+                  type: string
+                enterprise_name:
+                  type: string
+                admin_user_id:
+                  type: string
+                environment_label:
+                  type: string
+      responses:
+        '200':
+          description: Enterprise setup saved.
+        '400':
+          description: Invalid request.
+  /api/setup/secrets/validate:
+    post:
+      operationId: validateSetupSecretRefs
+      summary: Validate first-run secret references.
+      description: Accepts secret refs such as secret://env/LLMROUTER_API_KEY. Raw secret values are rejected by the provider and never returned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refs]
+              properties:
+                refs:
+                  type: object
+                  additionalProperties:
+                    type: string
+      responses:
+        '200':
+          description: Secret ref validation results.
+        '400':
+          description: Invalid request or secret provider not configured.
