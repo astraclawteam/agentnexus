@@ -1,0 +1,49 @@
+{{- if and .Values.dependencies.postgres.enabled (not .Values.dependencies.postgres.external) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-postgres
+  labels:
+    app.kubernetes.io/name: agentnexus
+    app.kubernetes.io/component: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentnexus
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentnexus
+        app.kubernetes.io/component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ .Values.dependencies.postgres.image }}"
+          env:
+            - name: POSTGRES_DB
+              value: "{{ .Values.dependencies.postgres.database }}"
+            - name: POSTGRES_USER
+              value: "{{ .Values.dependencies.postgres.username }}"
+            - name: POSTGRES_PASSWORD
+              value: "{{ .Values.dependencies.postgres.password }}"
+          ports:
+            - containerPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-postgres
+  labels:
+    app.kubernetes.io/name: agentnexus
+    app.kubernetes.io/component: postgres
+spec:
+  selector:
+    app.kubernetes.io/name: agentnexus
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+{{- end }}

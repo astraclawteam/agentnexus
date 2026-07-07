@@ -1,0 +1,6 @@
+apiVersion: v2
+name: agentnexus
+description: Local and development Helm chart for AgentNexus open-core services.
+type: application
+version: 0.1.0
+appVersion: 0.1.0-dev

@@ -72,7 +72,7 @@ Packages under `services/agentnexus/internal/*` are private implementation detai
 Verification:
 
 ```powershell
-Select-String -Path 'docs/plans/2026-07-06-agentnexus-open-core-implementation-plan.md' -Pattern '鏈喅绛東鏈敹鏁泑寰呮媿鏉?
+Select-String -Path '<architecture-spec.md>' -Pattern '未决策|未收敛|待拍板'
 ```
 
 Expected: no matches.
@@ -218,9 +218,9 @@ go test ./internal/receipts
 
 ### Goal 12: Implement Admin Console With Claw Runtime UI Reuse
 
-- Create shared Claw-runtime-style UI package.
-- Create admin console shell with Enterprise Pulse, dashboard metrics, resource map, Access Ticket table, Connector Health, and Gateway Agent launcher.
-- Add frontend rendering tests.
+- Completed shared Claw-runtime-style UI package.
+- Completed admin console shell with Enterprise Pulse, dashboard metrics, resource map, Access Ticket table, Connector Health, and Gateway Agent launcher.
+- Added frontend rendering tests.
 
 Verification:
 
@@ -230,9 +230,9 @@ npm test --workspace packages/enterprise-gateway-console
 
 ### Goal 13: Package Open-Core Dev Profiles
 
-- Add SaaS-dev and private-dev Docker Compose profiles.
-- Add local/dev Helm chart skeleton.
-- Document dependency toggles for PostgreSQL, NATS, object storage, and Secret Provider.
+- Added SaaS-dev and private-dev Docker Compose profiles.
+- Added local/dev Helm chart skeleton.
+- Documented dependency toggles for PostgreSQL, NATS, object storage, and Secret Provider.
 
 Verification:
 
@@ -242,11 +242,11 @@ docker compose -f compose.private-dev.yaml config
 
 ### Goal 14: Run End-To-End MVP Scenario
 
-- Seed an enterprise.
-- Simulate Gateway Agent organization import.
-- Create org version, case ticket, policy decision, step grant, connector read, and audit events.
-- Verify audit hash chain.
-- Write demo instructions.
+- Seeded an enterprise.
+- Simulated Gateway Agent organization import.
+- Created org version, case ticket, policy decision, step grant, connector read, and audit events.
+- Verified audit hash chain.
+- Wrote demo instructions.
 
 Verification:
 

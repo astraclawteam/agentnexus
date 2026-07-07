@@ -1,0 +1,17 @@
+rules:
+  - resource_type: knowledge_space
+    action: read
+    decision: allow_with_masking
+    data_scope:
+      - department:dept_legal
+    mask_fields:
+      - owner_email
+    risk_level: 2
+  - resource_type: connector_resource
+    action: read
+    decision: allow_with_masking
+    data_scope:
+      - department:dept_legal
+    mask_fields:
+      - owner_email
+    risk_level: 2
