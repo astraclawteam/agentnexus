@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -61,6 +62,12 @@ func TestApprovalMigrationBindsImmutableRouteEvidence(t *testing.T) {
 		"approve_high_risk",
 		"publish_low_risk",
 		"organization admin path must reach root",
+		"requester_permission",
+		"validate_direct_requester_permission_evidence",
+		"approval audit ledger is append-only",
+		"linked_audit.evidence_pointer is distinct from new.queue_item_id",
+		"before update or delete on audit_events",
+		"before truncate on audit_events",
 	}
 	for _, value := range required {
 		if !strings.Contains(sql, value) {
@@ -74,13 +81,28 @@ func TestApprovalMigrationBindsImmutableRouteEvidence(t *testing.T) {
 	}
 }
 
+func TestApprovalMigrationSeedsCanonicalDefaultPolicyForExistingEnterprises(t *testing.T) {
+	raw, err := os.ReadFile("../../db/migrations/000005_governed_approval_routes.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := strings.ToLower(strings.Join(strings.Fields(string(raw)), " "))
+	policy := DefaultPolicy()
+	want := fmt.Sprintf("select id, '%s', %d, %d, 1 from enterprises", policy.MinimumRisk, policy.MaxLowImpactedUsers, policy.MaxLowImpactedOrgUnits)
+	for _, fragment := range []string{"insert into enterprise_approval_policies", want, "after insert or update on enterprise_approval_policies"} {
+		if !strings.Contains(sql, fragment) {
+			t.Errorf("migration does not atomically seed canonical default policy/history: missing %q", fragment)
+		}
+	}
+}
+
 func TestApprovalQueriesAreVersionTenantAndLimitScoped(t *testing.T) {
 	raw, err := os.ReadFile("../../db/queries/approval.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	sql := strings.ToLower(string(raw))
-	for _, value := range []string{"getlatestapprovalorgversion", "getenterpriseapprovalpolicy", "getcurrentapprovalpolicyversion", "acquireenterpriseapprovalpolicylock", "hashtextextended($1, 2)", "listapprovalorgunits", "listapprovalmemberships", "listapprovalusers", "insertapprovalqueueitem", "enterprise_id = $1", "version_number = $2", "limit 10001", "limit 100001"} {
+	for _, value := range []string{"getlatestapprovalorgversion", "getenterpriseapprovalpolicy", "getcurrentapprovalpolicyversion", "acquireenterpriseapprovalpolicylock", "publishenterpriseapprovalpolicy", "hashtextextended($1, 2)", "policy_version = enterprise_approval_policies.policy_version + 1", "listapprovalorgunits", "listapprovalmemberships", "listapprovalusers", "insertapprovalqueueitem", "enterprise_id = $1", "version_number = $2", "limit 10001", "limit 100001"} {
 		if !strings.Contains(sql, value) {
 			t.Errorf("queries missing %q", value)
 		}

@@ -17,7 +17,7 @@ import (
 func TestMemoryApprovalStoreCreatesQueueOnlyForReviewRoutesAndAlwaysAudits(t *testing.T) {
 	store := newMemoryApprovalTestStore(nil)
 	req := storeRequest()
-	direct := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, OrgPath: []string{req.OrgUnitID}, PolicyVersion: req.PolicyVersion}
+	direct := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, RequesterPermission: approval.PermissionPublishLowRisk, RequesterPermissionOrgUnitID: req.OrgUnitID, OrgPath: []string{req.OrgUnitID}, PolicyVersion: req.PolicyVersion}
 	if err := store.Record(context.Background(), req, direct); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestMemoryApprovalStoreRollsBackQueueAndAuditFailures(t *testing.T) {
 func TestMemoryApprovalStoreSerializesConcurrentAuditChain(t *testing.T) {
 	store := newMemoryApprovalTestStore(nil)
 	req := storeRequest()
-	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, RequesterPermission: approval.PermissionPublishLowRisk, RequesterPermissionOrgUnitID: "team", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
 	var wg sync.WaitGroup
 	errs := make(chan error, 20)
 	for i := 0; i < 20; i++ {
@@ -170,7 +170,7 @@ func TestRecordedRouteRejectsMalformedDatabaseEvidence(t *testing.T) {
 		func() approval.Route { v := valid; v.OrgPath = []string{"team", "team"}; return v }(),
 		func() approval.Route { v := valid; v.ReviewerDisplayName = ""; return v }(),
 		func() approval.Route { v := valid; v.ReviewerPermission = approval.PermissionPublishLowRisk; return v }(),
-		func() approval.Route { v := valid; v.ReviewerPermissionOrgUnitID = "other"; return v }(),
+		func() approval.Route { v := valid; v.ReviewerPermissionOrgUnitID = " other"; return v }(),
 		{Mode: approval.ModeEnterpriseKnowledgeAdminQueue, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team"}, Queue: approval.EnterpriseKnowledgeAdminQueue, PolicyVersion: req.PolicyVersion},
 	}
 	for _, route := range tests {
@@ -195,6 +195,32 @@ func TestApprovalQueueStatusTransitionsAreOneWayAfterVersionsAdvance(t *testing.
 	}
 	if !validApprovalQueueStatusTransition("pending", "pending") {
 		t.Fatal("pending no-op rejected")
+	}
+}
+
+func TestRecordedDirectRouteAllowsInheritedRequesterPermissionEvidence(t *testing.T) {
+	req := storeRequest()
+	route := approval.Route{
+		Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow,
+		RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID,
+		RequesterPermission: approval.PermissionPublishLowRisk, RequesterPermissionOrgUnitID: "root",
+		OrgPath: []string{req.OrgUnitID}, PolicyVersion: req.PolicyVersion,
+	}
+	if !validRecordedRoute(req, route) {
+		t.Fatalf("inherited requester permission rejected: %+v", route)
+	}
+}
+
+func TestRecordedReviewRouteAllowsInheritedReviewerPermissionEvidence(t *testing.T) {
+	req := storeRequest()
+	route := approval.Route{
+		Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh,
+		RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID,
+		ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", ReviewerPermission: approval.PermissionApproveHighRisk,
+		ReviewerPermissionOrgUnitID: "root", OrgPath: []string{req.OrgUnitID, "dept"}, PolicyVersion: req.PolicyVersion,
+	}
+	if !validRecordedRoute(req, route) {
+		t.Fatalf("inherited reviewer permission rejected: %+v", route)
 	}
 }
 

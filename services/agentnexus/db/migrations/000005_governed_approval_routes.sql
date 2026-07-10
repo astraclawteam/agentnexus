@@ -86,6 +86,13 @@ CREATE TRIGGER record_enterprise_approval_policy_version
 AFTER INSERT OR UPDATE ON enterprise_approval_policies
 FOR EACH ROW EXECUTE FUNCTION record_enterprise_approval_policy_version();
 
+INSERT INTO enterprise_approval_policies (
+    enterprise_id, minimum_risk, max_low_impacted_users,
+    max_low_impacted_org_units, policy_version
+)
+SELECT id, 'low', 25, 1, 1 FROM enterprises
+ON CONFLICT (enterprise_id) DO NOTHING;
+
 ALTER TABLE approval_queue_items
     ADD COLUMN org_version BIGINT NOT NULL CHECK (org_version > 0),
     ADD COLUMN risk_reasons JSONB NOT NULL CHECK (jsonb_typeof(risk_reasons) = 'array'),
@@ -163,6 +170,8 @@ CREATE TABLE approval_resolution_idempotency (
     reviewer_display_name TEXT,
     reviewer_permission TEXT CHECK (reviewer_permission IN ('publish_low_risk','approve_high_risk')),
     reviewer_permission_org_unit_id TEXT,
+    requester_permission TEXT CHECK (requester_permission = 'publish_low_risk'),
+    requester_permission_org_unit_id TEXT,
     org_path JSONB NOT NULL,
     queue TEXT,
     auto_publish BOOLEAN NOT NULL DEFAULT false CHECK (auto_publish = false),
@@ -180,13 +189,14 @@ CREATE TABLE approval_resolution_idempotency (
     FOREIGN KEY (enterprise_id, org_version, org_unit_id) REFERENCES org_policy_snapshot_units(enterprise_id, version_number, org_unit_id),
     FOREIGN KEY (enterprise_id, org_version, reviewer_org_unit_id) REFERENCES org_policy_snapshot_units(enterprise_id, version_number, org_unit_id),
     FOREIGN KEY (enterprise_id, org_version, reviewer_permission_org_unit_id) REFERENCES org_policy_snapshot_units(enterprise_id, version_number, org_unit_id),
+    FOREIGN KEY (enterprise_id, org_version, requester_permission_org_unit_id) REFERENCES org_policy_snapshot_units(enterprise_id, version_number, org_unit_id),
     FOREIGN KEY (enterprise_id, policy_version_ref) REFERENCES enterprise_approval_policy_versions(enterprise_id, policy_version),
     CHECK (policy_version_ref=policy_version),
     CHECK (reviewer_user_id IS NULL OR reviewer_user_id <> requester_user_id),
     CHECK (
-        (route_mode = 'single_confirmation' AND risk_level = 'low' AND reviewer_user_id IS NULL AND reviewer_org_unit_id IS NULL AND reviewer_display_name IS NULL AND reviewer_permission IS NULL AND reviewer_permission_org_unit_id IS NULL AND queue IS NULL AND queue_item_id IS NULL) OR
-        (route_mode = 'upward_review' AND reviewer_user_id IS NOT NULL AND reviewer_org_unit_id IS NOT NULL AND reviewer_display_name IS NOT NULL AND reviewer_permission IS NOT NULL AND reviewer_permission_org_unit_id IS NOT NULL AND queue IS NULL AND queue_item_id IS NOT NULL) OR
-        (route_mode = 'enterprise_knowledge_admin_queue' AND reviewer_user_id IS NULL AND reviewer_org_unit_id IS NULL AND reviewer_display_name IS NULL AND reviewer_permission IS NULL AND reviewer_permission_org_unit_id IS NULL AND queue = 'enterprise_knowledge_admin' AND queue_item_id IS NOT NULL)
+        (route_mode = 'single_confirmation' AND risk_level = 'low' AND reviewer_user_id IS NULL AND reviewer_org_unit_id IS NULL AND reviewer_display_name IS NULL AND reviewer_permission IS NULL AND reviewer_permission_org_unit_id IS NULL AND requester_permission = 'publish_low_risk' AND requester_permission_org_unit_id IS NOT NULL AND queue IS NULL AND queue_item_id IS NULL) OR
+        (route_mode = 'upward_review' AND reviewer_user_id IS NOT NULL AND reviewer_org_unit_id IS NOT NULL AND reviewer_display_name IS NOT NULL AND reviewer_permission IS NOT NULL AND reviewer_permission_org_unit_id IS NOT NULL AND requester_permission IS NULL AND requester_permission_org_unit_id IS NULL AND queue IS NULL AND queue_item_id IS NOT NULL) OR
+        (route_mode = 'enterprise_knowledge_admin_queue' AND reviewer_user_id IS NULL AND reviewer_org_unit_id IS NULL AND reviewer_display_name IS NULL AND reviewer_permission IS NULL AND reviewer_permission_org_unit_id IS NULL AND requester_permission IS NULL AND requester_permission_org_unit_id IS NULL AND queue = 'enterprise_knowledge_admin' AND queue_item_id IS NOT NULL)
     )
 );
 
@@ -290,6 +300,26 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION validate_direct_requester_permission_evidence() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.route_mode='single_confirmation' AND (
+        NEW.requester_permission IS DISTINCT FROM 'publish_low_risk' OR
+        NOT EXISTS (SELECT 1 FROM org_policy_snapshot_memberships m WHERE m.enterprise_id=NEW.enterprise_id AND m.version_number=NEW.org_version AND m.enterprise_user_id=NEW.requester_user_id AND m.org_unit_id=NEW.requester_permission_org_unit_id AND m.role='publish_low_risk') OR
+        NOT EXISTS (
+            WITH RECURSIVE ancestors(org_unit_id, parent_id) AS (
+                SELECT u.org_unit_id, u.parent_id FROM org_policy_snapshot_units u
+                WHERE u.enterprise_id=NEW.enterprise_id AND u.version_number=NEW.org_version AND u.org_unit_id=NEW.org_unit_id
+                UNION ALL
+                SELECT p.org_unit_id, p.parent_id FROM org_policy_snapshot_units p JOIN ancestors a ON p.org_unit_id=a.parent_id
+                WHERE p.enterprise_id=NEW.enterprise_id AND p.version_number=NEW.org_version
+            ) SELECT 1 FROM ancestors WHERE org_unit_id=NEW.requester_permission_org_unit_id
+        )
+    ) THEN RAISE EXCEPTION 'invalid requester permission evidence'; END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE FUNCTION guard_approval_resolution_evidence() RETURNS trigger
 LANGUAGE plpgsql AS $$ BEGIN
     RAISE EXCEPTION 'approval resolution evidence is immutable';
@@ -310,12 +340,17 @@ END; $$;
 CREATE FUNCTION reject_approval_evidence_truncate() RETURNS trigger
 LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'approval evidence truncate is forbidden'; END; $$;
 
+CREATE FUNCTION guard_audit_ledger_append_only() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+    RAISE EXCEPTION 'approval audit ledger is append-only';
+END; $$;
+
 CREATE FUNCTION validate_approval_resolution_links() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE linked_audit audit_events%ROWTYPE; linked_queue approval_queue_items%ROWTYPE;
 BEGIN
     SELECT * INTO linked_audit FROM audit_events WHERE enterprise_id=NEW.enterprise_id AND id=NEW.audit_event_id;
-    IF NOT FOUND OR linked_audit.input_hash IS DISTINCT FROM NEW.expected_audit_input_hash OR linked_audit.output_hash IS DISTINCT FROM NEW.expected_audit_output_hash OR linked_audit.actor_user_id IS DISTINCT FROM NEW.requester_user_id OR linked_audit.resource_type IS DISTINCT FROM NEW.resource_type OR linked_audit.resource_id IS DISTINCT FROM NEW.resource_id OR linked_audit.action <> 'approval.route.resolve' OR linked_audit.decision <> NEW.route_mode THEN
+    IF NOT FOUND OR linked_audit.input_hash IS DISTINCT FROM NEW.expected_audit_input_hash OR linked_audit.output_hash IS DISTINCT FROM NEW.expected_audit_output_hash OR linked_audit.actor_user_id IS DISTINCT FROM NEW.requester_user_id OR linked_audit.resource_type IS DISTINCT FROM NEW.resource_type OR linked_audit.resource_id IS DISTINCT FROM NEW.resource_id OR linked_audit.action <> 'approval.route.resolve' OR linked_audit.decision <> NEW.route_mode OR linked_audit.evidence_pointer IS DISTINCT FROM NEW.queue_item_id THEN
         RAISE EXCEPTION 'approval audit evidence mismatch';
     END IF;
     IF NEW.queue_item_id IS NOT NULL THEN
@@ -337,12 +372,17 @@ FOR EACH ROW EXECUTE FUNCTION validate_approval_route_evidence();
 CREATE TRIGGER validate_approval_resolution_route_evidence
 BEFORE INSERT ON approval_resolution_idempotency
 FOR EACH ROW EXECUTE FUNCTION validate_approval_route_evidence();
+CREATE TRIGGER validate_direct_requester_permission_evidence
+BEFORE INSERT ON approval_resolution_idempotency
+FOR EACH ROW EXECUTE FUNCTION validate_direct_requester_permission_evidence();
 CREATE TRIGGER guard_approval_resolution_evidence
 BEFORE UPDATE OR DELETE ON approval_resolution_idempotency FOR EACH ROW EXECUTE FUNCTION guard_approval_resolution_evidence();
 CREATE TRIGGER guard_approval_queue_evidence
 BEFORE UPDATE OR DELETE ON approval_queue_items FOR EACH ROW EXECUTE FUNCTION guard_approval_queue_evidence();
 CREATE TRIGGER reject_approval_resolution_truncate BEFORE TRUNCATE ON approval_resolution_idempotency FOR EACH STATEMENT EXECUTE FUNCTION reject_approval_evidence_truncate();
 CREATE TRIGGER reject_approval_queue_truncate BEFORE TRUNCATE ON approval_queue_items FOR EACH STATEMENT EXECUTE FUNCTION reject_approval_evidence_truncate();
+CREATE TRIGGER guard_audit_ledger_append_only BEFORE UPDATE OR DELETE ON audit_events FOR EACH ROW EXECUTE FUNCTION guard_audit_ledger_append_only();
+CREATE TRIGGER reject_audit_ledger_truncate BEFORE TRUNCATE ON audit_events FOR EACH STATEMENT EXECUTE FUNCTION guard_audit_ledger_append_only();
 CREATE CONSTRAINT TRIGGER validate_approval_resolution_links AFTER INSERT ON approval_resolution_idempotency DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_approval_resolution_links();
 -- +goose StatementEnd
 
@@ -352,16 +392,21 @@ DROP TRIGGER IF EXISTS require_sealed_approval_org_version ON approval_queue_ite
 DROP TRIGGER IF EXISTS require_sealed_approval_resolution_org_version ON approval_resolution_idempotency;
 DROP TRIGGER IF EXISTS validate_approval_queue_route_evidence ON approval_queue_items;
 DROP TRIGGER IF EXISTS validate_approval_resolution_route_evidence ON approval_resolution_idempotency;
+DROP TRIGGER IF EXISTS validate_direct_requester_permission_evidence ON approval_resolution_idempotency;
 DROP TRIGGER IF EXISTS guard_approval_resolution_evidence ON approval_resolution_idempotency;
 DROP TRIGGER IF EXISTS guard_approval_queue_evidence ON approval_queue_items;
 DROP TRIGGER IF EXISTS reject_approval_resolution_truncate ON approval_resolution_idempotency;
 DROP TRIGGER IF EXISTS reject_approval_queue_truncate ON approval_queue_items;
+DROP TRIGGER IF EXISTS guard_audit_ledger_append_only ON audit_events;
+DROP TRIGGER IF EXISTS reject_audit_ledger_truncate ON audit_events;
 DROP TRIGGER IF EXISTS validate_approval_resolution_links ON approval_resolution_idempotency;
 DROP FUNCTION IF EXISTS validate_approval_resolution_links();
 DROP FUNCTION IF EXISTS reject_approval_evidence_truncate();
+DROP FUNCTION IF EXISTS guard_audit_ledger_append_only();
 DROP FUNCTION IF EXISTS guard_approval_queue_evidence();
 DROP FUNCTION IF EXISTS guard_approval_resolution_evidence();
 DROP FUNCTION IF EXISTS validate_approval_route_evidence();
+DROP FUNCTION IF EXISTS validate_direct_requester_permission_evidence();
 DROP FUNCTION IF EXISTS require_sealed_approval_org_version();
 DROP TABLE IF EXISTS approval_resolution_idempotency;
 ALTER TABLE approval_queue_items

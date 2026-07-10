@@ -10,6 +10,7 @@ import (
 	"time"
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -323,11 +324,25 @@ func (c *pgxOrgPublicationConn) Destroy(ctx context.Context) error {
 }
 
 func (s *PostgresStore) CreateEnterprise(ctx context.Context, enterprise Enterprise) (Enterprise, error) {
+	policy := approval.DefaultPolicy()
 	row := s.pool.QueryRow(ctx, `
-INSERT INTO enterprises (id, name)
-VALUES ($1, $2)
-ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
-RETURNING id, name, created_at`, enterprise.ID, enterprise.Name)
+WITH created_enterprise AS (
+    INSERT INTO enterprises (id, name)
+    VALUES ($1, $2)
+    ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+    RETURNING id, name, created_at
+), provisioned_policy AS (
+    INSERT INTO enterprise_approval_policies (
+        enterprise_id, minimum_risk, max_low_impacted_users,
+        max_low_impacted_org_units, policy_version
+    )
+    SELECT id, $3, $4, $5, 1 FROM created_enterprise
+    ON CONFLICT (enterprise_id) DO NOTHING
+    RETURNING enterprise_id
+)
+SELECT created.id, created.name, created.created_at
+FROM created_enterprise AS created
+LEFT JOIN provisioned_policy AS policy ON policy.enterprise_id = created.id`, enterprise.ID, enterprise.Name, string(policy.MinimumRisk), policy.MaxLowImpactedUsers, policy.MaxLowImpactedOrgUnits)
 	return scanEnterprise(row)
 }
 

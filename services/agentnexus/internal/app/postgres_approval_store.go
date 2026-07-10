@@ -211,7 +211,7 @@ func (s *PostgresApprovalStore) RecordResolution(ctx context.Context, req approv
 	if route.Mode == approval.ModeUpwardReview {
 		reviewerUnit = route.OrgPath[len(route.OrgPath)-1]
 	}
-	inserted, err := tx.InsertApprovalResolution(ctx, db.InsertApprovalResolutionParams{EnterpriseID: req.EnterpriseID, IdempotencyKeyHash: req.IdempotencyHash, RequestHash: req.ReplayHash, RequesterUserID: req.RequesterUserID, OrgVersion: req.OrgVersion, OrgUnitID: req.OrgUnitID, PolicyVersion: req.PolicyVersion, ResourceType: req.ResourceType, ResourceID: req.ResourceID, Action: req.Action, RouteMode: string(route.Mode), RiskLevel: string(route.RiskLevel), RiskReasons: reasons, ReviewerUserID: textValue(route.ReviewerUserID), ReviewerOrgUnitID: textValue(reviewerUnit), ReviewerDisplayName: textValue(route.ReviewerDisplayName), ReviewerPermission: textValue(string(route.ReviewerPermission)), ReviewerPermissionOrgUnitID: textValue(route.ReviewerPermissionOrgUnitID), OrgPath: path, Queue: textValue(route.Queue), QueueItemID: textValue(queueID), AuditEventID: auditID, ExpectedAuditInputHash: inputHash, ExpectedAuditOutputHash: outputHash})
+	inserted, err := tx.InsertApprovalResolution(ctx, db.InsertApprovalResolutionParams{EnterpriseID: req.EnterpriseID, IdempotencyKeyHash: req.IdempotencyHash, RequestHash: req.ReplayHash, RequesterUserID: req.RequesterUserID, OrgVersion: req.OrgVersion, OrgUnitID: req.OrgUnitID, PolicyVersion: req.PolicyVersion, ResourceType: req.ResourceType, ResourceID: req.ResourceID, Action: req.Action, RouteMode: string(route.Mode), RiskLevel: string(route.RiskLevel), RiskReasons: reasons, ReviewerUserID: textValue(route.ReviewerUserID), ReviewerOrgUnitID: textValue(reviewerUnit), ReviewerDisplayName: textValue(route.ReviewerDisplayName), ReviewerPermission: textValue(string(route.ReviewerPermission)), ReviewerPermissionOrgUnitID: textValue(route.ReviewerPermissionOrgUnitID), RequesterPermission: textValue(string(route.RequesterPermission)), RequesterPermissionOrgUnitID: textValue(route.RequesterPermissionOrgUnitID), OrgPath: path, Queue: textValue(route.Queue), QueueItemID: textValue(queueID), AuditEventID: auditID, ExpectedAuditInputHash: inputHash, ExpectedAuditOutputHash: outputHash})
 	if err != nil || inserted != 1 {
 		return approval.Route{}, errors.Join(ErrApprovalIdempotencyConflict, err)
 	}
@@ -241,18 +241,20 @@ func routeFromResolution(row db.ApprovalResolutionIdempotency) (approval.Route, 
 	}
 	mode := approval.RouteMode(row.RouteMode)
 	return approval.Route{
-		Mode:                        mode,
-		RiskLevel:                   approval.RiskLevel(row.RiskLevel),
-		RiskReasons:                 reasons,
-		RequesterUserID:             row.RequesterUserID,
-		ReviewerUserID:              row.ReviewerUserID.String,
-		ReviewerDisplayName:         row.ReviewerDisplayName.String,
-		ReviewerPermission:          approval.Permission(row.ReviewerPermission.String),
-		ReviewerPermissionOrgUnitID: row.ReviewerPermissionOrgUnitID.String,
-		OrgPath:                     path,
-		Queue:                       row.Queue.String,
-		AutoPublish:                 row.AutoPublish,
-		PolicyVersion:               row.PolicyVersion,
-		AdminRootReached:            mode == approval.ModeEnterpriseKnowledgeAdminQueue,
+		Mode:                         mode,
+		RiskLevel:                    approval.RiskLevel(row.RiskLevel),
+		RiskReasons:                  reasons,
+		RequesterUserID:              row.RequesterUserID,
+		ReviewerUserID:               row.ReviewerUserID.String,
+		ReviewerDisplayName:          row.ReviewerDisplayName.String,
+		ReviewerPermission:           approval.Permission(row.ReviewerPermission.String),
+		ReviewerPermissionOrgUnitID:  row.ReviewerPermissionOrgUnitID.String,
+		RequesterPermission:          approval.Permission(row.RequesterPermission.String),
+		RequesterPermissionOrgUnitID: row.RequesterPermissionOrgUnitID.String,
+		OrgPath:                      path,
+		Queue:                        row.Queue.String,
+		AutoPublish:                  row.AutoPublish,
+		PolicyVersion:                row.PolicyVersion,
+		AdminRootReached:             mode == approval.ModeEnterpriseKnowledgeAdminQueue,
 	}, nil
 }

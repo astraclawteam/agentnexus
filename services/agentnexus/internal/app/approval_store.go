@@ -241,15 +241,15 @@ func validRecordedRoute(req approval.Request, route approval.Route) bool {
 	}
 	switch route.Mode {
 	case approval.ModeSingleConfirmation:
-		return route.RiskLevel == approval.RiskLow && route.ReviewerUserID == "" && route.ReviewerDisplayName == "" && route.ReviewerPermission == "" && route.ReviewerPermissionOrgUnitID == "" && !route.AdminRootReached && route.Queue == ""
+		return route.RiskLevel == approval.RiskLow && route.ReviewerUserID == "" && route.ReviewerDisplayName == "" && route.ReviewerPermission == "" && route.ReviewerPermissionOrgUnitID == "" && route.RequesterPermission == approval.PermissionPublishLowRisk && canonicalAuthorizationValue(route.RequesterPermissionOrgUnitID) && !route.AdminRootReached && route.Queue == ""
 	case approval.ModeUpwardReview:
 		expected := approval.PermissionApproveHighRisk
 		if route.RiskLevel == approval.RiskLow {
 			expected = approval.PermissionPublishLowRisk
 		}
-		return canonicalAuthorizationValue(route.ReviewerUserID) && canonicalAuthorizationValue(route.ReviewerDisplayName) && route.ReviewerPermission == expected && canonicalAuthorizationValue(route.ReviewerPermissionOrgUnitID) && seenUnits[route.ReviewerPermissionOrgUnitID] && !route.AdminRootReached && route.Queue == ""
+		return canonicalAuthorizationValue(route.ReviewerUserID) && canonicalAuthorizationValue(route.ReviewerDisplayName) && route.ReviewerPermission == expected && canonicalAuthorizationValue(route.ReviewerPermissionOrgUnitID) && route.RequesterPermission == "" && route.RequesterPermissionOrgUnitID == "" && !route.AdminRootReached && route.Queue == ""
 	case approval.ModeEnterpriseKnowledgeAdminQueue:
-		return route.ReviewerUserID == "" && route.ReviewerDisplayName == "" && route.ReviewerPermission == "" && route.ReviewerPermissionOrgUnitID == "" && route.AdminRootReached && route.Queue == approval.EnterpriseKnowledgeAdminQueue
+		return route.ReviewerUserID == "" && route.ReviewerDisplayName == "" && route.ReviewerPermission == "" && route.ReviewerPermissionOrgUnitID == "" && route.RequesterPermission == "" && route.RequesterPermissionOrgUnitID == "" && route.AdminRootReached && route.Queue == approval.EnterpriseKnowledgeAdminQueue
 	default:
 		return false
 	}

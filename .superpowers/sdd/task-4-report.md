@@ -143,12 +143,34 @@ Strict HTTP coverage includes single Content-Type, JSON object, unknown keys, du
 
 No live PostgreSQL service was available: Docker Desktop was installed but its Linux engine was not running. Migration SQL is covered by contract tests and sqlc generation; live trigger/FK/contention execution remains deferred to Task 6.
 
+### Frozen response, policy provisioning, and permanent audit evidence review
+
+1. RED: `go test ./internal/approval -run 'TestApprovalRouteJSONKeepsFrozenPublicShape|TestResolveAuthorizedLowUsesSingleConfirmationWithoutPublishing|TestApprovalMigration|TestApprovalQueries' -count=1`
+   - Route tests did not compile because requester permission evidence did not exist. After adding only the internal fields, the SQL contracts failed on missing upgraded-enterprise seed, publish workflow, append-only audit guards, pointer binding, and direct requester evidence.
+2. RED: `go test ./internal/iam -run TestPostgresCreateEnterpriseAtomicallyProvisionsApprovalPolicy -count=1`
+   - New enterprise creation contained only the enterprise upsert; it had no atomic policy provisioning. A second RED proved the first implementation duplicated constants instead of consuming canonical `approval.DefaultPolicy()`.
+3. RED: `go test ./internal/app -run 'TestApprovalResolveRejectsStrictJSONAndRequesterOverride|TestOpenAPIContractFrozenEnumsAndShapes|TestPostgresApprovalStoreDirectLowSkipsQueueButAudits' -count=1`
+   - `requested_risk:""` returned 200. The persistence test initially could not compile because direct requester permission columns/params were absent.
+4. GREEN:
+   - `ApprovalRoute` again exposes only the frozen response shape. Policy version, requester/reviewer permission scopes, and root-reach evidence are internal (`json:"-"`); OpenAPI no longer declares `policy_version`.
+   - Migration Up seeds every existing enterprise with canonical version 1 defaults after the history trigger is installed. PostgreSQL enterprise creation is one CTE statement that upserts the enterprise and provisions its policy from Go `DefaultPolicy()` values. Migration contract tests lock the unavoidable SQL seed constants to the Go default.
+   - `PublishEnterpriseApprovalPolicy` uses the same enterprise policy advisory lock, an expected current version, strict `+1` version advancement, and the existing history trigger in the same transaction.
+   - The complete audit ledger is append-only: UPDATE, DELETE, and TRUNCATE fail. Deferred resolution validation binds enterprise, audit hashes/content, and `evidence_pointer`; queued routes require the exact queue ID and direct-low requires NULL.
+   - Single confirmation persists exact requester `publish_low_risk` permission and covering scope. A resolution-only database trigger independently proves membership and inherited ancestor coverage in the sealed snapshot. Reviewer/admin records reject unrelated requester evidence.
+   - Both requester and reviewer inherited permission scopes remain valid even when above the public route endpoint; canonical/exact evidence is checked in application code and sealed-snapshot coverage is checked in PostgreSQL.
+   - Present-but-empty requested risk is rejected as a 400, matching the OpenAPI enum.
+5. Integration diagnosis: the first full suite run failed because an older unit test assumed any permission scope outside public `org_path` was malformed. That assumption conflicts with inherited authorization. The test now rejects non-canonical evidence while dedicated tests cover inherited requester/reviewer scopes; PostgreSQL remains authoritative for ancestry.
+6. GREEN verification:
+   - `go test ./internal/approval ./internal/app ./internal/iam ./internal/policy ./db/generated -run 'Approval|Resolve|Enterprise|OpenAPI|Authorization|HMAC' -count=20`
+   - sqlc generated twice with identical hashes.
+   - `go test ./... -count=1`, vet, and all four command builds passed.
+
 ## Final Verification
 
 Run from `services/agentnexus`:
 
-- `go test ./internal/approval ./internal/app ./internal/policy ./db/generated -run 'Approval|Resolve|Atlas|Authorization' -count=20`
-  - PASS: approval, app, and policy; generated package has no tests.
+- `go test ./internal/approval ./internal/app ./internal/iam ./internal/policy ./db/generated -run 'Approval|Resolve|Enterprise|OpenAPI|Authorization|HMAC' -count=20`
+  - PASS: approval, app, IAM, and policy; generated package has no tests.
 - `go test ./... -count=1`
   - PASS: all packages, including gateway API, app, approval, policy, Task 2/3 packages, e2e, and integration.
 - `$env:GOFLAGS='-buildvcs=false'; go vet ./...`
@@ -177,9 +199,12 @@ Race testing was not run because `gcc` is not installed (`gcc` command not found
 - Full graph validation rejects stale/missing/cross-tenant/cycle/dangling/duplicate/over-limit input and cancellation fails closed.
 - Queue insertion and audit-chain append share one PostgreSQL transaction and enterprise advisory lock. Any queue/audit/commit failure prevents success.
 - Direct low route also appends an audit event, but does not create a queue item.
+- Existing and newly created enterprises receive a versioned default policy automatically; policy publication is serialized and strictly monotonic.
+- Approval-linked audit hashes and queue pointers cannot be altered after commit because the ledger, resolution, and queue evidence are immutable (apart from the queue's one-way terminal status transition).
+- Direct-low requester permission is persisted as internal evidence and independently revalidated against the exact sealed snapshot; inherited covering scopes are supported.
 - Migration Down removes trigger/function/constraints/columns in dependency-safe order. Existing untrusted rows abort Up instead of receiving fabricated evidence.
 - Responses contain only the selected reviewer or administrator queue, never candidate lists or backend errors.
-- Required JSON arrays are non-nil; reviewer/queue optional fields are emitted only for their matching frozen route modes; `auto_publish` is always false.
+- Required JSON arrays are non-nil; reviewer/queue optional fields are emitted only for their matching frozen route modes; internal policy/permission evidence is not serialized; `auto_publish` is always false.
 
 ## Files
 

@@ -67,8 +67,11 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 	t.Run("ApprovalRoute", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "ApprovalRoute")
 		assertObjectProperties(t, schema, []string{
-			"mode", "risk_level", "risk_reasons", "requester_user_id", "org_path", "auto_publish", "policy_version",
+			"mode", "risk_level", "risk_reasons", "requester_user_id", "org_path", "auto_publish",
 		}, []string{"reviewer_user_id", "reviewer_display_name", "queue"})
+		if _, exists := nestedMap(t, schema, "properties")["policy_version"]; exists {
+			t.Fatal("frozen ApprovalRoute must not expose internal policy_version evidence")
+		}
 		assertEnum(t, property(t, schema, "mode"), []any{
 			"single_confirmation", "upward_review", "enterprise_knowledge_admin_queue",
 		})

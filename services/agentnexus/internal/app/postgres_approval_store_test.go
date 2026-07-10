@@ -149,7 +149,7 @@ func TestPostgresApprovalStoreUsesOneTransactionAndAuditLock(t *testing.T) {
 			t.Fatalf("order=%v want=%v", tx.order, want)
 		}
 	}
-	if tx.resolutionParams.EnterpriseID != req.EnterpriseID || tx.queueParams.EnterpriseID != req.EnterpriseID || tx.auditParams.EnterpriseID != req.EnterpriseID || tx.resolutionParams.ExpectedAuditInputHash != tx.auditParams.InputHash.String || tx.resolutionParams.ExpectedAuditOutputHash != tx.auditParams.OutputHash.String {
+	if tx.resolutionParams.EnterpriseID != req.EnterpriseID || tx.queueParams.EnterpriseID != req.EnterpriseID || tx.auditParams.EnterpriseID != req.EnterpriseID || tx.resolutionParams.ExpectedAuditInputHash != tx.auditParams.InputHash.String || tx.resolutionParams.ExpectedAuditOutputHash != tx.auditParams.OutputHash.String || tx.resolutionParams.QueueItemID.String != tx.auditParams.EvidencePointer.String || !tx.auditParams.EvidencePointer.Valid {
 		t.Fatalf("evidence mismatch resolution=%+v queue=%+v audit=%+v", tx.resolutionParams, tx.queueParams, tx.auditParams)
 	}
 }
@@ -186,7 +186,7 @@ func TestPostgresApprovalStoreRandomFailureRollsBackBeforeResolutionInsert(t *te
 	tx := &fakeApprovalWriteTx{}
 	store := newPostgresApprovalStoreWithPool(&fakeApprovalWritePool{tx: tx}, bytes.NewReader([]byte{1}))
 	req := storeRequest()
-	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, RequesterPermission: approval.PermissionPublishLowRisk, RequesterPermissionOrgUnitID: "team", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
 	if _, err := store.RecordResolution(context.Background(), req, route); err == nil || !tx.rolledBack || containsStep(tx.order, "resolution") {
 		t.Fatalf("err=%v rollback=%v order=%v", err, tx.rolledBack, tx.order)
 	}
@@ -196,7 +196,7 @@ func TestPostgresApprovalStoreDirectLowSkipsQueueButAudits(t *testing.T) {
 	tx := &fakeApprovalWriteTx{}
 	store := newPostgresApprovalStoreWithPool(&fakeApprovalWritePool{tx: tx}, bytes.NewReader(make([]byte, 4096)))
 	req := storeRequest()
-	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, RequesterPermission: approval.PermissionPublishLowRisk, RequesterPermissionOrgUnitID: "team", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
 	if err := store.Record(context.Background(), req, route); err != nil {
 		t.Fatal(err)
 	}
@@ -205,15 +205,18 @@ func TestPostgresApprovalStoreDirectLowSkipsQueueButAudits(t *testing.T) {
 			t.Fatalf("direct low queued: %v", tx.order)
 		}
 	}
+	if tx.resolutionParams.RequesterPermission.String != string(approval.PermissionPublishLowRisk) || tx.resolutionParams.RequesterPermissionOrgUnitID.String != "team" || tx.auditParams.EvidencePointer.Valid {
+		t.Fatalf("direct evidence resolution=%+v audit=%+v", tx.resolutionParams, tx.auditParams)
+	}
 }
 
 func TestPostgresApprovalStoreReplaysBeforeStaleCheckAndDetectsConflict(t *testing.T) {
 	req := storeRequest()
-	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, RequesterPermission: approval.PermissionPublishLowRisk, RequesterPermissionOrgUnitID: "team", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
 	requestHash := req.ReplayHash
 	reasons, _ := json.Marshal(route.RiskReasons)
 	path, _ := json.Marshal(route.OrgPath)
-	existing := db.ApprovalResolutionIdempotency{EnterpriseID: req.EnterpriseID, IdempotencyKeyHash: req.IdempotencyHash, RequestHash: requestHash, RequesterUserID: req.RequesterUserID, OrgVersion: req.OrgVersion, OrgUnitID: req.OrgUnitID, PolicyVersion: req.PolicyVersion, ResourceType: req.ResourceType, ResourceID: req.ResourceID, Action: req.Action, RouteMode: string(route.Mode), RiskLevel: string(route.RiskLevel), RiskReasons: reasons, OrgPath: path, AuditEventID: "audit-1"}
+	existing := db.ApprovalResolutionIdempotency{EnterpriseID: req.EnterpriseID, IdempotencyKeyHash: req.IdempotencyHash, RequestHash: requestHash, RequesterUserID: req.RequesterUserID, OrgVersion: req.OrgVersion, OrgUnitID: req.OrgUnitID, PolicyVersion: req.PolicyVersion, ResourceType: req.ResourceType, ResourceID: req.ResourceID, Action: req.Action, RouteMode: string(route.Mode), RiskLevel: string(route.RiskLevel), RiskReasons: reasons, RequesterPermission: pgtype.Text{String: string(approval.PermissionPublishLowRisk), Valid: true}, RequesterPermissionOrgUnitID: pgtype.Text{String: "team", Valid: true}, OrgPath: path, AuditEventID: "audit-1"}
 	tx := &fakeApprovalWriteTx{existing: &existing, orgVersion: 99, policyVersion: 99}
 	store := newPostgresApprovalStoreWithPool(&fakeApprovalWritePool{tx: tx}, bytes.NewReader(make([]byte, 4096)))
 	replayed, err := store.RecordResolution(context.Background(), req, route)
@@ -232,7 +235,7 @@ func TestPostgresApprovalStoreRejectsStaleOrgOrPolicyBeforeAuditLock(t *testing.
 	for _, tx := range []*fakeApprovalWriteTx{{orgVersion: 8}, {orgVersion: 7, policyVersion: 2}} {
 		store := newPostgresApprovalStoreWithPool(&fakeApprovalWritePool{tx: tx}, bytes.NewReader(make([]byte, 4096)))
 		req := storeRequest()
-		route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+		route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, RequesterPermission: approval.PermissionPublishLowRisk, RequesterPermissionOrgUnitID: "team", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
 		if _, err := store.RecordResolution(context.Background(), req, route); !errors.Is(err, ErrApprovalStale) || containsStep(tx.order, "lock") {
 			t.Fatalf("err=%v order=%v", err, tx.order)
 		}

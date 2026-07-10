@@ -37,33 +37,35 @@ type ApprovalQueueItem struct {
 }
 
 type ApprovalResolutionIdempotency struct {
-	EnterpriseID                string
-	IdempotencyKeyHash          string
-	RequestHash                 string
-	RequesterUserID             string
-	OrgVersion                  int64
-	OrgUnitID                   string
-	PolicyVersion               int64
-	PolicyVersionRef            int64
-	ResourceType                string
-	ResourceID                  string
-	Action                      string
-	RouteMode                   string
-	RiskLevel                   string
-	RiskReasons                 []byte
-	ReviewerUserID              pgtype.Text
-	ReviewerOrgUnitID           pgtype.Text
-	ReviewerDisplayName         pgtype.Text
-	ReviewerPermission          pgtype.Text
-	ReviewerPermissionOrgUnitID pgtype.Text
-	OrgPath                     []byte
-	Queue                       pgtype.Text
-	AutoPublish                 bool
-	QueueItemID                 pgtype.Text
-	AuditEventID                string
-	ExpectedAuditInputHash      string
-	ExpectedAuditOutputHash     string
-	CreatedAt                   pgtype.Timestamptz
+	EnterpriseID                 string
+	IdempotencyKeyHash           string
+	RequestHash                  string
+	RequesterUserID              string
+	OrgVersion                   int64
+	OrgUnitID                    string
+	PolicyVersion                int64
+	PolicyVersionRef             int64
+	ResourceType                 string
+	ResourceID                   string
+	Action                       string
+	RouteMode                    string
+	RiskLevel                    string
+	RiskReasons                  []byte
+	ReviewerUserID               pgtype.Text
+	ReviewerOrgUnitID            pgtype.Text
+	ReviewerDisplayName          pgtype.Text
+	ReviewerPermission           pgtype.Text
+	ReviewerPermissionOrgUnitID  pgtype.Text
+	RequesterPermission          pgtype.Text
+	RequesterPermissionOrgUnitID pgtype.Text
+	OrgPath                      []byte
+	Queue                        pgtype.Text
+	AutoPublish                  bool
+	QueueItemID                  pgtype.Text
+	AuditEventID                 string
+	ExpectedAuditInputHash       string
+	ExpectedAuditOutputHash      string
+	CreatedAt                    pgtype.Timestamptz
 }
 
 type Artifact struct {

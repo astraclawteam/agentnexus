@@ -21,6 +21,22 @@ SELECT pg_advisory_xact_lock(hashtextextended($1, 0));
 -- name: AcquireEnterpriseApprovalPolicyLock :one
 SELECT pg_advisory_xact_lock(hashtextextended($1, 2));
 
+-- name: PublishEnterpriseApprovalPolicy :one
+WITH policy_lock AS (
+    SELECT pg_advisory_xact_lock(hashtextextended($1, 2))
+)
+UPDATE enterprise_approval_policies
+SET minimum_risk = $2,
+    max_low_impacted_users = $3,
+    max_low_impacted_org_units = $4,
+    policy_version = enterprise_approval_policies.policy_version + 1,
+    updated_at = clock_timestamp()
+FROM policy_lock
+WHERE enterprise_id = $1
+  AND enterprise_approval_policies.policy_version = $5
+RETURNING enterprise_id, minimum_risk, max_low_impacted_users,
+          max_low_impacted_org_units, policy_version, updated_at;
+
 -- name: ListApprovalOrgUnits :many
 SELECT enterprise_id, version_number, org_unit_id, parent_id
 FROM org_policy_snapshot_units
@@ -73,16 +89,16 @@ RETURNING id, enterprise_id, requester_user_id, resource_type, resource_id, acti
 INSERT INTO approval_resolution_idempotency (
     enterprise_id, idempotency_key_hash, request_hash, requester_user_id, org_version, org_unit_id,
     policy_version, policy_version_ref, resource_type, resource_id, action, route_mode, risk_level,
-    risk_reasons, reviewer_user_id, reviewer_org_unit_id, reviewer_display_name, reviewer_permission, reviewer_permission_org_unit_id, org_path, queue, auto_publish,
+    risk_reasons, reviewer_user_id, reviewer_org_unit_id, reviewer_display_name, reviewer_permission, reviewer_permission_org_unit_id, requester_permission, requester_permission_org_unit_id, org_path, queue, auto_publish,
     queue_item_id, audit_event_id, expected_audit_input_hash, expected_audit_output_hash
 )
-VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,false,$21,$22,$23,$24)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,false,$23,$24,$25,$26)
 ON CONFLICT (enterprise_id, idempotency_key_hash) DO NOTHING;
 
 -- name: GetApprovalResolution :one
 SELECT enterprise_id, idempotency_key_hash, request_hash, requester_user_id, org_version, org_unit_id,
        policy_version, policy_version_ref, resource_type, resource_id, action, route_mode, risk_level,
-       risk_reasons, reviewer_user_id, reviewer_org_unit_id, reviewer_display_name, reviewer_permission, reviewer_permission_org_unit_id, org_path, queue, auto_publish,
+       risk_reasons, reviewer_user_id, reviewer_org_unit_id, reviewer_display_name, reviewer_permission, reviewer_permission_org_unit_id, requester_permission, requester_permission_org_unit_id, org_path, queue, auto_publish,
        queue_item_id, audit_event_id, expected_audit_input_hash, expected_audit_output_hash, created_at
 FROM approval_resolution_idempotency
 WHERE enterprise_id = $1 AND idempotency_key_hash = $2;

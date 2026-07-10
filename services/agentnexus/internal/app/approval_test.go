@@ -105,6 +105,7 @@ func TestApprovalResolveRejectsStrictJSONAndRequesterOverride(t *testing.T) {
 		{name: "trailing", body: validApprovalBody() + `{}`, contentType: "application/json", status: http.StatusBadRequest},
 		{name: "wrong content type", body: validApprovalBody(), contentType: "text/plain", status: http.StatusUnsupportedMediaType},
 		{name: "noncanonical changed field", body: strings.Replace(validApprovalBody(), `"title"`, `" title"`, 1), contentType: "application/json", status: http.StatusBadRequest},
+		{name: "empty requested risk", body: strings.Replace(validApprovalBody(), `"requested_risk":"low"`, `"requested_risk":""`, 1), contentType: "application/json", status: http.StatusBadRequest},
 		{name: "oversized", body: `{"org_version":12,"org_unit_id":"team","resource_type":"workflow","resource_id":"` + strings.Repeat("x", maxApprovalRequestBytes) + `","action":"workflow.update"}`, contentType: "application/json", status: http.StatusRequestEntityTooLarge},
 	}
 	for _, tt := range tests {

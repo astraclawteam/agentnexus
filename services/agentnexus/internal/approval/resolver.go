@@ -161,19 +161,21 @@ type Request struct {
 }
 
 type Route struct {
-	Mode                        RouteMode    `json:"mode"`
-	RiskLevel                   RiskLevel    `json:"risk_level"`
-	RiskReasons                 []RiskReason `json:"risk_reasons"`
-	RequesterUserID             string       `json:"requester_user_id"`
-	ReviewerUserID              string       `json:"reviewer_user_id,omitempty"`
-	ReviewerDisplayName         string       `json:"reviewer_display_name,omitempty"`
-	OrgPath                     []string     `json:"org_path"`
-	Queue                       string       `json:"queue,omitempty"`
-	AutoPublish                 bool         `json:"auto_publish"`
-	PolicyVersion               int64        `json:"policy_version"`
-	AdminRootReached            bool         `json:"-"`
-	ReviewerPermission          Permission   `json:"-"`
-	ReviewerPermissionOrgUnitID string       `json:"-"`
+	Mode                         RouteMode    `json:"mode"`
+	RiskLevel                    RiskLevel    `json:"risk_level"`
+	RiskReasons                  []RiskReason `json:"risk_reasons"`
+	RequesterUserID              string       `json:"requester_user_id"`
+	ReviewerUserID               string       `json:"reviewer_user_id,omitempty"`
+	ReviewerDisplayName          string       `json:"reviewer_display_name,omitempty"`
+	OrgPath                      []string     `json:"org_path"`
+	Queue                        string       `json:"queue,omitempty"`
+	AutoPublish                  bool         `json:"auto_publish"`
+	PolicyVersion                int64        `json:"-"`
+	AdminRootReached             bool         `json:"-"`
+	ReviewerPermission           Permission   `json:"-"`
+	ReviewerPermissionOrgUnitID  string       `json:"-"`
+	RequesterPermission          Permission   `json:"-"`
+	RequesterPermissionOrgUnitID string       `json:"-"`
 }
 
 type Resolver struct {
@@ -211,11 +213,13 @@ func (r *Resolver) Resolve(ctx context.Context, req Request, snapshot OrgSnapsho
 	permission := PermissionApproveHighRisk
 	if assessment.Level == RiskLow {
 		permission = PermissionPublishLowRisk
-		_, allowed := permissionIndex.allows(req.RequesterUserID, permission)
+		permissionScope, allowed := permissionIndex.allows(req.RequesterUserID, permission)
 		if allowed {
 			base.RiskReasons = append(base.RiskReasons, RiskReasonExplicitConfirmation)
 			sort.Slice(base.RiskReasons, func(i, j int) bool { return base.RiskReasons[i] < base.RiskReasons[j] })
 			base.Mode = ModeSingleConfirmation
+			base.RequesterPermission = permission
+			base.RequesterPermissionOrgUnitID = permissionScope
 			base.OrgPath = []string{req.OrgUnitID}
 			return base, nil
 		}

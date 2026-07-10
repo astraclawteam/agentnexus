@@ -341,7 +341,6 @@ components:
         - requester_user_id
         - org_path
         - auto_publish
-        - policy_version
       properties:
         mode:
           type: string
@@ -375,9 +374,6 @@ components:
           type: boolean
           enum:
             - false
-        policy_version:
-          type: integer
-          minimum: 1
     ApprovalResolveRequest:
       type: object
       additionalProperties: false

@@ -2,6 +2,7 @@ package approval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -13,8 +14,34 @@ func TestResolveAuthorizedLowUsesSingleConfirmationWithoutPublishing(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if route.Mode != ModeSingleConfirmation || route.AutoPublish || route.ReviewerUserID != "" || route.Queue != "" || !reflect.DeepEqual(route.OrgPath, []string{"team"}) {
+	if route.Mode != ModeSingleConfirmation || route.AutoPublish || route.ReviewerUserID != "" || route.Queue != "" || route.RequesterPermission != PermissionPublishLowRisk || route.RequesterPermissionOrgUnitID != "team" || !reflect.DeepEqual(route.OrgPath, []string{"team"}) {
 		t.Fatalf("route=%+v", route)
+	}
+}
+
+func TestApprovalRouteJSONKeepsFrozenPublicShape(t *testing.T) {
+	route := Route{
+		Mode: ModeSingleConfirmation, RiskLevel: RiskLow, RiskReasons: []RiskReason{RiskReasonExplicitConfirmation},
+		RequesterUserID: "requester", OrgPath: []string{"team"}, AutoPublish: false, PolicyVersion: 9,
+		AdminRootReached: true, ReviewerPermission: PermissionApproveHighRisk, ReviewerPermissionOrgUnitID: "root",
+		RequesterPermission: PermissionPublishLowRisk, RequesterPermissionOrgUnitID: "team",
+	}
+	raw, err := json.Marshal(route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"auto_publish", "mode", "org_path", "requester_user_id", "risk_level", "risk_reasons"}
+	if len(got) != len(want) {
+		t.Fatalf("public route keys=%v body=%s", got, raw)
+	}
+	for _, key := range want {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("public route missing %q: %s", key, raw)
+		}
 	}
 }
 

@@ -244,7 +244,7 @@ func validApprovalInput(input approvalResolveRequest) bool {
 	if input.OrgVersion < 1 || input.ImpactedUserCount < 0 || input.ChangedFields == nil || input.ImpactedOrgUnitIDs == nil || input.FactsIssuedAt.IsZero() || input.FactsExpiresAt.IsZero() || len(input.FactsNonce) < 16 || !canonicalAuthorizationValue(input.FactsNonce) || !canonicalAuthorizationValue(input.OrgUnitID) || !canonicalAuthorizationValue(input.ResourceType) || !canonicalAuthorizationValue(input.ResourceID) || !canonicalAuthorizationValue(input.Action) {
 		return false
 	}
-	if input.RequestedRisk != "" && input.RequestedRisk != approval.RiskLow && input.RequestedRisk != approval.RiskMedium && input.RequestedRisk != approval.RiskHigh {
+	if input.RequestedRisk != approval.RiskLow && input.RequestedRisk != approval.RiskMedium && input.RequestedRisk != approval.RiskHigh {
 		return false
 	}
 	return canonicalUniqueStrings(input.ChangedFields) && canonicalUniqueStrings(input.ImpactedOrgUnitIDs)
