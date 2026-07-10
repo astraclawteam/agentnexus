@@ -204,6 +204,11 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	sourceHash, err := h.authorizeSourceResolver.ResolveAuthorizeSource(r)
 	if err != nil {
+		if errors.Is(err, ErrInvalidForwardedChain) {
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_forwarded_chain"})
+			return
+		}
 		writeOAuthError(w, http.StatusServiceUnavailable)
 		return
 	}

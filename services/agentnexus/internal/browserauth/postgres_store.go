@@ -114,22 +114,35 @@ func (s *PostgresStore) CreateLoginAttempt(ctx context.Context, attempt storedLo
 	if _, err := queries.LockOIDCLoginAttemptScope(ctx, db.LockOIDCLoginAttemptScopeParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID}); err != nil {
 		return err
 	}
-	if err := queries.DeleteExpiredOIDCLoginAttempts(ctx, timestamp(attempt.CreatedAt)); err != nil {
+	cleanup := db.DeleteExpiredOIDCLoginAttemptsBatchParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, Now: timestamp(attempt.CreatedAt)}
+	if _, err := queries.DeleteExpiredOIDCLoginAttemptsBatch(ctx, cleanup); err != nil {
 		return err
 	}
-	globalCount, err := queries.CountOIDCLoginAttemptsGlobal(ctx, db.CountOIDCLoginAttemptsGlobalParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, ExpiresAt: timestamp(attempt.CreatedAt)})
+	if _, err := queries.DeleteExpiredOIDCLoginAttemptScopeCountersBatch(ctx, db.DeleteExpiredOIDCLoginAttemptScopeCountersBatchParams(cleanup)); err != nil {
+		return err
+	}
+	if _, err := queries.DeleteExpiredOIDCLoginAttemptBrowserCountersBatch(ctx, db.DeleteExpiredOIDCLoginAttemptBrowserCountersBatchParams(cleanup)); err != nil {
+		return err
+	}
+	globalCount, err := queries.SumActiveOIDCLoginAttemptScope(ctx, db.SumActiveOIDCLoginAttemptScopeParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, Now: timestamp(attempt.CreatedAt)})
 	if err != nil {
 		return err
 	}
 	if globalCount >= int64(limits.Global) {
 		return errLoginAttemptLimited
 	}
-	browserCount, err := queries.CountOIDCLoginAttemptsForBrowser(ctx, db.CountOIDCLoginAttemptsForBrowserParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, BrowserIDHash: attempt.BrowserIDHash, ExpiresAt: timestamp(attempt.CreatedAt)})
+	browserCount, err := queries.SumActiveOIDCLoginAttemptBrowser(ctx, db.SumActiveOIDCLoginAttemptBrowserParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, BrowserIDHash: attempt.BrowserIDHash, Now: timestamp(attempt.CreatedAt)})
 	if err != nil {
 		return err
 	}
 	if browserCount >= int64(limits.PerBrowser) {
 		return errLoginAttemptLimited
+	}
+	if err := queries.IncrementOIDCLoginAttemptScopeCounter(ctx, db.IncrementOIDCLoginAttemptScopeCounterParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, ExpiresAt: timestamp(attempt.ExpiresAt)}); err != nil {
+		return err
+	}
+	if err := queries.IncrementOIDCLoginAttemptBrowserCounter(ctx, db.IncrementOIDCLoginAttemptBrowserCounterParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, BrowserIDHash: attempt.BrowserIDHash, ExpiresAt: timestamp(attempt.ExpiresAt)}); err != nil {
+		return err
 	}
 	if _, err := queries.CreateOIDCLoginAttempt(ctx, db.CreateOIDCLoginAttemptParams{
 		StateHash: attempt.StateHash, BindingHash: attempt.BindingHash, BrowserIDHash: attempt.BrowserIDHash, EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID,
@@ -146,15 +159,25 @@ func (s *PostgresStore) ConsumeLoginAttempt(ctx context.Context, stateHash, bind
 	if s == nil || s.pool == nil {
 		return storedLoginAttempt{}, errStoreUnavailable
 	}
+	scope, err := db.New(s.pool).GetOIDCLoginAttemptScope(ctx, stateHash)
+	if err != nil {
+		return storedLoginAttempt{}, mapPostgresNotFound(err)
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return storedLoginAttempt{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	queries := db.New(tx)
+	if _, err := queries.LockOIDCLoginAttemptScope(ctx, db.LockOIDCLoginAttemptScopeParams{EnterpriseID: scope.EnterpriseID, ClientID: scope.ClientID}); err != nil {
+		return storedLoginAttempt{}, err
+	}
 	record, err := queries.GetOIDCLoginAttemptForUpdate(ctx, stateHash)
 	if err != nil {
 		return storedLoginAttempt{}, mapPostgresNotFound(err)
+	}
+	if record.EnterpriseID != scope.EnterpriseID || record.ClientID != scope.ClientID {
+		return storedLoginAttempt{}, errStoreInvariant
 	}
 	if !now.Before(record.ExpiresAt.Time) {
 		if _, err := queries.DeleteOIDCLoginAttempt(ctx, stateHash); err != nil {
@@ -167,6 +190,20 @@ func (s *PostgresStore) ConsumeLoginAttempt(ctx context.Context, stateHash, bind
 	}
 	if len(record.BindingHash) != len(bindingHash) || subtle.ConstantTimeCompare([]byte(record.BindingHash), []byte(bindingHash)) != 1 {
 		return storedLoginAttempt{}, errNotFound
+	}
+	scopeRows, err := queries.DecrementOIDCLoginAttemptScopeCounter(ctx, db.DecrementOIDCLoginAttemptScopeCounterParams{EnterpriseID: record.EnterpriseID, ClientID: record.ClientID, ExpiresAt: record.ExpiresAt})
+	if err != nil {
+		return storedLoginAttempt{}, err
+	}
+	if scopeRows != 1 {
+		return storedLoginAttempt{}, errStoreInvariant
+	}
+	browserRows, err := queries.DecrementOIDCLoginAttemptBrowserCounter(ctx, db.DecrementOIDCLoginAttemptBrowserCounterParams{EnterpriseID: record.EnterpriseID, ClientID: record.ClientID, BrowserIDHash: record.BrowserIDHash, ExpiresAt: record.ExpiresAt})
+	if err != nil {
+		return storedLoginAttempt{}, err
+	}
+	if browserRows != 1 {
+		return storedLoginAttempt{}, errStoreInvariant
 	}
 	rows, err := queries.DeleteOIDCLoginAttempt(ctx, stateHash)
 	if err != nil {

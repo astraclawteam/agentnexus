@@ -42,6 +42,7 @@ var (
 	errInvalidBinding      = errors.New("enterprise user binding invalid")
 	errDuplicate           = errors.New("browser authorization record already exists")
 	errStoreUnavailable    = errors.New("browser authorization store unavailable")
+	errStoreInvariant      = errors.New("browser authorization store invariant violated")
 	errLoginAttemptLimited = errors.New("outstanding OIDC login attempt limit reached")
 )
 
@@ -111,7 +112,7 @@ func (s *Service) CreateLoginAttempt(ctx context.Context, input CreateLoginAttem
 	if !validOpaqueSecret(state) || !validOpaqueSecret(nonce) || !validOpaqueSecret(binding) {
 		return "", "", LoginAttempt{}, ErrInvalidInput
 	}
-	now := s.now().UTC()
+	now := s.now().UTC().Truncate(time.Second)
 	attempt := LoginAttempt{EnterpriseID: input.EnterpriseID, ClientID: input.ClientID, RedirectURI: input.RedirectURI, ConsoleState: input.ConsoleState, ConsoleNonce: input.ConsoleNonce, CodeChallenge: input.CodeChallenge, UpstreamNonce: nonce, CreatedAt: now, ExpiresAt: now.Add(defaultLoginTimeout)}
 	if err := s.store.CreateLoginAttempt(ctx, storedLoginAttempt{StateHash: hashHex(state), BindingHash: hashHex(binding), BrowserIDHash: hashHex(input.BrowserID), LoginAttempt: attempt}, s.loginAttemptLimits); err != nil {
 		if errors.Is(err, errLoginAttemptLimited) {

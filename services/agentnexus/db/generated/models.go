@@ -199,6 +199,21 @@ type OidcLoginAttempt struct {
 	ExpiresAt     pgtype.Timestamptz
 }
 
+type OidcLoginAttemptBrowserCounter struct {
+	EnterpriseID  string
+	ClientID      string
+	BrowserIDHash string
+	ExpiresAt     pgtype.Timestamptz
+	ActiveCount   int64
+}
+
+type OidcLoginAttemptScopeCounter struct {
+	EnterpriseID string
+	ClientID     string
+	ExpiresAt    pgtype.Timestamptz
+	ActiveCount  int64
+}
+
 type OrgEvent struct {
 	ID           string
 	EnterpriseID string

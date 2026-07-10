@@ -7,12 +7,45 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 )
+
+func TestBrowserAuthRejectsInvalidForwardedChainBeforeLimiterOrSessions(t *testing.T) {
+	limiter := &stubAuthorizeRateLimiter{}
+	var sessions *countingSessionService
+	h := newBrowserHarnessWithRateLimit(t, limiter, NewAuthorizeSourceResolver([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}), func(service *browserauth.Service) BrowserSessionService {
+		sessions = &countingSessionService{BrowserSessionService: service}
+		return sessions
+	})
+	target := "/oauth2/authorize?" + h.authorizeQuery("s", "n").Encode()
+	tests := []struct {
+		name       string
+		remoteAddr string
+		xff        string
+	}{
+		{name: "malformed suffix", remoteAddr: "10.0.0.10:1234", xff: "203.0.113.9, garbage, 10.0.0.9"},
+		{name: "remote zone", remoteAddr: "[fe80::1%eth0]:1234", xff: "203.0.113.9"},
+		{name: "suffix zone", remoteAddr: "10.0.0.10:1234", xff: "203.0.113.9, fe80::1%eth0"},
+		{name: "client zone", remoteAddr: "10.0.0.10:1234", xff: "fe80::1%eth0, 10.0.0.9"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := authorizeFrom(h.router, target, tt.remoteAddr, tt.xff)
+			if rr.Code != http.StatusBadRequest || rr.Header().Get("Cache-Control") != "no-store" || strings.TrimSpace(rr.Body.String()) != `{"error":"invalid_forwarded_chain"}` {
+				t.Fatalf("status=%d cache=%q body=%s", rr.Code, rr.Header().Get("Cache-Control"), rr.Body.String())
+			}
+			assertNoAuthorizeSideEffects(t, rr)
+			if limiter.calls != 0 || sessions.getSessions != 0 || sessions.createAttempts != 0 {
+				t.Fatalf("side effects limiter=%d gets=%d attempts=%d", limiter.calls, sessions.getSessions, sessions.createAttempts)
+			}
+		})
+	}
+}
 
 func TestBrowserAuthAuthorizeRateLimitCannotBeBypassedWithBrowserIDsOrUntrustedXFF(t *testing.T) {
 	now := time.Date(2026, 7, 10, 12, 34, 45, 0, time.UTC)

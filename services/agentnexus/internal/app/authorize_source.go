@@ -14,6 +14,8 @@ type AuthorizeSourceResolver interface {
 	ResolveAuthorizeSource(*http.Request) (string, error)
 }
 
+var ErrInvalidForwardedChain = errors.New("invalid forwarded chain")
+
 type authorizeSourceResolver struct {
 	trustedProxyCIDRs []netip.Prefix
 }
@@ -25,20 +27,29 @@ func NewAuthorizeSourceResolver(trustedProxyCIDRs []netip.Prefix) AuthorizeSourc
 func (r *authorizeSourceResolver) ResolveAuthorizeSource(req *http.Request) (string, error) {
 	remote, err := parseRemoteIP(req.RemoteAddr)
 	if err != nil {
-		return "", err
+		return "", ErrInvalidForwardedChain
 	}
 	source := remote
 	if r.trusted(remote) {
-		if forwarded, ok := parseForwardedFor(strings.Join(req.Header.Values("X-Forwarded-For"), ",")); ok {
-			for i := len(forwarded) - 1; i >= 0; i-- {
-				if !r.trusted(forwarded[i]) {
-					source = forwarded[i]
+		forwarded := req.Header.Values("X-Forwarded-For")
+		if len(forwarded) > 0 {
+			parts := make([]string, 0, len(forwarded))
+			for _, value := range forwarded {
+				parts = append(parts, strings.Split(value, ",")...)
+			}
+			for i := len(parts) - 1; i >= 0; i-- {
+				addr, parseErr := parseForwardedIP(parts[i])
+				if parseErr != nil {
+					return "", ErrInvalidForwardedChain
+				}
+				if !r.trusted(addr) {
+					source = addr
 					break
 				}
 			}
 		}
 	}
-	sum := sha256.Sum256([]byte(source.String()))
+	sum := sha256.Sum256([]byte(canonicalSource(source)))
 	return hex.EncodeToString(sum[:]), nil
 }
 
@@ -57,24 +68,24 @@ func parseRemoteIP(remoteAddr string) (netip.Addr, error) {
 		host = remoteAddr
 	}
 	addr, parseErr := netip.ParseAddr(strings.TrimSpace(host))
-	if parseErr != nil {
+	if parseErr != nil || addr.Zone() != "" {
 		return netip.Addr{}, errors.New("invalid remote address")
 	}
 	return addr.Unmap(), nil
 }
 
-func parseForwardedFor(value string) ([]netip.Addr, bool) {
-	if strings.TrimSpace(value) == "" {
-		return nil, false
+func parseForwardedIP(value string) (netip.Addr, error) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil || addr.Zone() != "" {
+		return netip.Addr{}, ErrInvalidForwardedChain
 	}
-	parts := strings.Split(value, ",")
-	addresses := make([]netip.Addr, 0, len(parts))
-	for _, part := range parts {
-		addr, err := netip.ParseAddr(strings.TrimSpace(part))
-		if err != nil {
-			return nil, false
-		}
-		addresses = append(addresses, addr.Unmap())
+	return addr.Unmap(), nil
+}
+
+func canonicalSource(addr netip.Addr) string {
+	addr = addr.Unmap()
+	if addr.Is4() {
+		return "ipv4/32:" + addr.String()
 	}
-	return addresses, true
+	return "ipv6/64:" + netip.PrefixFrom(addr, 64).Masked().Addr().String()
 }

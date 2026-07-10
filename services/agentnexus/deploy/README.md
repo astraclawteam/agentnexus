@@ -26,7 +26,7 @@ This directory contains open-core development profiles only. Production private-
 
 ## Browser OIDC Ingress Controls
 
-The browser authorization endpoint has two independent admission controls. Keep their defaults unless deployment capacity and observed ingress behavior justify a deliberate change.
+The browser authorization endpoint has three layered admission controls: source rate, per-browser outstanding attempts, and enterprise/client global outstanding attempts. Keep their defaults unless deployment capacity and observed ingress behavior justify a deliberate change.
 
 | Variable | Default | Purpose |
 | --- | ---: | --- |
@@ -35,9 +35,13 @@ The browser authorization endpoint has two independent admission controls. Keep 
 | `AGENTNEXUS_OIDC_LOGIN_ATTEMPT_GLOBAL_LIMIT` | `65536` | Maximum unexpired login attempts per enterprise and client across all browsers. This value must be greater than five times `AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE`; invalid values stop startup. |
 | `AGENTNEXUS_TRUSTED_PROXY_CIDRS` | empty | Optional comma-separated canonical CIDR prefixes for direct reverse proxies. Invalid, non-canonical, or duplicate prefixes stop startup. |
 
-`X-Forwarded-For` is used only when the request's direct network peer is inside `AGENTNEXUS_TRUSTED_PROXY_CIDRS`. Leave the variable empty when AgentNexus is directly exposed or the immediate proxy is not fully controlled. Trusting an overly broad or incorrect CIDR lets clients spoof the source address and weaken source rate limiting.
+`X-Forwarded-For` is used only when the request's direct network peer is inside `AGENTNEXUS_TRUSTED_PROXY_CIDRS`. Leave the variable empty when AgentNexus is directly exposed or the immediate proxy is not fully controlled. Trusting an overly broad or incorrect CIDR lets clients spoof the source address and weaken source rate limiting. An untrusted peer's `X-Forwarded-For` header is ignored. A malformed chain received from a trusted peer fails closed with HTTP `400` and `invalid_forwarded_chain` before the limiter, session store, login-attempt store, cookies, or redirects are touched.
 
-HTTP `429` responses at `/oauth2/authorize` are a deployment observation signal: inspect ingress logs and request patterns, then distinguish normal retry bursts from abuse or an undersized limit before tuning. AgentNexus does not currently expose built-in metrics for this limiter, so deployments that need alerts or dashboards must derive them from ingress/application logs or add external telemetry.
+Resolved IPv4 sources are isolated as `/32`. Resolved IPv6 sources are deliberately grouped by canonical `/64` before hashing, so temporary/privacy addresses in the same subscriber network share one source-rate bucket. Account for that grouping when investigating IPv6 `429` responses or selecting trusted proxy ranges.
+
+Outstanding login-attempt quotas are exact across gateway instances. The PostgreSQL store serializes each enterprise/client scope, tracks active counts in second-aligned expiry buckets, and updates scope and browser counters in the same transaction as attempt creation or consumption. With the five-minute attempt TTL, an active quota read visits at most 300 counter buckets and never counts the attempt table. Expired attempt rows and old counter/rate-window rows are physical housekeeping only: each cleanup query removes at most 256 indexed rows, so a long-idle deployment cannot trigger an unbounded delete. Cleanup may temporarily lag after a large expiry burst, but expired buckets are excluded from quota totals and cannot consume active quota.
+
+HTTP `429` responses at `/oauth2/authorize` are a deployment observation signal: inspect ingress logs and request patterns, then distinguish normal retry bursts from abuse or an undersized limit before tuning. AgentNexus does not currently expose built-in metrics for the limiter, quota counters, or batched cleanup, so deployments that need alerts or dashboards must derive them from ingress/application and PostgreSQL logs or add external telemetry. The repository tests enforce the SQL transaction and indexing contract, but live multi-instance PostgreSQL concurrency validation remains an integration/deployment gate rather than a built-in runtime check.
 
 ## Compose
 

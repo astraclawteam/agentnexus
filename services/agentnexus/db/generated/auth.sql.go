@@ -63,50 +63,6 @@ func (q *Queries) ConsumeOIDCAuthorizeRateLimit(ctx context.Context, arg Consume
 	return request_count, err
 }
 
-const countOIDCLoginAttemptsForBrowser = `-- name: CountOIDCLoginAttemptsForBrowser :one
-SELECT COUNT(*)
-FROM oidc_login_attempts
-WHERE enterprise_id = $1 AND client_id = $2 AND browser_id_hash = $3 AND expires_at > $4
-`
-
-type CountOIDCLoginAttemptsForBrowserParams struct {
-	EnterpriseID  string
-	ClientID      string
-	BrowserIDHash string
-	ExpiresAt     pgtype.Timestamptz
-}
-
-func (q *Queries) CountOIDCLoginAttemptsForBrowser(ctx context.Context, arg CountOIDCLoginAttemptsForBrowserParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countOIDCLoginAttemptsForBrowser,
-		arg.EnterpriseID,
-		arg.ClientID,
-		arg.BrowserIDHash,
-		arg.ExpiresAt,
-	)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
-const countOIDCLoginAttemptsGlobal = `-- name: CountOIDCLoginAttemptsGlobal :one
-SELECT COUNT(*)
-FROM oidc_login_attempts
-WHERE enterprise_id = $1 AND client_id = $2 AND expires_at > $3
-`
-
-type CountOIDCLoginAttemptsGlobalParams struct {
-	EnterpriseID string
-	ClientID     string
-	ExpiresAt    pgtype.Timestamptz
-}
-
-func (q *Queries) CountOIDCLoginAttemptsGlobal(ctx context.Context, arg CountOIDCLoginAttemptsGlobalParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countOIDCLoginAttemptsGlobal, arg.EnterpriseID, arg.ClientID, arg.ExpiresAt)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createAuthorizationCode = `-- name: CreateAuthorizationCode :one
 INSERT INTO oauth_authorization_codes (
     code_hash, client_id, redirect_uri, enterprise_id, enterprise_user_id,
@@ -259,9 +215,73 @@ func (q *Queries) CreateOIDCLoginAttempt(ctx context.Context, arg CreateOIDCLogi
 	return i, err
 }
 
+const decrementOIDCLoginAttemptBrowserCounter = `-- name: DecrementOIDCLoginAttemptBrowserCounter :execrows
+UPDATE oidc_login_attempt_browser_counters
+SET active_count = active_count - 1
+WHERE enterprise_id = $1
+  AND client_id = $2
+  AND browser_id_hash = $3
+  AND expires_at = $4
+  AND active_count > 0
+`
+
+type DecrementOIDCLoginAttemptBrowserCounterParams struct {
+	EnterpriseID  string
+	ClientID      string
+	BrowserIDHash string
+	ExpiresAt     pgtype.Timestamptz
+}
+
+func (q *Queries) DecrementOIDCLoginAttemptBrowserCounter(ctx context.Context, arg DecrementOIDCLoginAttemptBrowserCounterParams) (int64, error) {
+	result, err := q.db.Exec(ctx, decrementOIDCLoginAttemptBrowserCounter,
+		arg.EnterpriseID,
+		arg.ClientID,
+		arg.BrowserIDHash,
+		arg.ExpiresAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const decrementOIDCLoginAttemptScopeCounter = `-- name: DecrementOIDCLoginAttemptScopeCounter :execrows
+UPDATE oidc_login_attempt_scope_counters
+SET active_count = active_count - 1
+WHERE enterprise_id = $1
+  AND client_id = $2
+  AND expires_at = $3
+  AND active_count > 0
+`
+
+type DecrementOIDCLoginAttemptScopeCounterParams struct {
+	EnterpriseID string
+	ClientID     string
+	ExpiresAt    pgtype.Timestamptz
+}
+
+func (q *Queries) DecrementOIDCLoginAttemptScopeCounter(ctx context.Context, arg DecrementOIDCLoginAttemptScopeCounterParams) (int64, error) {
+	result, err := q.db.Exec(ctx, decrementOIDCLoginAttemptScopeCounter, arg.EnterpriseID, arg.ClientID, arg.ExpiresAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteExpiredOIDCAuthorizeRateLimits = `-- name: DeleteExpiredOIDCAuthorizeRateLimits :exec
-DELETE FROM oidc_authorize_rate_limits
-WHERE window_start < $1
+WITH expired AS (
+    SELECT enterprise_id, client_id, source_hash, window_start
+    FROM oidc_authorize_rate_limits AS candidates
+    WHERE candidates.window_start < $1
+    ORDER BY candidates.window_start
+    LIMIT 256
+)
+DELETE FROM oidc_authorize_rate_limits AS limits
+USING expired
+WHERE limits.enterprise_id = expired.enterprise_id
+  AND limits.client_id = expired.client_id
+  AND limits.source_hash = expired.source_hash
+  AND limits.window_start = expired.window_start
 `
 
 func (q *Queries) DeleteExpiredOIDCAuthorizeRateLimits(ctx context.Context, windowStart pgtype.Timestamptz) error {
@@ -269,13 +289,96 @@ func (q *Queries) DeleteExpiredOIDCAuthorizeRateLimits(ctx context.Context, wind
 	return err
 }
 
-const deleteExpiredOIDCLoginAttempts = `-- name: DeleteExpiredOIDCLoginAttempts :exec
-DELETE FROM oidc_login_attempts WHERE expires_at <= $1
+const deleteExpiredOIDCLoginAttemptBrowserCountersBatch = `-- name: DeleteExpiredOIDCLoginAttemptBrowserCountersBatch :execrows
+WITH expired AS (
+    SELECT enterprise_id, client_id, browser_id_hash, expires_at
+    FROM oidc_login_attempt_browser_counters AS candidates
+    WHERE candidates.enterprise_id = $1
+      AND candidates.client_id = $2
+      AND candidates.expires_at <= $3
+    ORDER BY candidates.expires_at
+    LIMIT 256
+)
+DELETE FROM oidc_login_attempt_browser_counters AS counters
+USING expired
+WHERE counters.enterprise_id = expired.enterprise_id
+  AND counters.client_id = expired.client_id
+  AND counters.browser_id_hash = expired.browser_id_hash
+  AND counters.expires_at = expired.expires_at
 `
 
-func (q *Queries) DeleteExpiredOIDCLoginAttempts(ctx context.Context, expiresAt pgtype.Timestamptz) error {
-	_, err := q.db.Exec(ctx, deleteExpiredOIDCLoginAttempts, expiresAt)
-	return err
+type DeleteExpiredOIDCLoginAttemptBrowserCountersBatchParams struct {
+	EnterpriseID string
+	ClientID     string
+	Now          pgtype.Timestamptz
+}
+
+func (q *Queries) DeleteExpiredOIDCLoginAttemptBrowserCountersBatch(ctx context.Context, arg DeleteExpiredOIDCLoginAttemptBrowserCountersBatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredOIDCLoginAttemptBrowserCountersBatch, arg.EnterpriseID, arg.ClientID, arg.Now)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteExpiredOIDCLoginAttemptScopeCountersBatch = `-- name: DeleteExpiredOIDCLoginAttemptScopeCountersBatch :execrows
+WITH expired AS (
+    SELECT enterprise_id, client_id, expires_at
+    FROM oidc_login_attempt_scope_counters AS candidates
+    WHERE candidates.enterprise_id = $1
+      AND candidates.client_id = $2
+      AND candidates.expires_at <= $3
+    ORDER BY candidates.expires_at
+    LIMIT 256
+)
+DELETE FROM oidc_login_attempt_scope_counters AS counters
+USING expired
+WHERE counters.enterprise_id = expired.enterprise_id
+  AND counters.client_id = expired.client_id
+  AND counters.expires_at = expired.expires_at
+`
+
+type DeleteExpiredOIDCLoginAttemptScopeCountersBatchParams struct {
+	EnterpriseID string
+	ClientID     string
+	Now          pgtype.Timestamptz
+}
+
+func (q *Queries) DeleteExpiredOIDCLoginAttemptScopeCountersBatch(ctx context.Context, arg DeleteExpiredOIDCLoginAttemptScopeCountersBatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredOIDCLoginAttemptScopeCountersBatch, arg.EnterpriseID, arg.ClientID, arg.Now)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteExpiredOIDCLoginAttemptsBatch = `-- name: DeleteExpiredOIDCLoginAttemptsBatch :execrows
+WITH expired AS (
+    SELECT state_hash
+    FROM oidc_login_attempts AS candidates
+    WHERE candidates.enterprise_id = $1
+      AND candidates.client_id = $2
+      AND candidates.expires_at <= $3
+    ORDER BY candidates.expires_at
+    LIMIT 256
+)
+DELETE FROM oidc_login_attempts AS attempts
+USING expired
+WHERE attempts.state_hash = expired.state_hash
+`
+
+type DeleteExpiredOIDCLoginAttemptsBatchParams struct {
+	EnterpriseID string
+	ClientID     string
+	Now          pgtype.Timestamptz
+}
+
+func (q *Queries) DeleteExpiredOIDCLoginAttemptsBatch(ctx context.Context, arg DeleteExpiredOIDCLoginAttemptsBatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredOIDCLoginAttemptsBatch, arg.EnterpriseID, arg.ClientID, arg.Now)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const deleteOIDCLoginAttempt = `-- name: DeleteOIDCLoginAttempt :execrows
@@ -410,6 +513,72 @@ func (q *Queries) GetOIDCLoginAttemptForUpdate(ctx context.Context, stateHash st
 		&i.ExpiresAt,
 	)
 	return i, err
+}
+
+const getOIDCLoginAttemptScope = `-- name: GetOIDCLoginAttemptScope :one
+SELECT enterprise_id, client_id
+FROM oidc_login_attempts
+WHERE state_hash = $1
+`
+
+type GetOIDCLoginAttemptScopeRow struct {
+	EnterpriseID string
+	ClientID     string
+}
+
+func (q *Queries) GetOIDCLoginAttemptScope(ctx context.Context, stateHash string) (GetOIDCLoginAttemptScopeRow, error) {
+	row := q.db.QueryRow(ctx, getOIDCLoginAttemptScope, stateHash)
+	var i GetOIDCLoginAttemptScopeRow
+	err := row.Scan(&i.EnterpriseID, &i.ClientID)
+	return i, err
+}
+
+const incrementOIDCLoginAttemptBrowserCounter = `-- name: IncrementOIDCLoginAttemptBrowserCounter :exec
+INSERT INTO oidc_login_attempt_browser_counters (
+    enterprise_id, client_id, browser_id_hash, expires_at, active_count
+) VALUES (
+    $1, $2, $3, $4, 1
+)
+ON CONFLICT (enterprise_id, client_id, browser_id_hash, expires_at)
+DO UPDATE SET active_count = oidc_login_attempt_browser_counters.active_count + 1
+`
+
+type IncrementOIDCLoginAttemptBrowserCounterParams struct {
+	EnterpriseID  string
+	ClientID      string
+	BrowserIDHash string
+	ExpiresAt     pgtype.Timestamptz
+}
+
+func (q *Queries) IncrementOIDCLoginAttemptBrowserCounter(ctx context.Context, arg IncrementOIDCLoginAttemptBrowserCounterParams) error {
+	_, err := q.db.Exec(ctx, incrementOIDCLoginAttemptBrowserCounter,
+		arg.EnterpriseID,
+		arg.ClientID,
+		arg.BrowserIDHash,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
+const incrementOIDCLoginAttemptScopeCounter = `-- name: IncrementOIDCLoginAttemptScopeCounter :exec
+INSERT INTO oidc_login_attempt_scope_counters (
+    enterprise_id, client_id, expires_at, active_count
+) VALUES (
+    $1, $2, $3, 1
+)
+ON CONFLICT (enterprise_id, client_id, expires_at)
+DO UPDATE SET active_count = oidc_login_attempt_scope_counters.active_count + 1
+`
+
+type IncrementOIDCLoginAttemptScopeCounterParams struct {
+	EnterpriseID string
+	ClientID     string
+	ExpiresAt    pgtype.Timestamptz
+}
+
+func (q *Queries) IncrementOIDCLoginAttemptScopeCounter(ctx context.Context, arg IncrementOIDCLoginAttemptScopeCounterParams) error {
+	_, err := q.db.Exec(ctx, incrementOIDCLoginAttemptScopeCounter, arg.EnterpriseID, arg.ClientID, arg.ExpiresAt)
+	return err
 }
 
 const listBrowserProfileOrgUnits = `-- name: ListBrowserProfileOrgUnits :many
@@ -567,4 +736,53 @@ func (q *Queries) SlideBrowserSession(ctx context.Context, arg SlideBrowserSessi
 		&i.UserAgentHash,
 	)
 	return i, err
+}
+
+const sumActiveOIDCLoginAttemptBrowser = `-- name: SumActiveOIDCLoginAttemptBrowser :one
+SELECT COALESCE(SUM(active_count), 0)::BIGINT
+FROM oidc_login_attempt_browser_counters
+WHERE enterprise_id = $1
+  AND client_id = $2
+  AND browser_id_hash = $3
+  AND expires_at > $4
+`
+
+type SumActiveOIDCLoginAttemptBrowserParams struct {
+	EnterpriseID  string
+	ClientID      string
+	BrowserIDHash string
+	Now           pgtype.Timestamptz
+}
+
+func (q *Queries) SumActiveOIDCLoginAttemptBrowser(ctx context.Context, arg SumActiveOIDCLoginAttemptBrowserParams) (int64, error) {
+	row := q.db.QueryRow(ctx, sumActiveOIDCLoginAttemptBrowser,
+		arg.EnterpriseID,
+		arg.ClientID,
+		arg.BrowserIDHash,
+		arg.Now,
+	)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const sumActiveOIDCLoginAttemptScope = `-- name: SumActiveOIDCLoginAttemptScope :one
+SELECT COALESCE(SUM(active_count), 0)::BIGINT
+FROM oidc_login_attempt_scope_counters
+WHERE enterprise_id = $1
+  AND client_id = $2
+  AND expires_at > $3
+`
+
+type SumActiveOIDCLoginAttemptScopeParams struct {
+	EnterpriseID string
+	ClientID     string
+	Now          pgtype.Timestamptz
+}
+
+func (q *Queries) SumActiveOIDCLoginAttemptScope(ctx context.Context, arg SumActiveOIDCLoginAttemptScopeParams) (int64, error) {
+	row := q.db.QueryRow(ctx, sumActiveOIDCLoginAttemptScope, arg.EnterpriseID, arg.ClientID, arg.Now)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }

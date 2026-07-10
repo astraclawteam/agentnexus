@@ -14,12 +14,23 @@ import (
 func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 	_, here, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
-	migration := mustRead(t, filepath.Join(root, "db", "migrations", "000002_browser_sessions_and_approvals.sql"))
+	migration := mustRead(t, filepath.Join(root, "db", "migrations", "000002_browser_sessions_and_approvals.sql")) + "\n" + mustRead(t, filepath.Join(root, "db", "migrations", "000003_oidc_login_attempt_quota_counters.sql"))
 	queries := mustRead(t, filepath.Join(root, "db", "queries", "auth.sql"))
-	for _, required := range []string{"browser_sessions", "oauth_authorization_codes", "oidc_login_attempts", "approval_queue_items", "id_hash", "code_hash", "state_hash", "binding_hash", "browser_id_hash", "user_agent_hash", "foreign key (enterprise_id, enterprise_user_id)", "check (char_length(id_hash) = 64", "check (char_length(code_hash) = 64", "check (char_length(state_hash) = 64", "check (char_length(binding_hash) = 64", "check (char_length(browser_id_hash) = 64", "create index idx_oidc_login_attempts_scope_browser"} {
+	for _, required := range []string{"browser_sessions", "oauth_authorization_codes", "oidc_login_attempts", "oidc_login_attempt_scope_counters", "oidc_login_attempt_browser_counters", "approval_queue_items", "id_hash", "code_hash", "state_hash", "binding_hash", "browser_id_hash", "user_agent_hash", "foreign key (enterprise_id, enterprise_user_id)", "check (char_length(id_hash) = 64", "check (char_length(code_hash) = 64", "check (char_length(state_hash) = 64", "check (char_length(binding_hash) = 64", "check (char_length(browser_id_hash) = 64", "create index idx_oidc_login_attempts_scope_expiry", "create index idx_oidc_login_attempts_scope_browser", "create index idx_oidc_login_attempt_browser_counters_scope_expiry"} {
 		if !strings.Contains(strings.ToLower(migration), required) {
 			t.Errorf("migration missing %q", required)
 		}
+	}
+	quotaMigration := strings.ToLower(mustRead(t, filepath.Join(root, "db", "migrations", "000003_oidc_login_attempt_quota_counters.sql")))
+	for _, required := range []string{"update oidc_login_attempts", "date_trunc('second'", "insert into oidc_login_attempt_scope_counters", "insert into oidc_login_attempt_browser_counters", "count(*)", "group by", "drop table if exists oidc_login_attempt_browser_counters", "drop constraint if exists ck_oidc_login_attempts_second_aligned"} {
+		if !strings.Contains(quotaMigration, required) {
+			t.Errorf("quota migration/backfill missing %q", required)
+		}
+	}
+	migrationLockIndex := strings.Index(quotaMigration, "lock table oidc_login_attempts in access exclusive mode")
+	normalizeIndex := strings.Index(quotaMigration, "update oidc_login_attempts")
+	if migrationLockIndex < 0 || normalizeIndex <= migrationLockIndex {
+		t.Errorf("quota migration must exclusively lock attempts before normalization: lock=%d update=%d", migrationLockIndex, normalizeIndex)
 	}
 	for _, forbidden := range []string{"session_token", "authorization_code text", "user_agent text", "verifier text", "browser_id text"} {
 		if strings.Contains(strings.ToLower(migration), forbidden) {
@@ -45,23 +56,45 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 	}
 	createAttempt := strings.ToLower(namedQuery(t, queries, "CreateOIDCLoginAttempt"))
 	if strings.Contains(createAttempt, "delete from") || strings.Contains(createAttempt, "count(") || !strings.Contains(createAttempt, "insert into oidc_login_attempts") {
-		t.Error("login attempt insertion must be separate from lock, cleanup, and count queries")
+		t.Error("login attempt insertion must be separate from lock, cleanup, and quota queries")
 	}
 	lockAttempt := strings.ToLower(namedQuery(t, queries, "LockOIDCLoginAttemptScope"))
-	deleteExpired := strings.ToLower(namedQuery(t, queries, "DeleteExpiredOIDCLoginAttempts"))
-	countGlobal := strings.ToLower(namedQuery(t, queries, "CountOIDCLoginAttemptsGlobal"))
-	countBrowser := strings.ToLower(namedQuery(t, queries, "CountOIDCLoginAttemptsForBrowser"))
+	deleteExpired := strings.ToLower(namedQuery(t, queries, "DeleteExpiredOIDCLoginAttemptsBatch"))
+	deleteScopeBuckets := strings.ToLower(namedQuery(t, queries, "DeleteExpiredOIDCLoginAttemptScopeCountersBatch"))
+	deleteBrowserBuckets := strings.ToLower(namedQuery(t, queries, "DeleteExpiredOIDCLoginAttemptBrowserCountersBatch"))
+	sumGlobal := strings.ToLower(namedQuery(t, queries, "SumActiveOIDCLoginAttemptScope"))
+	sumBrowser := strings.ToLower(namedQuery(t, queries, "SumActiveOIDCLoginAttemptBrowser"))
+	incrementGlobal := strings.ToLower(namedQuery(t, queries, "IncrementOIDCLoginAttemptScopeCounter"))
+	incrementBrowser := strings.ToLower(namedQuery(t, queries, "IncrementOIDCLoginAttemptBrowserCounter"))
 	if !strings.Contains(lockAttempt, "pg_advisory_xact_lock") || !strings.Contains(lockAttempt, "enterprise") || !strings.Contains(lockAttempt, "client") {
 		t.Error("login attempt scope must use a transaction advisory lock keyed by enterprise and client")
 	}
-	if !strings.Contains(deleteExpired, "expires_at <=") || strings.Contains(deleteExpired, "enterprise_id") || strings.Contains(deleteExpired, "client_id") {
-		t.Error("login attempt cleanup must delete all expired rows")
+	for name, cleanup := range map[string]string{"attempt": deleteExpired, "scope counter": deleteScopeBuckets, "browser counter": deleteBrowserBuckets} {
+		for _, required := range []string{"limit 256", "enterprise_id", "client_id", "expires_at <=", "using expired"} {
+			if !strings.Contains(cleanup, required) {
+				t.Errorf("%s cleanup missing %q", name, required)
+			}
+		}
 	}
-	if !strings.Contains(countGlobal, "count(") || !strings.Contains(countGlobal, "enterprise_id") || !strings.Contains(countGlobal, "client_id") || strings.Contains(countGlobal, "browser_id_hash") || !strings.Contains(countGlobal, "expires_at >") {
-		t.Error("global login attempt count must be scoped to unexpired enterprise/client rows")
+	if strings.Contains(strings.ToLower(queries), "countoidcloginattempt") || strings.Contains(strings.ToLower(queries), "count(*)\nfrom oidc_login_attempts") {
+		t.Error("login-attempt quota must never COUNT rows from oidc_login_attempts")
 	}
-	if !strings.Contains(countBrowser, "count(") || !strings.Contains(countBrowser, "enterprise_id") || !strings.Contains(countBrowser, "client_id") || !strings.Contains(countBrowser, "browser_id_hash") || !strings.Contains(countBrowser, "expires_at >") {
-		t.Error("browser login attempt count must include the browser hash")
+	for name, quota := range map[string]string{"scope": sumGlobal, "browser": sumBrowser} {
+		for _, required := range []string{"sum(active_count)", "enterprise_id", "client_id", "expires_at >"} {
+			if !strings.Contains(quota, required) {
+				t.Errorf("%s quota sum missing %q", name, required)
+			}
+		}
+	}
+	if !strings.Contains(sumBrowser, "browser_id_hash") {
+		t.Error("browser quota sum must include browser hash")
+	}
+	for name, increment := range map[string]string{"scope": incrementGlobal, "browser": incrementBrowser} {
+		for _, required := range []string{"insert into oidc_login_attempt_", "on conflict", "active_count + 1"} {
+			if !strings.Contains(increment, required) {
+				t.Errorf("%s quota increment missing %q", name, required)
+			}
+		}
 	}
 	postgresStore := strings.ToLower(mustRead(t, filepath.Join(root, "internal", "browserauth", "postgres_store.go")))
 	createStart := strings.Index(postgresStore, "func (s *postgresstore) createloginattempt")
@@ -70,13 +103,27 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 		postgresStore = postgresStore[createStart:consumeStart]
 	}
 	lockIndex := strings.Index(postgresStore, ".lockoidcloginattemptscope")
-	deleteIndex := strings.Index(postgresStore, ".deleteexpiredoidcloginattempts")
-	globalCountIndex := strings.Index(postgresStore, ".countoidcloginattemptsglobal")
-	browserCountIndex := strings.Index(postgresStore, ".countoidcloginattemptsforbrowser")
+	deleteIndex := strings.Index(postgresStore, ".deleteexpiredoidcloginattemptsbatch")
+	deleteScopeIndex := strings.Index(postgresStore, ".deleteexpiredoidcloginattemptscopecountersbatch")
+	deleteBrowserIndex := strings.Index(postgresStore, ".deleteexpiredoidcloginattemptbrowsercountersbatch")
+	globalCountIndex := strings.Index(postgresStore, ".sumactiveoidcloginattemptscope")
+	browserCountIndex := strings.Index(postgresStore, ".sumactiveoidcloginattemptbrowser")
+	incrementGlobalIndex := strings.Index(postgresStore, ".incrementoidcloginattemptscopecounter")
+	incrementBrowserIndex := strings.Index(postgresStore, ".incrementoidcloginattemptbrowsercounter")
 	insertIndex := strings.Index(postgresStore, ".createoidcloginattempt")
 	commitIndex := strings.Index(postgresStore, ".commit(ctx)")
-	if lockIndex < 0 || deleteIndex <= lockIndex || globalCountIndex <= deleteIndex || browserCountIndex <= globalCountIndex || insertIndex <= browserCountIndex || commitIndex <= insertIndex {
-		t.Errorf("postgres login-attempt transaction order is lock=%d delete=%d global=%d browser=%d insert=%d commit=%d", lockIndex, deleteIndex, globalCountIndex, browserCountIndex, insertIndex, commitIndex)
+	if lockIndex < 0 || deleteIndex <= lockIndex || deleteScopeIndex <= deleteIndex || deleteBrowserIndex <= deleteScopeIndex || globalCountIndex <= deleteBrowserIndex || browserCountIndex <= globalCountIndex || incrementGlobalIndex <= browserCountIndex || incrementBrowserIndex <= incrementGlobalIndex || insertIndex <= incrementBrowserIndex || commitIndex <= insertIndex {
+		t.Errorf("postgres login-attempt transaction order is lock=%d delete=%d scope-clean=%d browser-clean=%d global=%d browser=%d scope-inc=%d browser-inc=%d insert=%d commit=%d", lockIndex, deleteIndex, deleteScopeIndex, deleteBrowserIndex, globalCountIndex, browserCountIndex, incrementGlobalIndex, incrementBrowserIndex, insertIndex, commitIndex)
+	}
+	consumeStore := strings.ToLower(mustRead(t, filepath.Join(root, "internal", "browserauth", "postgres_store.go")))
+	consumeStart = strings.Index(consumeStore, "func (s *postgresstore) consumeloginattempt")
+	if consumeStart >= 0 {
+		consumeStore = consumeStore[consumeStart:]
+	}
+	for _, required := range []string{".getoidcloginattemptscope", ".lockoidcloginattemptscope", ".getoidcloginattemptforupdate", ".decrementoidcloginattemptscopecounter", ".decrementoidcloginattemptbrowsercounter", ".deleteoidcloginattempt", ".commit(ctx)"} {
+		if !strings.Contains(consumeStore, required) {
+			t.Errorf("postgres consume transaction missing %q", required)
+		}
 	}
 	for _, required := range []string{
 		"add constraint uq_org_units_enterprise_id_id unique (enterprise_id, id)",
@@ -128,8 +175,10 @@ func TestAuthorizeRateLimitSchemaAndQueriesAreHashOnlyAndAtomic(t *testing.T) {
 		}
 	}
 	cleanup := strings.ToLower(namedQuery(t, queries, "DeleteExpiredOIDCAuthorizeRateLimits"))
-	if !strings.Contains(cleanup, "delete from oidc_authorize_rate_limits") || !strings.Contains(cleanup, "window_start <") {
-		t.Error("authorize rate cleanup must remove old fixed windows")
+	for _, required := range []string{"delete from oidc_authorize_rate_limits", "window_start <", "using expired", "limit 256"} {
+		if !strings.Contains(cleanup, required) {
+			t.Errorf("authorize rate cleanup missing %q", required)
+		}
 	}
 	postgresLimiter := strings.ToLower(mustRead(t, filepath.Join(root, "internal", "browserauth", "postgres_authorize_rate_limiter.go")))
 	cleanupIndex := strings.Index(postgresLimiter, ".deleteexpiredoidcauthorizeratelimits")

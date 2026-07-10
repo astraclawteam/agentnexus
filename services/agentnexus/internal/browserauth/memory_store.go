@@ -1,6 +1,7 @@
 package browserauth
 
 import (
+	"container/heap"
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
@@ -9,16 +10,29 @@ import (
 )
 
 type MemoryStore struct {
-	mu            sync.Mutex
-	users         map[string]struct{}
-	sessions      map[string]storedSession
-	codes         map[string]storedAuthorizationCode
-	loginAttempts map[string]storedLoginAttempt
-	err           error
+	mu                     sync.Mutex
+	users                  map[string]struct{}
+	sessions               map[string]storedSession
+	codes                  map[string]storedAuthorizationCode
+	loginAttempts          map[string]storedLoginAttempt
+	loginAttemptGeneration map[string]uint64
+	nextAttemptGeneration  uint64
+	scopeCounts            map[loginAttemptScope]int
+	browserCounts          map[loginAttemptBrowserScope]int
+	loginAttemptExpiry     loginAttemptExpiryHeap
+	err                    error
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{users: map[string]struct{}{}, sessions: map[string]storedSession{}, codes: map[string]storedAuthorizationCode{}, loginAttempts: map[string]storedLoginAttempt{}}
+	return &MemoryStore{
+		users:                  map[string]struct{}{},
+		sessions:               map[string]storedSession{},
+		codes:                  map[string]storedAuthorizationCode{},
+		loginAttempts:          map[string]storedLoginAttempt{},
+		loginAttemptGeneration: map[string]uint64{},
+		scopeCounts:            map[loginAttemptScope]int{},
+		browserCounts:          map[loginAttemptBrowserScope]int{},
+	}
 }
 
 func (s *MemoryStore) CreateLoginAttempt(ctx context.Context, attempt storedLoginAttempt, limits LoginAttemptLimits) error {
@@ -36,28 +50,21 @@ func (s *MemoryStore) CreateLoginAttempt(ctx context.Context, attempt storedLogi
 	if s.err != nil {
 		return s.err
 	}
-	for key, record := range s.loginAttempts {
-		if !attempt.CreatedAt.Before(record.ExpiresAt) {
-			delete(s.loginAttempts, key)
-		}
-	}
-	globalCount := 0
-	browserCount := 0
-	for _, record := range s.loginAttempts {
-		if record.EnterpriseID == attempt.EnterpriseID && record.ClientID == attempt.ClientID {
-			globalCount++
-			if record.BrowserIDHash == attempt.BrowserIDHash {
-				browserCount++
-			}
-		}
-	}
-	if globalCount >= limits.Global || browserCount >= limits.PerBrowser {
-		return errLoginAttemptLimited
-	}
+	s.expireLoginAttempts(attempt.CreatedAt)
 	if _, ok := s.loginAttempts[attempt.StateHash]; ok {
 		return errDuplicate
 	}
+	scope := loginAttemptScope{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID}
+	browser := loginAttemptBrowserScope{loginAttemptScope: scope, BrowserIDHash: attempt.BrowserIDHash}
+	if s.scopeCounts[scope] >= limits.Global || s.browserCounts[browser] >= limits.PerBrowser {
+		return errLoginAttemptLimited
+	}
 	s.loginAttempts[attempt.StateHash] = attempt
+	s.nextAttemptGeneration++
+	s.loginAttemptGeneration[attempt.StateHash] = s.nextAttemptGeneration
+	s.scopeCounts[scope]++
+	s.browserCounts[browser]++
+	heap.Push(&s.loginAttemptExpiry, loginAttemptExpiryItem{ExpiresAt: attempt.ExpiresAt, StateHash: attempt.StateHash, Generation: s.nextAttemptGeneration})
 	return nil
 }
 
@@ -78,14 +85,78 @@ func (s *MemoryStore) ConsumeLoginAttempt(ctx context.Context, stateHash, bindin
 		return storedLoginAttempt{}, errNotFound
 	}
 	if !now.Before(record.ExpiresAt) {
-		delete(s.loginAttempts, stateHash)
+		s.deleteLoginAttempt(record)
 		return storedLoginAttempt{}, errNotFound
 	}
 	if len(record.BindingHash) != len(bindingHash) || subtle.ConstantTimeCompare([]byte(record.BindingHash), []byte(bindingHash)) != 1 {
 		return storedLoginAttempt{}, errNotFound
 	}
-	delete(s.loginAttempts, stateHash)
+	s.deleteLoginAttempt(record)
 	return record, nil
+}
+
+type loginAttemptScope struct {
+	EnterpriseID string
+	ClientID     string
+}
+
+type loginAttemptBrowserScope struct {
+	loginAttemptScope
+	BrowserIDHash string
+}
+
+type loginAttemptExpiryItem struct {
+	ExpiresAt  time.Time
+	StateHash  string
+	Generation uint64
+}
+
+type loginAttemptExpiryHeap []loginAttemptExpiryItem
+
+func (h loginAttemptExpiryHeap) Len() int { return len(h) }
+func (h loginAttemptExpiryHeap) Less(i, j int) bool {
+	if h[i].ExpiresAt.Equal(h[j].ExpiresAt) {
+		return h[i].StateHash < h[j].StateHash
+	}
+	return h[i].ExpiresAt.Before(h[j].ExpiresAt)
+}
+func (h loginAttemptExpiryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *loginAttemptExpiryHeap) Push(value any) {
+	*h = append(*h, value.(loginAttemptExpiryItem))
+}
+func (h *loginAttemptExpiryHeap) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
+}
+
+func (s *MemoryStore) expireLoginAttempts(now time.Time) {
+	for s.loginAttemptExpiry.Len() > 0 && !now.Before(s.loginAttemptExpiry[0].ExpiresAt) {
+		item := heap.Pop(&s.loginAttemptExpiry).(loginAttemptExpiryItem)
+		record, ok := s.loginAttempts[item.StateHash]
+		if !ok || s.loginAttemptGeneration[item.StateHash] != item.Generation || !record.ExpiresAt.Equal(item.ExpiresAt) {
+			continue
+		}
+		s.deleteLoginAttempt(record)
+	}
+}
+
+func (s *MemoryStore) deleteLoginAttempt(record storedLoginAttempt) {
+	delete(s.loginAttempts, record.StateHash)
+	delete(s.loginAttemptGeneration, record.StateHash)
+	scope := loginAttemptScope{EnterpriseID: record.EnterpriseID, ClientID: record.ClientID}
+	browser := loginAttemptBrowserScope{loginAttemptScope: scope, BrowserIDHash: record.BrowserIDHash}
+	decrementLoginAttemptCount(s.scopeCounts, scope)
+	decrementLoginAttemptCount(s.browserCounts, browser)
+}
+
+func decrementLoginAttemptCount[K comparable](counts map[K]int, key K) {
+	if counts[key] <= 1 {
+		delete(counts, key)
+		return
+	}
+	counts[key]--
 }
 
 func (s *MemoryStore) loginAttemptSnapshot() map[string]storedLoginAttempt {
