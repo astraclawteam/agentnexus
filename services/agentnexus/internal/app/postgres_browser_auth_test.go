@@ -5,11 +5,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -37,6 +39,11 @@ type fakeBrowserProfileTx struct {
 	rollbackContextErr  error
 	rollbackHasDeadline bool
 	calls               []string
+	profile             db.GetBrowserProfileRow
+	units               []db.ListBrowserProfileOrgUnitsRow
+	unitArgs            db.ListBrowserProfileOrgUnitsParams
+	cancelOnUnits       context.CancelFunc
+	commitErr           error
 }
 
 func (f *fakeBrowserProfileTx) GetBrowserProfile(context.Context, db.GetBrowserProfileParams) (db.GetBrowserProfileRow, error) {
@@ -44,17 +51,100 @@ func (f *fakeBrowserProfileTx) GetBrowserProfile(context.Context, db.GetBrowserP
 	if f.cancel != nil {
 		f.cancel()
 	}
-	return db.GetBrowserProfileRow{}, f.queryErr
+	return f.profile, f.queryErr
 }
 
-func (f *fakeBrowserProfileTx) ListBrowserProfileOrgUnits(context.Context, db.ListBrowserProfileOrgUnitsParams) ([]string, error) {
+func (f *fakeBrowserProfileTx) ListBrowserProfileOrgUnits(_ context.Context, params db.ListBrowserProfileOrgUnitsParams) ([]db.ListBrowserProfileOrgUnitsRow, error) {
 	f.calls = append(f.calls, "units")
-	return nil, nil
+	f.unitArgs = params
+	if f.cancelOnUnits != nil {
+		f.cancelOnUnits()
+	}
+	return f.units, nil
 }
 
 func (f *fakeBrowserProfileTx) Commit(context.Context) error {
 	f.calls = append(f.calls, "commit")
-	return nil
+	return f.commitErr
+}
+
+func TestPostgresBrowserProfileUsesExactVersionAndValidatesBoundedRows(t *testing.T) {
+	t.Parallel()
+	t.Run("exact version sorted deduplicated", func(t *testing.T) {
+		tx := &fakeBrowserProfileTx{
+			profile: db.GetBrowserProfileRow{DisplayName: "User", OrgVersion: 17},
+			units: []db.ListBrowserProfileOrgUnitsRow{
+				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "z"},
+				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a"},
+				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a"},
+			},
+		}
+		profile, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(context.Background(), "enterprise-1", "user-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tx.unitArgs.VersionNumber != 17 || !reflect.DeepEqual(profile.OrgUnitIDs, []string{"a", "z"}) || profile.Permissions == nil {
+			t.Fatalf("args=%#v profile=%#v", tx.unitArgs, profile)
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		row  db.ListBrowserProfileOrgUnitsRow
+	}{
+		{name: "cross enterprise", row: db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-2", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a"}},
+		{name: "cross version", row: db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-1", VersionNumber: 18, EnterpriseUserID: "user-1", OrgUnitID: "a"}},
+		{name: "cross user", row: db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-2", OrgUnitID: "a"}},
+		{name: "noncanonical unit", row: db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: " a"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, units: []db.ListBrowserProfileOrgUnitsRow{test.row}}
+			if _, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(context.Background(), "enterprise-1", "user-1"); err == nil {
+				t.Fatal("malformed profile row was accepted")
+			}
+		})
+	}
+
+	t.Run("limit plus one", func(t *testing.T) {
+		rows := make([]db.ListBrowserProfileOrgUnitsRow, policy.MaxAtlasMemberships+1)
+		for i := range rows {
+			rows[i] = db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "unit"}
+		}
+		tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, units: rows}
+		if _, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(context.Background(), "enterprise-1", "user-1"); err == nil {
+			t.Fatal("max plus one profile memberships were accepted")
+		}
+	})
+
+	t.Run("exact limit", func(t *testing.T) {
+		rows := make([]db.ListBrowserProfileOrgUnitsRow, policy.MaxAtlasMemberships)
+		for i := range rows {
+			rows[i] = db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "unit"}
+		}
+		tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, units: rows}
+		profile, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(context.Background(), "enterprise-1", "user-1")
+		if err != nil || !reflect.DeepEqual(profile.OrgUnitIDs, []string{"unit"}) {
+			t.Fatalf("error=%v units=%#v", err, profile.OrgUnitIDs)
+		}
+	})
+
+	t.Run("cancellation before conversion", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, units: []db.ListBrowserProfileOrgUnitsRow{{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a"}}, cancelOnUnits: cancel}
+		if _, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(ctx, "enterprise-1", "user-1"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation error = %v", err)
+		}
+	})
+
+	t.Run("commit and rollback errors are joined", func(t *testing.T) {
+		commitErr := errors.New("commit failed")
+		rollbackErr := errors.New("rollback failed")
+		tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, commitErr: commitErr, rollbackErr: rollbackErr}
+		_, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(context.Background(), "enterprise-1", "user-1")
+		if !errors.Is(err, commitErr) || !errors.Is(err, rollbackErr) {
+			t.Fatalf("joined cleanup error = %v", err)
+		}
+	})
 }
 
 func (f *fakeBrowserProfileTx) Rollback(ctx context.Context) error {
@@ -174,6 +264,14 @@ func TestBrowserDirectoryAndAuditSQLAreQuerySpecificAndSerialized(t *testing.T) 
 	}
 	if !strings.Contains(normalized, "join org_versions as v on v.enterprise_id = m.enterprise_id and v.version_number = m.version_number and v.policy_snapshot_sealed = true") {
 		t.Error("profile memberships are not bound to a sealed enterprise/version snapshot")
+	}
+	for _, required := range []string{"select m.enterprise_id, m.version_number, m.enterprise_user_id, m.org_unit_id", "m.version_number = $3", "limit 100001"} {
+		if !strings.Contains(normalized, required) {
+			t.Errorf("profile membership query missing exact bounded row contract %q", required)
+		}
+	}
+	if strings.Contains(normalized, "select latest.version_number from org_versions as latest") {
+		t.Error("profile membership query independently selects latest version")
 	}
 	productionSource := string(production)
 	for _, required := range []string{"pgx.RepeatableRead", "tx.Commit(ctx)", "context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)", "errors.Join"} {

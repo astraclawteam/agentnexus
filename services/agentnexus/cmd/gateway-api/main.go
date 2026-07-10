@@ -61,7 +61,7 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		cleanup()
 		return nil, func() {}, fmt.Errorf("initialize authorize rate limiter: %w", err)
 	}
-	authorizationPolicy, ticketActors := productionAuthorizationDependencies(pool)
+	authorizationPolicy, ticketActors := productionAuthorizationDependencies(browserConfig.OIDC.EnterpriseID, pool)
 	router, err := app.NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, app.BrowserAuthDependencies{
 		Config:                  browserConfig.OIDC,
 		Sessions:                browserauth.NewService(browserauth.NewPostgresStore(pool), browserauth.WithLoginAttemptLimits(browserConfig.LoginAttemptLimits)),
@@ -81,8 +81,8 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 	return router, cleanup, nil
 }
 
-func productionAuthorizationDependencies(pool *pgxpool.Pool) (policy.AtlasPolicySource, app.TicketActorAuthenticator) {
-	return app.NewPostgresAtlasPolicySource(pool), app.RejectTicketActorAuthenticator{}
+func productionAuthorizationDependencies(enterpriseID string, pool *pgxpool.Pool) (policy.AtlasPolicySource, app.TicketActorAuthenticator) {
+	return app.NewPostgresAtlasPolicySource(pool), app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)
 }
 
 func newHTTPServer(cfg config.Config, handler http.Handler) *http.Server {

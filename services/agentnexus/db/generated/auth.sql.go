@@ -589,7 +589,7 @@ func (q *Queries) IncrementOIDCLoginAttemptScopeCounter(ctx context.Context, arg
 }
 
 const listBrowserProfileOrgUnits = `-- name: ListBrowserProfileOrgUnits :many
-SELECT m.org_unit_id
+SELECT m.enterprise_id, m.version_number, m.enterprise_user_id, m.org_unit_id
 FROM org_policy_snapshot_memberships AS m
 JOIN org_versions AS v
   ON v.enterprise_id = m.enterprise_id
@@ -597,35 +597,42 @@ JOIN org_versions AS v
  AND v.policy_snapshot_sealed = true
 WHERE m.enterprise_id = $1
   AND m.enterprise_user_id = $2
-  AND m.version_number = (
-      SELECT latest.version_number
-      FROM org_versions AS latest
-      WHERE latest.enterprise_id = $1
-        AND latest.policy_snapshot_sealed = true
-      ORDER BY latest.version_number DESC
-      LIMIT 1
-  )
+  AND m.version_number = $3
 ORDER BY m.org_unit_id
+LIMIT 100001
 `
 
 type ListBrowserProfileOrgUnitsParams struct {
 	EnterpriseID     string
 	EnterpriseUserID string
+	VersionNumber    int64
 }
 
-func (q *Queries) ListBrowserProfileOrgUnits(ctx context.Context, arg ListBrowserProfileOrgUnitsParams) ([]string, error) {
-	rows, err := q.db.Query(ctx, listBrowserProfileOrgUnits, arg.EnterpriseID, arg.EnterpriseUserID)
+type ListBrowserProfileOrgUnitsRow struct {
+	EnterpriseID     string
+	VersionNumber    int64
+	EnterpriseUserID string
+	OrgUnitID        string
+}
+
+func (q *Queries) ListBrowserProfileOrgUnits(ctx context.Context, arg ListBrowserProfileOrgUnitsParams) ([]ListBrowserProfileOrgUnitsRow, error) {
+	rows, err := q.db.Query(ctx, listBrowserProfileOrgUnits, arg.EnterpriseID, arg.EnterpriseUserID, arg.VersionNumber)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []string
+	var items []ListBrowserProfileOrgUnitsRow
 	for rows.Next() {
-		var org_unit_id string
-		if err := rows.Scan(&org_unit_id); err != nil {
+		var i ListBrowserProfileOrgUnitsRow
+		if err := rows.Scan(
+			&i.EnterpriseID,
+			&i.VersionNumber,
+			&i.EnterpriseUserID,
+			&i.OrgUnitID,
+		); err != nil {
 			return nil, err
 		}
-		items = append(items, org_unit_id)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

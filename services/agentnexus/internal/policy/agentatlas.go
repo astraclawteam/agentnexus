@@ -150,7 +150,7 @@ func (e *AgentAtlasEvaluator) Evaluate(ctx context.Context, req ScopedRequest) (
 
 	decision := deniedAtlasDecision(snapshot.OrgVersion, baselineRisk)
 	if req.OrgVersion != snapshot.OrgVersion || !atlasCanonicalNonEmpty(req.OrgUnitID) || !atlasCanonicalNonEmpty(string(req.ResourceType)) || !atlasCanonicalNonEmpty(req.ResourceID) || !atlasCanonicalNonEmpty(string(req.Action)) || !known {
-		return decision, nil
+		return deniedAtlasDecision(snapshot.OrgVersion, AtlasRiskHigh), nil
 	}
 
 	analysis, valid, err := analyzeAtlasSnapshot(ctx, snapshot, req.OrgUnitID, requiredPermission, nil)

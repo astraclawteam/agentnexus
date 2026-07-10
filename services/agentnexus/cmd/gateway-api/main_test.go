@@ -70,13 +70,23 @@ func TestBuildRouterWiresAuthorizeRateLimiterAndTrustedSourceResolver(t *testing
 	}
 }
 
-func TestBuildRouterWiresAuthorizationPolicyAndFailClosedTicketActor(t *testing.T) {
-	source, tickets := productionAuthorizationDependencies(nil)
+func TestBuildRouterWiresAuthorizationPolicyAndPostgresTicketActor(t *testing.T) {
+	source, tickets := productionAuthorizationDependencies("enterprise-1", nil)
 	if _, err := source.LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1"); !errors.Is(err, policy.ErrAtlasPolicyUnavailable) {
 		t.Fatalf("nil Postgres source error = %v", err)
 	}
-	if _, err := tickets.AuthenticateTicketActor(context.Background(), "opaque-ticket"); !errors.Is(err, app.ErrInvalidTicketActor) {
+	if _, err := tickets.AuthenticateTicketActor(context.Background(), "opaque-ticket"); !errors.Is(err, app.ErrTicketActorUnavailable) {
 		t.Fatalf("production ticket adapter error = %v", err)
+	}
+	_, file, _, _ := runtime.Caller(0)
+	raw, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"productionAuthorizationDependencies(browserConfig.OIDC.EnterpriseID, pool)", "app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)"} {
+		if !strings.Contains(string(raw), required) {
+			t.Errorf("production authorization wiring missing %q", required)
+		}
 	}
 }
 

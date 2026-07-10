@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"sort"
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,7 +23,7 @@ type PostgresBrowserDirectory struct {
 
 type browserProfileTx interface {
 	GetBrowserProfile(context.Context, db.GetBrowserProfileParams) (db.GetBrowserProfileRow, error)
-	ListBrowserProfileOrgUnits(context.Context, db.ListBrowserProfileOrgUnitsParams) ([]string, error)
+	ListBrowserProfileOrgUnits(context.Context, db.ListBrowserProfileOrgUnitsParams) ([]db.ListBrowserProfileOrgUnitsRow, error)
 	Commit(context.Context) error
 	Rollback(context.Context) error
 }
@@ -49,7 +51,7 @@ func (t *postgresBrowserProfileTx) GetBrowserProfile(ctx context.Context, params
 	return t.queries.GetBrowserProfile(ctx, params)
 }
 
-func (t *postgresBrowserProfileTx) ListBrowserProfileOrgUnits(ctx context.Context, params db.ListBrowserProfileOrgUnitsParams) ([]string, error) {
+func (t *postgresBrowserProfileTx) ListBrowserProfileOrgUnits(ctx context.Context, params db.ListBrowserProfileOrgUnitsParams) ([]db.ListBrowserProfileOrgUnitsRow, error) {
 	return t.queries.ListBrowserProfileOrgUnits(ctx, params)
 }
 
@@ -95,13 +97,34 @@ func (d *PostgresBrowserDirectory) ResolveBrowserProfile(ctx context.Context, en
 	if err != nil {
 		return BrowserProfile{}, err
 	}
-	units, err := tx.ListBrowserProfileOrgUnits(ctx, db.ListBrowserProfileOrgUnitsParams{EnterpriseID: enterpriseID, EnterpriseUserID: userID})
+	if record.OrgVersion < 1 {
+		return BrowserProfile{}, errors.New("invalid profile organization version")
+	}
+	rows, err := tx.ListBrowserProfileOrgUnits(ctx, db.ListBrowserProfileOrgUnitsParams{EnterpriseID: enterpriseID, EnterpriseUserID: userID, VersionNumber: record.OrgVersion})
 	if err != nil {
 		return BrowserProfile{}, err
 	}
-	if units == nil {
-		units = []string{}
+	if err := ctx.Err(); err != nil {
+		return BrowserProfile{}, err
 	}
+	if len(rows) > policy.MaxAtlasMemberships {
+		return BrowserProfile{}, errors.New("profile membership limit exceeded")
+	}
+	unitSet := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return BrowserProfile{}, err
+		}
+		if row.EnterpriseID != enterpriseID || row.VersionNumber != record.OrgVersion || row.EnterpriseUserID != userID || !canonicalAuthorizationValue(row.OrgUnitID) {
+			return BrowserProfile{}, errors.New("invalid profile membership row")
+		}
+		unitSet[row.OrgUnitID] = struct{}{}
+	}
+	units := make([]string, 0, len(unitSet))
+	for unitID := range unitSet {
+		units = append(units, unitID)
+	}
+	sort.Strings(units)
 	if err := tx.Commit(ctx); err != nil {
 		return BrowserProfile{}, err
 	}

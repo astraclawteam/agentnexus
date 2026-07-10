@@ -98,7 +98,7 @@ func (h *authorizationHandler) decide(w http.ResponseWriter, r *http.Request) {
 		Action:       input.Action,
 	})
 	if err != nil {
-		writeAuthorizationError(w, http.StatusServiceUnavailable)
+		writeJSON(w, http.StatusServiceUnavailable, unavailableAuthorizationDecision(input.OrgVersion))
 		return
 	}
 	writeJSON(w, http.StatusOK, decision)
@@ -211,11 +211,22 @@ func decodeAuthorizationRequest(w http.ResponseWriter, r *http.Request, target *
 		writeAuthorizationError(w, http.StatusBadRequest)
 		return false
 	}
-	if len(seen) != 5 || target.OrgVersion < 1 || !canonicalAuthorizationValue(target.OrgUnitID) || !canonicalAuthorizationValue(string(target.ResourceType)) || !canonicalAuthorizationValue(target.ResourceID) || !canonicalAuthorizationValue(string(target.Action)) {
+	if len(seen) != 5 || target.OrgVersion < 1 {
 		writeAuthorizationError(w, http.StatusBadRequest)
 		return false
 	}
 	return true
+}
+
+func unavailableAuthorizationDecision(orgVersion int64) policy.PermissionDecision {
+	return policy.PermissionDecision{
+		Decision:    policy.DecisionDeny,
+		Permissions: []policy.AtlasPermission{},
+		OrgUnitIDs:  []string{},
+		MaskFields:  []string{},
+		RiskLevel:   policy.AtlasRiskHigh,
+		OrgVersion:  orgVersion,
+	}
 }
 
 func canonicalAuthorizationValue(value string) bool {

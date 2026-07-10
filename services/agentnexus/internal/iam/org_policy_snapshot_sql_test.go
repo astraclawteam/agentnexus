@@ -19,6 +19,11 @@ func TestOrgPolicySnapshotMigrationContract(t *testing.T) {
 	for _, required := range []string{
 		"alter table org_versions add column policy_snapshot_sealed boolean not null default false",
 		"add column policy_snapshot_publishable boolean not null default false",
+		"create table org_policy_publication_heads",
+		"enterprise_id text primary key references enterprises(id)",
+		"last_version_number bigint not null check (last_version_number > 0)",
+		"insert into org_policy_publication_heads (enterprise_id, last_version_number) select enterprise_id, max(version_number)",
+		"from org_versions where version_number > 0 group by enterprise_id",
 		"create table org_policy_snapshot_units",
 		"primary key (enterprise_id, version_number, org_unit_id)",
 		"foreign key (enterprise_id, version_number) references org_versions(enterprise_id, version_number)",
@@ -32,7 +37,10 @@ func TestOrgPolicySnapshotMigrationContract(t *testing.T) {
 		"create trigger guard_org_policy_version_seal before insert or update or delete",
 		"pg_advisory_xact_lock(hashtextextended(new.enterprise_id, 0))",
 		"new.version_number <= 0",
-		"v.version_number >= new.version_number",
+		"insert into org_policy_publication_heads as heads",
+		"on conflict (enterprise_id) do update set last_version_number = excluded.last_version_number",
+		"where heads.last_version_number < excluded.last_version_number",
+		"returning last_version_number into advanced_version",
 		"new.policy_snapshot_publishable := true",
 		"new.policy_snapshot_sealed := false",
 		"organization policy versions cannot be deleted",
@@ -46,7 +54,7 @@ func TestOrgPolicySnapshotMigrationContract(t *testing.T) {
 			t.Errorf("migration missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"select distinct on (enterprise_id)", "join org_units as u on u.enterprise_id = latest.enterprise_id", "join org_memberships as m on m.enterprise_id = latest.enterprise_id"} {
+	for _, forbidden := range []string{"select distinct on (enterprise_id)", "join org_units as u on u.enterprise_id = latest.enterprise_id", "join org_memberships as m on m.enterprise_id = latest.enterprise_id", "v.version_number >= new.version_number"} {
 		if strings.Contains(migration, forbidden) {
 			t.Errorf("migration fabricates an old snapshot via %q", forbidden)
 		}
@@ -55,7 +63,7 @@ func TestOrgPolicySnapshotMigrationContract(t *testing.T) {
 		t.Errorf("snapshot guard must lock the version row in both INSERT and UPDATE/DELETE branches: %s", migration)
 	}
 	lockAt := strings.Index(migration, "pg_advisory_xact_lock(hashtextextended(new.enterprise_id, 0))")
-	monotonicAt := strings.Index(migration, "v.version_number >= new.version_number")
+	monotonicAt := strings.Index(migration, "insert into org_policy_publication_heads as heads")
 	if lockAt < 0 || monotonicAt <= lockAt {
 		t.Errorf("version maximum is checked before publisher serialization: lock=%d monotonic=%d", lockAt, monotonicAt)
 	}
@@ -64,7 +72,8 @@ func TestOrgPolicySnapshotMigrationContract(t *testing.T) {
 	functionDrop := strings.Index(migration, "drop function if exists guard_org_policy_snapshot_row")
 	sealedColumnDrop := strings.Index(migration, "alter table org_versions drop column if exists policy_snapshot_sealed")
 	publishableColumnDrop := strings.Index(migration, "alter table org_versions drop column if exists policy_snapshot_publishable")
-	if membershipsDrop < 0 || unitsDrop <= membershipsDrop || functionDrop <= unitsDrop || sealedColumnDrop <= functionDrop || publishableColumnDrop <= sealedColumnDrop {
+	headDrop := strings.Index(migration, "drop table if exists org_policy_publication_heads")
+	if membershipsDrop < 0 || unitsDrop <= membershipsDrop || functionDrop <= unitsDrop || headDrop <= functionDrop || sealedColumnDrop <= headDrop || publishableColumnDrop <= sealedColumnDrop {
 		t.Fatalf("unsafe Down order: memberships=%d units=%d function=%d", membershipsDrop, unitsDrop, functionDrop)
 	}
 	for _, required := range []string{"drop function if exists reject_org_policy_snapshot_truncate", "drop trigger if exists guard_org_policy_version_seal on org_versions", "drop function if exists guard_org_policy_version_seal"} {

@@ -4,6 +4,17 @@ ALTER TABLE org_versions
     ADD COLUMN policy_snapshot_sealed BOOLEAN NOT NULL DEFAULT false,
     ADD COLUMN policy_snapshot_publishable BOOLEAN NOT NULL DEFAULT false;
 
+CREATE TABLE org_policy_publication_heads (
+    enterprise_id TEXT PRIMARY KEY REFERENCES enterprises(id),
+    last_version_number BIGINT NOT NULL CHECK (last_version_number > 0)
+);
+
+INSERT INTO org_policy_publication_heads (enterprise_id, last_version_number)
+SELECT enterprise_id, MAX(version_number)
+FROM org_versions
+WHERE version_number > 0
+GROUP BY enterprise_id;
+
 CREATE TABLE org_policy_snapshot_units (
     enterprise_id TEXT NOT NULL CHECK (enterprise_id <> '' AND btrim(enterprise_id) = enterprise_id),
     version_number BIGINT NOT NULL CHECK (version_number > 0),
@@ -90,18 +101,21 @@ $$;
 
 CREATE FUNCTION guard_org_policy_version_seal() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE
+    advanced_version BIGINT;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         PERFORM pg_advisory_xact_lock(hashtextextended(NEW.enterprise_id, 0));
         IF NEW.version_number <= 0 THEN
             RAISE EXCEPTION 'organization policy version number must be positive';
         END IF;
-        IF EXISTS (
-            SELECT 1
-            FROM org_versions AS v
-            WHERE v.enterprise_id = NEW.enterprise_id
-              AND v.version_number >= NEW.version_number
-        ) THEN
+        INSERT INTO org_policy_publication_heads AS heads (enterprise_id, last_version_number)
+        VALUES (NEW.enterprise_id, NEW.version_number)
+        ON CONFLICT (enterprise_id) DO UPDATE
+        SET last_version_number = EXCLUDED.last_version_number
+        WHERE heads.last_version_number < EXCLUDED.last_version_number
+        RETURNING last_version_number INTO advanced_version;
+        IF NOT FOUND THEN
             RAISE EXCEPTION 'organization policy version must strictly increase';
         END IF;
         NEW.policy_snapshot_publishable := true;
@@ -162,6 +176,7 @@ DROP FUNCTION IF EXISTS guard_org_policy_snapshot_row();
 DROP FUNCTION IF EXISTS reject_org_policy_snapshot_truncate();
 DROP TRIGGER IF EXISTS guard_org_policy_version_seal ON org_versions;
 DROP FUNCTION IF EXISTS guard_org_policy_version_seal();
+DROP TABLE IF EXISTS org_policy_publication_heads;
 ALTER TABLE org_versions DROP COLUMN IF EXISTS policy_snapshot_sealed;
 ALTER TABLE org_versions DROP COLUMN IF EXISTS policy_snapshot_publishable;
 -- +goose StatementEnd

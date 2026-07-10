@@ -95,9 +95,13 @@ func (q *Queries) CreateStepGrant(ctx context.Context, arg CreateStepGrantParams
 }
 
 const getCaseTicket = `-- name: GetCaseTicket :one
-SELECT id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, created_at
-FROM case_tickets
-WHERE enterprise_id = $1 AND id = $2
+SELECT tickets.id, tickets.enterprise_id, tickets.actor_user_id, tickets.request_id,
+       tickets.trace_id, tickets.status, tickets.expires_at, tickets.created_at
+FROM case_tickets AS tickets
+JOIN enterprise_users AS users
+  ON users.enterprise_id = tickets.enterprise_id
+ AND users.id = tickets.actor_user_id
+WHERE tickets.enterprise_id = $1 AND tickets.id = $2
 `
 
 type GetCaseTicketParams struct {

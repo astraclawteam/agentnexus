@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,57 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 )
+
+type unavailableAtlasSource struct{ err error }
+
+func (s unavailableAtlasSource) LoadAccessSnapshot(context.Context, string, string) (policy.AtlasAccessSnapshot, error) {
+	return policy.AtlasAccessSnapshot{}, s.err
+}
+
+func TestAuthorizationSemanticRefusalsReturnCompleteDenyDecision(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "empty scope", body: `{"org_unit_id":"","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`},
+		{name: "missing resource id value", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"","action":"knowledge.suggest"}`},
+		{name: "stale version", body: `{"org_unit_id":"child","org_version":11,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`},
+		{name: "unknown action", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.unknown"}`},
+		{name: "resource mismatch", body: `{"org_unit_id":"child","org_version":12,"resource_type":"workflow","resource_id":"article-1","action":"knowledge.suggest"}`},
+		{name: "noncanonical scope", body: `{"org_unit_id":" child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			router := newAuthorizationTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, authorizationPolicySource())
+			req := httptest.NewRequest(http.MethodPost, "/v1/authorization/decisions", strings.NewReader(test.body))
+			req.Header.Set("Content-Type", "application/json")
+			addAuthorizationSession(req)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+			var decision policy.PermissionDecision
+			if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &decision) != nil || decision.Decision != policy.DecisionDeny || decision.OrgVersion != 12 || decision.RiskLevel != policy.AtlasRiskHigh || decision.Permissions == nil || decision.OrgUnitIDs == nil || decision.MaskFields == nil {
+				t.Fatalf("status=%d decision=%#v body=%s", rr.Code, decision, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestAuthorizationUnavailablePolicyReturnsRetryableCompleteDeny(t *testing.T) {
+	t.Parallel()
+	router := newAuthorizationTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, unavailableAtlasSource{err: errors.New("database offline")})
+	req := httptest.NewRequest(http.MethodPost, "/v1/authorization/decisions", strings.NewReader(`{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`))
+	req.Header.Set("Content-Type", "application/json")
+	addAuthorizationSession(req)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	var decision policy.PermissionDecision
+	if err := json.Unmarshal(rr.Body.Bytes(), &decision); err != nil {
+		t.Fatalf("decode deny: %v body=%s", err, rr.Body.String())
+	}
+	if rr.Code != http.StatusServiceUnavailable || decision.Decision != policy.DecisionDeny || decision.OrgVersion != 12 || decision.RiskLevel != policy.AtlasRiskHigh || decision.Permissions == nil || decision.OrgUnitIDs == nil || decision.MaskFields == nil {
+		t.Fatalf("status=%d decision=%#v body=%s", rr.Code, decision, rr.Body.String())
+	}
+}
 
 type stubAuthorizationSessions struct {
 	session browserauth.BrowserSession
@@ -221,10 +274,10 @@ func TestAuthorizationStrictJSONAndContentType(t *testing.T) {
 		{name: "duplicate org version", contentType: "application/json", body: `{"org_unit_id":"child","org_version":11,"org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`, want: http.StatusBadRequest},
 		{name: "duplicate resource", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","resource_id":"article-2","action":"knowledge.suggest"}`, want: http.StatusBadRequest},
 		{name: "duplicate action", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest","action":"knowledge.update"}`, want: http.StatusBadRequest},
-		{name: "whitespace org", contentType: "application/json", body: `{"org_unit_id":" child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`, want: http.StatusBadRequest},
-		{name: "whitespace resource type", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge ","resource_id":"article-1","action":"knowledge.suggest"}`, want: http.StatusBadRequest},
-		{name: "whitespace resource id", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":" ","action":"knowledge.suggest"}`, want: http.StatusBadRequest},
-		{name: "whitespace action", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest "}`, want: http.StatusBadRequest},
+		{name: "whitespace org is semantic deny", contentType: "application/json", body: `{"org_unit_id":" child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`, want: http.StatusOK},
+		{name: "whitespace resource type is semantic deny", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge ","resource_id":"article-1","action":"knowledge.suggest"}`, want: http.StatusOK},
+		{name: "whitespace resource id is semantic deny", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":" ","action":"knowledge.suggest"}`, want: http.StatusOK},
+		{name: "whitespace action is semantic deny", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest "}`, want: http.StatusOK},
 		{name: "trailing json", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}{}`, want: http.StatusBadRequest},
 		{name: "oversized", contentType: "application/json", body: `{"unknown":"` + strings.Repeat("x", maxAuthorizationRequestBytes) + `"}`, want: http.StatusBadRequest},
 	}
