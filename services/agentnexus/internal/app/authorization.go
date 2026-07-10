@@ -105,13 +105,21 @@ func (h *authorizationHandler) decide(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *authorizationHandler) authenticateActor(r *http.Request) (AuthorizationActor, int) {
-	cookie, cookieErr := r.Cookie(browserSessionCookie)
+	var sessionCookies []*http.Cookie
+	for _, cookie := range r.Cookies() {
+		if cookie.Name == browserSessionCookie {
+			sessionCookies = append(sessionCookies, cookie)
+		}
+	}
 	authorizationValues := r.Header.Values("Authorization")
-	if cookieErr == nil && len(authorizationValues) > 0 {
+	if len(sessionCookies) > 1 {
 		return AuthorizationActor{}, http.StatusUnauthorized
 	}
-	if cookieErr == nil {
-		session, sessionErr := h.sessions.GetSession(r.Context(), cookie.Value)
+	if len(sessionCookies) == 1 && len(authorizationValues) > 0 {
+		return AuthorizationActor{}, http.StatusUnauthorized
+	}
+	if len(sessionCookies) == 1 {
+		session, sessionErr := h.sessions.GetSession(r.Context(), sessionCookies[0].Value)
 		if errors.Is(sessionErr, browserauth.ErrSessionUnavailable) {
 			return AuthorizationActor{}, http.StatusServiceUnavailable
 		}
@@ -139,7 +147,12 @@ func (h *authorizationHandler) authenticateActor(r *http.Request) (Authorization
 }
 
 func decodeAuthorizationRequest(w http.ResponseWriter, r *http.Request, target *authorizationDecisionRequest) bool {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	contentTypes := r.Header.Values("Content-Type")
+	if len(contentTypes) != 1 {
+		writeAuthorizationError(w, http.StatusUnsupportedMediaType)
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(contentTypes[0])
 	if err != nil || mediaType != "application/json" {
 		writeAuthorizationError(w, http.StatusUnsupportedMediaType)
 		return false

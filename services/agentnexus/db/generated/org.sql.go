@@ -81,6 +81,45 @@ func (q *Queries) CreateEnterpriseUser(ctx context.Context, arg CreateEnterprise
 	return i, err
 }
 
+const createOrgEventForPolicyPublication = `-- name: CreateOrgEventForPolicyPublication :one
+INSERT INTO org_events (id, enterprise_id, event_type, source_hash)
+VALUES ($1, $2, $3, $4)
+RETURNING id, enterprise_id, event_type, source_hash, created_at
+`
+
+type CreateOrgEventForPolicyPublicationParams struct {
+	ID           string
+	EnterpriseID string
+	EventType    string
+	SourceHash   pgtype.Text
+}
+
+type CreateOrgEventForPolicyPublicationRow struct {
+	ID           string
+	EnterpriseID string
+	EventType    string
+	SourceHash   pgtype.Text
+	CreatedAt    pgtype.Timestamptz
+}
+
+func (q *Queries) CreateOrgEventForPolicyPublication(ctx context.Context, arg CreateOrgEventForPolicyPublicationParams) (CreateOrgEventForPolicyPublicationRow, error) {
+	row := q.db.QueryRow(ctx, createOrgEventForPolicyPublication,
+		arg.ID,
+		arg.EnterpriseID,
+		arg.EventType,
+		arg.SourceHash,
+	)
+	var i CreateOrgEventForPolicyPublicationRow
+	err := row.Scan(
+		&i.ID,
+		&i.EnterpriseID,
+		&i.EventType,
+		&i.SourceHash,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const createOrgMembership = `-- name: CreateOrgMembership :one
 INSERT INTO org_memberships (enterprise_id, enterprise_user_id, org_unit_id, role)
 VALUES ($1, $2, $3, $4)
@@ -149,7 +188,7 @@ func (q *Queries) CreateOrgUnit(ctx context.Context, arg CreateOrgUnitParams) (O
 const createOrgVersion = `-- name: CreateOrgVersion :one
 INSERT INTO org_versions (id, enterprise_id, version_number, source_event_id)
 VALUES ($1, $2, $3, $4)
-RETURNING id, enterprise_id, version_number, source_event_id, created_at
+RETURNING id, enterprise_id, version_number, source_event_id, created_at, policy_snapshot_sealed
 `
 
 type CreateOrgVersionParams struct {
@@ -173,6 +212,7 @@ func (q *Queries) CreateOrgVersion(ctx context.Context, arg CreateOrgVersionPara
 		&i.VersionNumber,
 		&i.SourceEventID,
 		&i.CreatedAt,
+		&i.PolicySnapshotSealed,
 	)
 	return i, err
 }
@@ -206,6 +246,7 @@ const getLatestAuthorizationOrgVersion = `-- name: GetLatestAuthorizationOrgVers
 SELECT version_number
 FROM org_versions
 WHERE enterprise_id = $1
+  AND policy_snapshot_sealed = true
 ORDER BY version_number DESC
 LIMIT 1
 `
@@ -330,4 +371,32 @@ func (q *Queries) ListEnterpriseUsers(ctx context.Context, enterpriseID string) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const sealOrgPolicySnapshot = `-- name: SealOrgPolicySnapshot :one
+UPDATE org_versions
+SET policy_snapshot_sealed = true
+WHERE enterprise_id = $1
+  AND version_number = $2
+  AND policy_snapshot_sealed = false
+RETURNING id, enterprise_id, version_number, source_event_id, created_at, policy_snapshot_sealed
+`
+
+type SealOrgPolicySnapshotParams struct {
+	EnterpriseID  string
+	VersionNumber int64
+}
+
+func (q *Queries) SealOrgPolicySnapshot(ctx context.Context, arg SealOrgPolicySnapshotParams) (OrgVersion, error) {
+	row := q.db.QueryRow(ctx, sealOrgPolicySnapshot, arg.EnterpriseID, arg.VersionNumber)
+	var i OrgVersion
+	err := row.Scan(
+		&i.ID,
+		&i.EnterpriseID,
+		&i.VersionNumber,
+		&i.SourceEventID,
+		&i.CreatedAt,
+		&i.PolicySnapshotSealed,
+	)
+	return i, err
 }

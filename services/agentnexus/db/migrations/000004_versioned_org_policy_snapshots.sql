@@ -1,6 +1,7 @@
 -- +goose Up
 -- +goose StatementBegin
-LOCK TABLE org_versions, org_units, org_memberships IN SHARE ROW EXCLUSIVE MODE;
+ALTER TABLE org_versions
+    ADD COLUMN policy_snapshot_sealed BOOLEAN NOT NULL DEFAULT false;
 
 CREATE TABLE org_policy_snapshot_units (
     enterprise_id TEXT NOT NULL CHECK (enterprise_id <> '' AND btrim(enterprise_id) = enterprise_id),
@@ -40,47 +41,100 @@ CREATE INDEX idx_org_policy_snapshot_units_parent
 CREATE INDEX idx_org_policy_snapshot_memberships_actor
     ON org_policy_snapshot_memberships(enterprise_id, version_number, enterprise_user_id, org_unit_id);
 
-CREATE FUNCTION reject_org_policy_snapshot_mutation() RETURNS trigger
+CREATE FUNCTION guard_org_policy_snapshot_row() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-    RAISE EXCEPTION 'organization policy snapshots are immutable';
+    IF TG_OP IN ('UPDATE', 'DELETE') AND NOT EXISTS (
+        SELECT 1 FROM org_versions AS v
+        WHERE v.enterprise_id = OLD.enterprise_id
+          AND v.version_number = OLD.version_number
+          AND v.policy_snapshot_sealed = false
+    ) THEN
+        RAISE EXCEPTION 'policy snapshot is sealed or unpublished';
+    END IF;
+    IF TG_OP IN ('INSERT', 'UPDATE') AND NOT EXISTS (
+        SELECT 1 FROM org_versions AS v
+        WHERE v.enterprise_id = NEW.enterprise_id
+          AND v.version_number = NEW.version_number
+          AND v.policy_snapshot_sealed = false
+    ) THEN
+        RAISE EXCEPTION 'policy snapshot is sealed or unpublished';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER reject_org_policy_snapshot_units_mutation
-BEFORE UPDATE OR DELETE ON org_policy_snapshot_units
-FOR EACH ROW EXECUTE FUNCTION reject_org_policy_snapshot_mutation();
+CREATE FUNCTION reject_org_policy_snapshot_truncate() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'policy snapshot truncate is forbidden';
+END;
+$$;
 
-CREATE TRIGGER reject_org_policy_snapshot_memberships_mutation
-BEFORE UPDATE OR DELETE ON org_policy_snapshot_memberships
-FOR EACH ROW EXECUTE FUNCTION reject_org_policy_snapshot_mutation();
+CREATE FUNCTION guard_org_policy_version_seal() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+	IF TG_OP = 'DELETE' THEN
+		IF OLD.policy_snapshot_sealed THEN
+			RAISE EXCEPTION 'sealed policy snapshot version cannot be deleted';
+		END IF;
+		RETURN OLD;
+	END IF;
+    IF TG_OP = 'INSERT' AND NEW.policy_snapshot_sealed THEN
+        RAISE EXCEPTION 'policy snapshot must be inserted unsealed';
+    END IF;
+	IF TG_OP = 'UPDATE' AND NOT OLD.policy_snapshot_sealed AND NEW.policy_snapshot_sealed AND (
+		NEW.id IS DISTINCT FROM OLD.id OR
+		NEW.enterprise_id IS DISTINCT FROM OLD.enterprise_id OR
+		NEW.version_number IS DISTINCT FROM OLD.version_number OR
+		NEW.source_event_id IS DISTINCT FROM OLD.source_event_id OR
+		NEW.created_at IS DISTINCT FROM OLD.created_at
+	) THEN
+		RAISE EXCEPTION 'policy snapshot seal cannot change version identity';
+	END IF;
+    IF TG_OP = 'UPDATE' AND OLD.policy_snapshot_sealed AND (
+        NOT NEW.policy_snapshot_sealed OR
+        NEW.id IS DISTINCT FROM OLD.id OR
+        NEW.enterprise_id IS DISTINCT FROM OLD.enterprise_id OR
+        NEW.version_number IS DISTINCT FROM OLD.version_number OR
+        NEW.source_event_id IS DISTINCT FROM OLD.source_event_id OR
+        NEW.created_at IS DISTINCT FROM OLD.created_at
+    ) THEN
+        RAISE EXCEPTION 'sealed policy snapshot cannot be unsealed or changed';
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
-WITH latest AS (
-    SELECT DISTINCT ON (enterprise_id) enterprise_id, version_number
-    FROM org_versions
-    ORDER BY enterprise_id, version_number DESC
-)
-INSERT INTO org_policy_snapshot_units (enterprise_id, version_number, org_unit_id, parent_id)
-SELECT u.enterprise_id, latest.version_number, u.id, u.parent_id
-FROM latest
-JOIN org_units AS u ON u.enterprise_id = latest.enterprise_id;
+CREATE TRIGGER guard_org_policy_snapshot_units_rows
+BEFORE INSERT OR UPDATE OR DELETE ON org_policy_snapshot_units
+FOR EACH ROW EXECUTE FUNCTION guard_org_policy_snapshot_row();
+CREATE TRIGGER guard_org_policy_snapshot_memberships_rows
+BEFORE INSERT OR UPDATE OR DELETE ON org_policy_snapshot_memberships
+FOR EACH ROW EXECUTE FUNCTION guard_org_policy_snapshot_row();
 
-WITH latest AS (
-    SELECT DISTINCT ON (enterprise_id) enterprise_id, version_number
-    FROM org_versions
-    ORDER BY enterprise_id, version_number DESC
-)
-INSERT INTO org_policy_snapshot_memberships (
-    enterprise_id, version_number, enterprise_user_id, org_unit_id, role
-)
-SELECT m.enterprise_id, latest.version_number, m.enterprise_user_id, m.org_unit_id, m.role
-FROM latest
-JOIN org_memberships AS m ON m.enterprise_id = latest.enterprise_id;
+CREATE TRIGGER reject_org_policy_snapshot_units_truncate
+BEFORE TRUNCATE ON org_policy_snapshot_units
+FOR EACH STATEMENT EXECUTE FUNCTION reject_org_policy_snapshot_truncate();
+CREATE TRIGGER reject_org_policy_snapshot_memberships_truncate
+BEFORE TRUNCATE ON org_policy_snapshot_memberships
+FOR EACH STATEMENT EXECUTE FUNCTION reject_org_policy_snapshot_truncate();
+
+CREATE TRIGGER guard_org_policy_version_seal
+BEFORE INSERT OR UPDATE OR DELETE ON org_versions
+FOR EACH ROW EXECUTE FUNCTION guard_org_policy_version_seal();
 -- +goose StatementEnd
 
 -- +goose Down
 -- +goose StatementBegin
 DROP TABLE IF EXISTS org_policy_snapshot_memberships;
 DROP TABLE IF EXISTS org_policy_snapshot_units;
-DROP FUNCTION IF EXISTS reject_org_policy_snapshot_mutation();
+DROP FUNCTION IF EXISTS guard_org_policy_snapshot_row();
+DROP FUNCTION IF EXISTS reject_org_policy_snapshot_truncate();
+DROP TRIGGER IF EXISTS guard_org_policy_version_seal ON org_versions;
+DROP FUNCTION IF EXISTS guard_org_policy_version_seal();
+ALTER TABLE org_versions DROP COLUMN IF EXISTS policy_snapshot_sealed;
 -- +goose StatementEnd

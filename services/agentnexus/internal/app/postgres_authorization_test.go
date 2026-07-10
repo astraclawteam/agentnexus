@@ -29,6 +29,7 @@ func (f *fakeAtlasPolicyPool) BeginAtlasPolicyTx(_ context.Context, options pgx.
 type fakeAtlasPolicyTx struct {
 	calls                []string
 	latest               int64
+	latestErr            error
 	units                []db.OrgPolicySnapshotUnit
 	memberships          []db.OrgPolicySnapshotMembership
 	unitArgs             db.ListAuthorizationOrgUnitsParams
@@ -46,6 +47,9 @@ func (f *fakeAtlasPolicyTx) GetLatestAuthorizationOrgVersion(context.Context, st
 	f.calls = append(f.calls, "version")
 	if f.failAt == "version" {
 		return 0, errors.New("version query failed")
+	}
+	if f.latestErr != nil {
+		return 0, f.latestErr
 	}
 	version := f.latest
 	if f.afterVersion != nil {
@@ -193,6 +197,28 @@ func TestPostgresAtlasPolicySourceRejectsCrossTenantOrVersionRows(t *testing.T) 
 				t.Fatalf("error = %v", err)
 			}
 		})
+	}
+}
+
+func TestPostgresAtlasPolicySourceRequiresNewSealedPublication(t *testing.T) {
+	t.Parallel()
+	unsealed := &fakeAtlasPolicyTx{latestErr: pgx.ErrNoRows}
+	_, err := newPostgresAtlasPolicySourceWithPool(&fakeAtlasPolicyPool{tx: unsealed}).LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
+	if !errors.Is(err, policy.ErrAtlasPolicyUnavailable) || !unsealed.rolledBack {
+		t.Fatalf("unsealed legacy version error=%v calls=%#v", err, unsealed.calls)
+	}
+
+	sealed := &fakeAtlasPolicyTx{
+		latest:      18,
+		units:       []db.OrgPolicySnapshotUnit{{EnterpriseID: "enterprise-1", VersionNumber: 18, OrgUnitID: "dept"}},
+		memberships: []db.OrgPolicySnapshotMembership{{EnterpriseID: "enterprise-1", VersionNumber: 18, EnterpriseUserID: "user-1", OrgUnitID: "dept", Role: "edit"}},
+	}
+	snapshot, err := newPostgresAtlasPolicySourceWithPool(&fakeAtlasPolicyPool{tx: sealed}).LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.OrgVersion != 18 || !reflect.DeepEqual(snapshot.Memberships, []policy.AtlasMembership{{OrgUnitID: "dept", Role: "edit"}}) {
+		t.Fatalf("sealed publication snapshot = %#v", snapshot)
 	}
 }
 

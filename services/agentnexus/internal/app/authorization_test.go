@@ -167,6 +167,44 @@ func TestAuthorizationRejectsRepeatedAuthorizationHeader(t *testing.T) {
 	}
 }
 
+func TestAuthorizationRejectsRepeatedContentTypeHeader(t *testing.T) {
+	t.Parallel()
+	for _, values := range [][]string{{"application/json", "application/json"}, {"application/json", "text/plain"}} {
+		router := newAuthorizationTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, authorizationPolicySource())
+		req := httptest.NewRequest(http.MethodPost, "/v1/authorization/decisions", strings.NewReader(`{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`))
+		for _, value := range values {
+			req.Header.Add("Content-Type", value)
+		}
+		addAuthorizationSession(req)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("values=%#v status=%d body=%s", values, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestAuthorizationRejectsRepeatedSessionCookiesBeforeResolvers(t *testing.T) {
+	t.Parallel()
+	for _, withTicket := range []bool{false, true} {
+		sessionCalls := 0
+		tickets := &stubTicketActors{actor: AuthorizationActor{EnterpriseID: "ent-1", UserID: "user-1"}}
+		router := newAuthorizationTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}, calls: &sessionCalls}, tickets, authorizationPolicySource())
+		req := httptest.NewRequest(http.MethodPost, "/v1/authorization/decisions", strings.NewReader(`{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "session-one"})
+		req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "session-two"})
+		if withTicket {
+			addAuthorizationTicket(req)
+		}
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized || sessionCalls != 0 || tickets.token != "" {
+			t.Fatalf("ticket=%t status=%d sessionCalls=%d ticketToken=%q", withTicket, rr.Code, sessionCalls, tickets.token)
+		}
+	}
+}
+
 func TestAuthorizationStrictJSONAndContentType(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

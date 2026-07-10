@@ -2,6 +2,8 @@ package iam
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -110,6 +112,88 @@ func TestEnterpriseIAMAndOrgGraphLifecycle(t *testing.T) {
 	}
 	if version.VersionNumber != 1 || version.SourceEventID != "event_1" {
 		t.Fatalf("version = %+v, want version 1 from event_1", version)
+	}
+}
+
+func TestMemoryStorePublishesEventVersionAndImmutableSnapshotAtomically(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	service := NewService(store, WithIDGenerator(sequenceIDs("event-1", "version-1")))
+	if _, err := service.UpsertOrgUnit(ctx, UpsertOrgUnitInput{ID: "dept", EnterpriseID: "enterprise-1", Name: "Original", UnitType: OrgUnitTypeDepartment}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AddOrgMembership(ctx, AddOrgMembershipInput{EnterpriseID: "enterprise-1", EnterpriseUserID: "user-1", OrgUnitID: "dept", Role: OrgRoleMember}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateOrgVersion(ctx, CreateOrgVersionInput{EnterpriseID: "enterprise-1", VersionNumber: 7, SourceHash: "source"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpsertOrgUnit(ctx, UpsertOrgUnitInput{ID: "dept", EnterpriseID: "enterprise-1", Name: "Changed", ParentID: "new-parent", UnitType: OrgUnitTypeDepartment}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AddOrgMembership(ctx, AddOrgMembershipInput{EnterpriseID: "enterprise-1", EnterpriseUserID: "user-1", OrgUnitID: "dept", Role: OrgRole("edit")}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, ok := store.policySnapshot("enterprise-1", 7)
+	if !ok {
+		t.Fatal("published memory snapshot missing")
+	}
+	if len(snapshot.units) != 1 || snapshot.units[0].Name != "Original" || snapshot.units[0].ParentID != "" {
+		t.Fatalf("snapshot units changed with live state: %#v", snapshot.units)
+	}
+	if !reflect.DeepEqual(snapshot.memberships, []OrgMembership{{EnterpriseID: "enterprise-1", EnterpriseUserID: "user-1", OrgUnitID: "dept", Role: OrgRoleMember, CreatedAt: snapshot.memberships[0].CreatedAt}}) {
+		t.Fatalf("snapshot memberships changed with live state: %#v", snapshot.memberships)
+	}
+	if _, eventOK := store.orgEvents[key("enterprise-1", "event-1")]; !eventOK {
+		t.Fatal("atomic publication did not store event")
+	}
+}
+
+type failingOrgPolicyPublisherStore struct {
+	Store
+	err              error
+	publishCalls     int
+	createEventCalls int
+}
+
+func (s *failingOrgPolicyPublisherStore) PublishOrgVersion(context.Context, OrgEvent, OrgVersion) (OrgVersion, error) {
+	s.publishCalls++
+	return OrgVersion{}, s.err
+}
+
+func (s *failingOrgPolicyPublisherStore) CreateOrgEvent(context.Context, OrgEvent) (OrgEvent, error) {
+	s.createEventCalls++
+	return OrgEvent{}, nil
+}
+
+func TestServiceAtomicPublisherFailureDoesNotFallBackAndOrphanEvent(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("publication failed")
+	store := &failingOrgPolicyPublisherStore{err: sentinel}
+	service := NewService(store, WithIDGenerator(sequenceIDs("event-1", "version-1")))
+	_, err := service.CreateOrgVersion(context.Background(), CreateOrgVersionInput{EnterpriseID: "enterprise-1", VersionNumber: 1})
+	if !errors.Is(err, sentinel) || store.publishCalls != 1 || store.createEventCalls != 0 {
+		t.Fatalf("error=%v publish=%d createEvent=%d", err, store.publishCalls, store.createEventCalls)
+	}
+}
+
+func TestMemoryStoreCreateOrgVersionDirectlyCapturesSnapshot(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+	if _, err := store.UpsertOrgUnit(context.Background(), OrgUnit{ID: "dept", EnterpriseID: "enterprise-1", Name: "Before"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateOrgVersion(context.Background(), OrgVersion{ID: "version-2", EnterpriseID: "enterprise-1", VersionNumber: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertOrgUnit(context.Background(), OrgUnit{ID: "dept", EnterpriseID: "enterprise-1", Name: "After"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, ok := store.policySnapshot("enterprise-1", 2)
+	if !ok || len(snapshot.units) != 1 || snapshot.units[0].Name != "Before" {
+		t.Fatalf("direct version snapshot = %#v, ok=%t", snapshot, ok)
 	}
 }
 

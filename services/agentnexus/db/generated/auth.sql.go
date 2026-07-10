@@ -439,9 +439,16 @@ func (q *Queries) GetAuthorizationCodeForUpdate(ctx context.Context, codeHash st
 }
 
 const getBrowserProfile = `-- name: GetBrowserProfile :one
-SELECT u.display_name,
-       COALESCE((SELECT MAX(v.version_number) FROM org_versions AS v WHERE v.enterprise_id = u.enterprise_id), 0)::BIGINT AS org_version
+SELECT u.display_name, published.version_number AS org_version
 FROM enterprise_users AS u
+JOIN LATERAL (
+    SELECT v.version_number
+    FROM org_versions AS v
+    WHERE v.enterprise_id = u.enterprise_id
+      AND v.policy_snapshot_sealed = true
+    ORDER BY v.version_number DESC
+    LIMIT 1
+) AS published ON true
 WHERE u.enterprise_id = $1 AND u.id = $2
 `
 
@@ -583,9 +590,21 @@ func (q *Queries) IncrementOIDCLoginAttemptScopeCounter(ctx context.Context, arg
 
 const listBrowserProfileOrgUnits = `-- name: ListBrowserProfileOrgUnits :many
 SELECT m.org_unit_id
-FROM org_memberships AS m
-JOIN org_units AS u ON u.enterprise_id = m.enterprise_id AND u.id = m.org_unit_id
-WHERE m.enterprise_id = $1 AND m.enterprise_user_id = $2
+FROM org_policy_snapshot_memberships AS m
+JOIN org_versions AS v
+  ON v.enterprise_id = m.enterprise_id
+ AND v.version_number = m.version_number
+ AND v.policy_snapshot_sealed = true
+WHERE m.enterprise_id = $1
+  AND m.enterprise_user_id = $2
+  AND m.version_number = (
+      SELECT latest.version_number
+      FROM org_versions AS latest
+      WHERE latest.enterprise_id = $1
+        AND latest.policy_snapshot_sealed = true
+      ORDER BY latest.version_number DESC
+      LIMIT 1
+  )
 ORDER BY m.org_unit_id
 `
 

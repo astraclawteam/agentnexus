@@ -32,21 +32,36 @@ func (f *fakeIAMSnapshotDB) BeginTx(_ context.Context, options pgx.TxOptions) (p
 
 type fakeIAMSnapshotTx struct {
 	pgx.Tx
-	calls      []string
-	args       [][]any
-	failAt     string
-	committed  bool
-	rolledBack bool
+	calls               []string
+	args                [][]any
+	failAt              string
+	committed           bool
+	rolledBack          bool
+	cancelAt            string
+	cancel              context.CancelFunc
+	rollbackContextErr  error
+	rollbackHasDeadline bool
+	rollbackErr         error
 }
 
 func (f *fakeIAMSnapshotTx) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
-	f.calls = append(f.calls, "version")
+	call := "version"
+	switch {
+	case strings.Contains(sql, "INSERT INTO org_events"):
+		call = "event"
+	case strings.Contains(sql, "UPDATE org_versions"):
+		call = "seal"
+	}
+	f.calls = append(f.calls, call)
 	f.args = append(f.args, args)
 	err := error(nil)
-	if f.failAt == "version" {
-		err = errors.New("version insert failed")
+	if f.cancelAt == call && f.cancel != nil {
+		f.cancel()
 	}
-	return fakeOrgVersionRow{args: args, err: err}
+	if f.failAt == call {
+		err = errors.New(call + " failed")
+	}
+	return fakePublicationRow{kind: call, args: args, err: err}
 }
 
 func (f *fakeIAMSnapshotTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
@@ -64,6 +79,9 @@ func (f *fakeIAMSnapshotTx) Exec(_ context.Context, sql string, args ...any) (pg
 	if f.failAt == call {
 		return pgconn.CommandTag{}, errors.New(call + " capture failed")
 	}
+	if f.cancelAt == call && f.cancel != nil {
+		f.cancel()
+	}
 	return pgconn.NewCommandTag("INSERT 0 1"), nil
 }
 
@@ -76,29 +94,50 @@ func (f *fakeIAMSnapshotTx) Commit(context.Context) error {
 	return nil
 }
 
-func (f *fakeIAMSnapshotTx) Rollback(context.Context) error {
+func (f *fakeIAMSnapshotTx) Rollback(ctx context.Context) error {
+	f.rollbackContextErr = ctx.Err()
+	_, f.rollbackHasDeadline = ctx.Deadline()
 	if f.committed || f.rolledBack {
 		return pgx.ErrTxClosed
 	}
 	f.calls = append(f.calls, "rollback")
 	f.rolledBack = true
-	return nil
+	return f.rollbackErr
 }
 
-type fakeOrgVersionRow struct {
+type fakePublicationRow struct {
+	kind string
 	args []any
 	err  error
 }
 
-func (r fakeOrgVersionRow) Scan(dest ...any) error {
+func (r fakePublicationRow) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
+	}
+	if r.kind == "event" {
+		*(dest[0].(*string)) = r.args[0].(string)
+		*(dest[1].(*string)) = r.args[1].(string)
+		*(dest[2].(*string)) = r.args[2].(string)
+		*(dest[3].(*pgtype.Text)) = r.args[3].(pgtype.Text)
+		*(dest[4].(*pgtype.Timestamptz)) = pgtype.Timestamptz{Time: time.Unix(90, 0).UTC(), Valid: true}
+		return nil
+	}
+	if r.kind == "seal" {
+		*(dest[0].(*string)) = "version-id"
+		*(dest[1].(*string)) = r.args[0].(string)
+		*(dest[2].(*int64)) = r.args[1].(int64)
+		*(dest[3].(*pgtype.Text)) = pgtype.Text{String: "event-id", Valid: true}
+		*(dest[4].(*pgtype.Timestamptz)) = pgtype.Timestamptz{Time: time.Unix(100, 0).UTC(), Valid: true}
+		*(dest[5].(*bool)) = true
+		return nil
 	}
 	*(dest[0].(*string)) = r.args[0].(string)
 	*(dest[1].(*string)) = r.args[1].(string)
 	*(dest[2].(*int64)) = r.args[2].(int64)
 	*(dest[3].(*pgtype.Text)) = r.args[3].(pgtype.Text)
 	*(dest[4].(*pgtype.Timestamptz)) = pgtype.Timestamptz{Time: time.Unix(100, 0).UTC(), Valid: true}
+	*(dest[5].(*bool)) = false
 	return nil
 }
 
@@ -121,7 +160,7 @@ func TestPostgresCreateOrgVersionPublishesImmutableSnapshotInOneTransaction(t *t
 	if database.options[0].IsoLevel != pgx.RepeatableRead || database.options[0].AccessMode != pgx.ReadWrite {
 		t.Fatalf("publication transaction options = %#v", database.options[0])
 	}
-	if !reflect.DeepEqual(tx.calls, []string{"begin", "version", "units", "memberships", "commit"}) {
+	if !reflect.DeepEqual(tx.calls, []string{"begin", "version", "units", "memberships", "seal", "commit"}) {
 		t.Fatalf("calls = %#v", tx.calls)
 	}
 	for _, args := range tx.args[1:] {
@@ -133,7 +172,7 @@ func TestPostgresCreateOrgVersionPublishesImmutableSnapshotInOneTransaction(t *t
 
 func TestPostgresCreateOrgVersionRollsBackEveryFailure(t *testing.T) {
 	t.Parallel()
-	for _, failAt := range []string{"version", "units", "memberships", "commit"} {
+	for _, failAt := range []string{"version", "units", "memberships", "seal", "commit"} {
 		t.Run(failAt, func(t *testing.T) {
 			tx := &fakeIAMSnapshotTx{failAt: failAt}
 			store := newPostgresStoreWithDB(&fakeIAMSnapshotDB{tx: tx})
@@ -150,5 +189,53 @@ func TestPostgresCreateOrgVersionRollsBackEveryFailure(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPostgresPublishOrgVersionIncludesEventAndSealAtomically(t *testing.T) {
+	t.Parallel()
+	tx := &fakeIAMSnapshotTx{}
+	store := newPostgresStoreWithDB(&fakeIAMSnapshotDB{tx: tx})
+	version, err := store.PublishOrgVersion(context.Background(), OrgEvent{ID: "event-id", EnterpriseID: "enterprise-1", EventType: "org_import", SourceHash: "source"}, OrgVersion{ID: "version-id", EnterpriseID: "enterprise-1", VersionNumber: 23, SourceEventID: "event-id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version.ID != "version-id" || !reflect.DeepEqual(tx.calls, []string{"begin", "event", "version", "units", "memberships", "seal", "commit"}) {
+		t.Fatalf("version=%#v calls=%#v", version, tx.calls)
+	}
+}
+
+func TestPostgresPublishOrgVersionRollsBackEventAndUsesBoundedCleanupAfterCancel(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	tx := &fakeIAMSnapshotTx{failAt: "memberships", cancelAt: "memberships", cancel: cancel}
+	store := newPostgresStoreWithDB(&fakeIAMSnapshotDB{tx: tx})
+	_, err := store.PublishOrgVersion(ctx, OrgEvent{ID: "event-id", EnterpriseID: "enterprise-1", EventType: "org_import"}, OrgVersion{ID: "version-id", EnterpriseID: "enterprise-1", VersionNumber: 23, SourceEventID: "event-id"})
+	if err == nil || !strings.Contains(err.Error(), "memberships capture failed") {
+		t.Fatalf("error = %v", err)
+	}
+	if !tx.rolledBack || tx.rollbackContextErr != nil || !tx.rollbackHasDeadline {
+		t.Fatalf("cleanup rollback=%t contextErr=%v deadline=%t calls=%#v", tx.rolledBack, tx.rollbackContextErr, tx.rollbackHasDeadline, tx.calls)
+	}
+}
+
+func TestPostgresPublishOrgVersionEventFailureLeavesNothingCommitted(t *testing.T) {
+	t.Parallel()
+	tx := &fakeIAMSnapshotTx{failAt: "event"}
+	store := newPostgresStoreWithDB(&fakeIAMSnapshotDB{tx: tx})
+	_, err := store.PublishOrgVersion(context.Background(), OrgEvent{ID: "event-id", EnterpriseID: "enterprise-1", EventType: "org_import"}, OrgVersion{ID: "version-id", EnterpriseID: "enterprise-1", VersionNumber: 23, SourceEventID: "event-id"})
+	if err == nil || tx.committed || !tx.rolledBack || !reflect.DeepEqual(tx.calls, []string{"begin", "event", "rollback"}) {
+		t.Fatalf("error=%v committed=%t rolledBack=%t calls=%#v", err, tx.committed, tx.rolledBack, tx.calls)
+	}
+}
+
+func TestPostgresPublishOrgVersionJoinsCleanupFailureWithoutHidingOriginal(t *testing.T) {
+	t.Parallel()
+	cleanupErr := errors.New("rollback transport failed")
+	tx := &fakeIAMSnapshotTx{failAt: "memberships", rollbackErr: cleanupErr}
+	store := newPostgresStoreWithDB(&fakeIAMSnapshotDB{tx: tx})
+	_, err := store.PublishOrgVersion(context.Background(), OrgEvent{ID: "event-id", EnterpriseID: "enterprise-1", EventType: "org_import"}, OrgVersion{ID: "version-id", EnterpriseID: "enterprise-1", VersionNumber: 23, SourceEventID: "event-id"})
+	if !errors.Is(err, cleanupErr) || !strings.Contains(err.Error(), "memberships capture failed") {
+		t.Fatalf("joined error = %v", err)
 	}
 }

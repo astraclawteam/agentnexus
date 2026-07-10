@@ -329,7 +329,7 @@ func TestAtlasSnapshotAnalysisIsLinear(t *testing.T) {
 	if len(analysis.requiredScopes) != 2 {
 		t.Fatalf("required scopes = %#v", analysis.requiredScopes)
 	}
-	if work[atlasGraphWorkUnit] != units || work[atlasGraphWorkMembership] != units || work[atlasGraphWorkAncestor] != 2 {
+	if work[atlasGraphWorkUnit] != units || work[atlasGraphWorkParent] < units || work[atlasGraphWorkParent] > 2*units || work[atlasGraphWorkMembership] != units || work[atlasGraphWorkAncestor] != 2 {
 		t.Fatalf("non-linear work = %#v", work)
 	}
 }

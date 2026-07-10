@@ -191,6 +191,7 @@ type atlasGraphWork string
 
 const (
 	atlasGraphWorkUnit       atlasGraphWork = "unit"
+	atlasGraphWorkParent     atlasGraphWork = "parent"
 	atlasGraphWorkMembership atlasGraphWork = "membership"
 	atlasGraphWorkAncestor   atlasGraphWork = "ancestor"
 )
@@ -238,6 +239,9 @@ func analyzeAtlasSnapshot(ctx context.Context, snapshot AtlasAccessSnapshot, tar
 		for cursor != "" {
 			if err := ctx.Err(); err != nil {
 				return empty, false, err
+			}
+			if observe != nil {
+				observe(atlasGraphWorkParent)
 			}
 			parentID, exists := parents[cursor]
 			if !exists {

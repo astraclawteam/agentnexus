@@ -24,15 +24,21 @@ INSERT INTO org_memberships (enterprise_id, enterprise_user_id, org_unit_id, rol
 VALUES ($1, $2, $3, $4)
 RETURNING enterprise_id, enterprise_user_id, org_unit_id, role, created_at;
 
+-- name: CreateOrgEventForPolicyPublication :one
+INSERT INTO org_events (id, enterprise_id, event_type, source_hash)
+VALUES ($1, $2, $3, $4)
+RETURNING id, enterprise_id, event_type, source_hash, created_at;
+
 -- name: CreateOrgVersion :one
 INSERT INTO org_versions (id, enterprise_id, version_number, source_event_id)
 VALUES ($1, $2, $3, $4)
-RETURNING id, enterprise_id, version_number, source_event_id, created_at;
+RETURNING id, enterprise_id, version_number, source_event_id, created_at, policy_snapshot_sealed;
 
 -- name: GetLatestAuthorizationOrgVersion :one
 SELECT version_number
 FROM org_versions
 WHERE enterprise_id = $1
+  AND policy_snapshot_sealed = true
 ORDER BY version_number DESC
 LIMIT 1;
 
@@ -66,3 +72,11 @@ INSERT INTO org_policy_snapshot_memberships (
 SELECT m.enterprise_id, $2, m.enterprise_user_id, m.org_unit_id, m.role
 FROM org_memberships AS m
 WHERE m.enterprise_id = $1;
+
+-- name: SealOrgPolicySnapshot :one
+UPDATE org_versions
+SET policy_snapshot_sealed = true
+WHERE enterprise_id = $1
+  AND version_number = $2
+  AND policy_snapshot_sealed = false
+RETURNING id, enterprise_id, version_number, source_event_id, created_at, policy_snapshot_sealed;

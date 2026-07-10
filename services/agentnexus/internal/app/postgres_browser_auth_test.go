@@ -89,7 +89,7 @@ func TestBrowserDirectoryAndAuditSQLAreQuerySpecificAndSerialized(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"resolveexternalidentity", "external_identities", "provider =", "external_subject =", "getbrowserprofile", "org_versions", "listbrowserprofileorgunits", "org_memberships"} {
+	for _, required := range []string{"resolveexternalidentity", "external_identities", "provider =", "external_subject =", "getbrowserprofile", "org_versions", "listbrowserprofileorgunits", "org_policy_snapshot_memberships", "policy_snapshot_sealed = true"} {
 		if !strings.Contains(authSQL, required) {
 			t.Errorf("auth SQL missing %q", required)
 		}
@@ -103,8 +103,8 @@ func TestBrowserDirectoryAndAuditSQLAreQuerySpecificAndSerialized(t *testing.T) 
 			t.Errorf("migration missing %q", required)
 		}
 	}
-	if !strings.Contains(normalized, "join org_units as u on u.enterprise_id = m.enterprise_id and u.id = m.org_unit_id") {
-		t.Error("profile memberships are not joined on enterprise")
+	if !strings.Contains(normalized, "join org_versions as v on v.enterprise_id = m.enterprise_id and v.version_number = m.version_number and v.policy_snapshot_sealed = true") {
+		t.Error("profile memberships are not bound to a sealed enterprise/version snapshot")
 	}
 	productionSource := string(production)
 	for _, required := range []string{"pgx.RepeatableRead", "tx.Commit(ctx)"} {

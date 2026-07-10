@@ -1,11 +1,13 @@
 # Database migration notes
 
-## Versioned organization policy snapshots
+## Sealed organization policy snapshots
 
-`000004_versioned_org_policy_snapshots.sql` is a pre-release migration for the Task 3 authorization model. It is not a rolling-upgrade bridge for older gateway binaries: deploy the migration and the snapshot-aware IAM/gateway binaries as one release while writes are stopped.
+`000004_versioned_org_policy_snapshots.sql` adds the publication boundary used by AgentAtlas authorization. The migration never copies current live organization data into an existing version. Every pre-existing `org_versions` row remains unsealed and therefore unusable for authorization.
 
-The migration takes `SHARE ROW EXCLUSIVE` locks on organization versions, units, and memberships. For each enterprise it backfills only the latest existing version from the current live organization state. Earlier historical versions are deliberately not fabricated. Any invalid parent, membership, role, or cross-enterprise reference aborts the migration transaction.
+After applying the migration, an organization publisher must create a new, monotonically increasing version through the IAM publication workflow. One repeatable-read transaction creates the organization event and an unsealed version, copies units and memberships, seals that version, and commits. Until the first such transaction commits, browser profile resolution and permission decisions fail closed; operators must not manually seal an older version. An empty database likewise becomes authorizable only after its first controlled publication.
 
-After migration, every new `org_versions` row is published transactionally with immutable unit and membership snapshot rows. Authorization reads the latest version and that exact snapshot inside one read-only repeatable-read transaction; it never authorizes from the mutable live organization tables.
+Snapshot tables are publisher-write-only. Gateway authorization reads only the latest sealed version and its exact snapshot in a read-only repeatable-read transaction; it never falls back to live organization tables or an unsealed/older maximum version. Database triggers allow snapshot row changes only while the owning version is unsealed, reject INSERT/UPDATE/DELETE after sealing, and reject TRUNCATE at all times. Sealing cannot be reversed and sealed version identity fields cannot be changed or deleted.
 
 Policy evaluation accepts at most 10,000 organization units, 100,000 actor memberships, and organization depth 256. SQL reads use limit-plus-one bounds so an oversized snapshot fails closed before unbounded conversion or graph work.
+
+Historical snapshot rows retain foreign keys to their organization version and enterprise users with `RESTRICT` semantics. User/version deletion therefore requires an explicit governance or anonymization workflow; do not destroy or mutate historical authorization evidence to satisfy routine lifecycle operations.

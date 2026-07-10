@@ -3,6 +3,8 @@ package iam
 import (
 	"context"
 	"errors"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,6 +16,8 @@ import (
 
 var ErrNotFound = errors.New("iam record not found")
 
+const orgPublicationCleanupTimeout = 5 * time.Second
+
 type Store interface {
 	CreateEnterprise(context.Context, Enterprise) (Enterprise, error)
 	UpsertEnterpriseUser(context.Context, EnterpriseUser) (EnterpriseUser, error)
@@ -22,6 +26,15 @@ type Store interface {
 	AddOrgMembership(context.Context, OrgMembership) (OrgMembership, error)
 	CreateOrgEvent(context.Context, OrgEvent) (OrgEvent, error)
 	CreateOrgVersion(context.Context, OrgVersion) (OrgVersion, error)
+}
+
+type orgPolicyPublisher interface {
+	PublishOrgVersion(context.Context, OrgEvent, OrgVersion) (OrgVersion, error)
+}
+
+type memoryOrgPolicySnapshot struct {
+	units       []OrgUnit
+	memberships []OrgMembership
 }
 
 type MemoryStore struct {
@@ -34,6 +47,7 @@ type MemoryStore struct {
 	memberships        map[string]OrgMembership
 	orgEvents          map[string]OrgEvent
 	orgVersions        map[string]OrgVersion
+	policySnapshots    map[string]memoryOrgPolicySnapshot
 	now                func() time.Time
 }
 
@@ -47,6 +61,7 @@ func NewMemoryStore() *MemoryStore {
 		memberships:        map[string]OrgMembership{},
 		orgEvents:          map[string]OrgEvent{},
 		orgVersions:        map[string]OrgVersion{},
+		policySnapshots:    map[string]memoryOrgPolicySnapshot{},
 		now:                time.Now,
 	}
 }
@@ -128,9 +143,65 @@ func (s *MemoryStore) CreateOrgVersion(_ context.Context, version OrgVersion) (O
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.createOrgVersionLocked(version), nil
+}
+
+func (s *MemoryStore) PublishOrgVersion(_ context.Context, event OrgEvent, version OrgVersion) (OrgVersion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now().UTC()
+	event.CreatedAt = now
+	s.orgEvents[key(event.EnterpriseID, event.ID)] = event
+	version.CreatedAt = now
+	s.orgVersions[key(version.EnterpriseID, version.ID)] = version
+	s.capturePolicySnapshotLocked(version)
+	return version, nil
+}
+
+func (s *MemoryStore) createOrgVersionLocked(version OrgVersion) OrgVersion {
 	version.CreatedAt = s.now().UTC()
 	s.orgVersions[key(version.EnterpriseID, version.ID)] = version
-	return version, nil
+	s.capturePolicySnapshotLocked(version)
+	return version
+}
+
+func (s *MemoryStore) capturePolicySnapshotLocked(version OrgVersion) {
+	snapshot := memoryOrgPolicySnapshot{}
+	for _, unit := range s.orgUnits {
+		if unit.EnterpriseID == version.EnterpriseID {
+			snapshot.units = append(snapshot.units, unit)
+		}
+	}
+	for _, membership := range s.memberships {
+		if membership.EnterpriseID == version.EnterpriseID {
+			snapshot.memberships = append(snapshot.memberships, membership)
+		}
+	}
+	sort.Slice(snapshot.units, func(i, j int) bool { return snapshot.units[i].ID < snapshot.units[j].ID })
+	sort.Slice(snapshot.memberships, func(i, j int) bool {
+		left, right := snapshot.memberships[i], snapshot.memberships[j]
+		if left.EnterpriseUserID != right.EnterpriseUserID {
+			return left.EnterpriseUserID < right.EnterpriseUserID
+		}
+		if left.OrgUnitID != right.OrgUnitID {
+			return left.OrgUnitID < right.OrgUnitID
+		}
+		return left.Role < right.Role
+	})
+	s.policySnapshots[memoryPolicySnapshotKey(version.EnterpriseID, version.VersionNumber)] = snapshot
+}
+
+func (s *MemoryStore) policySnapshot(enterpriseID string, versionNumber int64) (memoryOrgPolicySnapshot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot, ok := s.policySnapshots[memoryPolicySnapshotKey(enterpriseID, versionNumber)]
+	snapshot.units = append([]OrgUnit(nil), snapshot.units...)
+	snapshot.memberships = append([]OrgMembership(nil), snapshot.memberships...)
+	return snapshot, ok
+}
+
+func memoryPolicySnapshotKey(enterpriseID string, versionNumber int64) string {
+	return key(enterpriseID, strconv.FormatInt(versionNumber, 10))
 }
 
 type PostgresStore struct {
@@ -213,6 +284,14 @@ RETURNING id, enterprise_id, event_type, source_hash, created_at`,
 }
 
 func (s *PostgresStore) CreateOrgVersion(ctx context.Context, version OrgVersion) (OrgVersion, error) {
+	return s.publishOrgVersion(ctx, nil, version)
+}
+
+func (s *PostgresStore) PublishOrgVersion(ctx context.Context, event OrgEvent, version OrgVersion) (OrgVersion, error) {
+	return s.publishOrgVersion(ctx, &event, version)
+}
+
+func (s *PostgresStore) publishOrgVersion(ctx context.Context, event *OrgEvent, version OrgVersion) (result OrgVersion, resultErr error) {
 	if s == nil || s.pool == nil {
 		return OrgVersion{}, errors.New("iam store unavailable")
 	}
@@ -220,8 +299,19 @@ func (s *PostgresStore) CreateOrgVersion(ctx context.Context, version OrgVersion
 	if err != nil {
 		return OrgVersion{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), orgPublicationCleanupTimeout)
+		defer cancel()
+		if rollbackErr := tx.Rollback(cleanupCtx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			resultErr = errors.Join(resultErr, rollbackErr)
+		}
+	}()
 	queries := db.New(tx)
+	if event != nil {
+		if _, err := queries.CreateOrgEventForPolicyPublication(ctx, db.CreateOrgEventForPolicyPublicationParams{ID: event.ID, EnterpriseID: event.EnterpriseID, EventType: event.EventType, SourceHash: pgtype.Text{String: event.SourceHash, Valid: event.SourceHash != ""}}); err != nil {
+			return OrgVersion{}, err
+		}
+	}
 	record, err := queries.CreateOrgVersion(ctx, db.CreateOrgVersionParams{ID: version.ID, EnterpriseID: version.EnterpriseID, VersionNumber: version.VersionNumber, SourceEventID: pgtype.Text{String: version.SourceEventID, Valid: version.SourceEventID != ""}})
 	if err != nil {
 		return OrgVersion{}, err
@@ -233,10 +323,17 @@ func (s *PostgresStore) CreateOrgVersion(ctx context.Context, version OrgVersion
 	if err := queries.CaptureOrgPolicySnapshotMemberships(ctx, db.CaptureOrgPolicySnapshotMembershipsParams(params)); err != nil {
 		return OrgVersion{}, err
 	}
+	sealed, err := queries.SealOrgPolicySnapshot(ctx, db.SealOrgPolicySnapshotParams{EnterpriseID: version.EnterpriseID, VersionNumber: version.VersionNumber})
+	if err != nil {
+		return OrgVersion{}, err
+	}
+	if !sealed.PolicySnapshotSealed || sealed.ID != record.ID || sealed.EnterpriseID != record.EnterpriseID || sealed.VersionNumber != record.VersionNumber {
+		return OrgVersion{}, errors.New("invalid sealed organization policy version")
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return OrgVersion{}, err
 	}
-	return OrgVersion{ID: record.ID, EnterpriseID: record.EnterpriseID, VersionNumber: record.VersionNumber, SourceEventID: textValue(record.SourceEventID), CreatedAt: record.CreatedAt.Time}, nil
+	return OrgVersion{ID: sealed.ID, EnterpriseID: sealed.EnterpriseID, VersionNumber: sealed.VersionNumber, SourceEventID: textValue(sealed.SourceEventID), CreatedAt: sealed.CreatedAt.Time}, nil
 }
 
 type rowScanner interface {
