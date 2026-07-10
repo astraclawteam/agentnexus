@@ -2,6 +2,7 @@ package browserauth
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -91,6 +92,62 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 
 func TestPostgresStoreImplementsStore(t *testing.T) {
 	var _ Store = (*PostgresStore)(nil)
+}
+
+func TestAuthorizeRateLimitSchemaAndQueriesAreHashOnlyAndAtomic(t *testing.T) {
+	_, here, _, _ := runtime.Caller(0)
+	root := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
+	migration := strings.ToLower(mustRead(t, filepath.Join(root, "db", "migrations", "000002_browser_sessions_and_approvals.sql")))
+	queries := mustRead(t, filepath.Join(root, "db", "queries", "auth.sql"))
+	for _, required := range []string{
+		"create table oidc_authorize_rate_limits",
+		"source_hash text not null check (char_length(source_hash) = 64",
+		"primary key (enterprise_id, client_id, source_hash, window_start)",
+		"drop table if exists oidc_authorize_rate_limits",
+	} {
+		if !strings.Contains(migration, required) {
+			t.Errorf("authorize rate schema missing %q", required)
+		}
+	}
+	tableStart := strings.Index(migration, "create table oidc_authorize_rate_limits")
+	if tableStart >= 0 {
+		tableEnd := strings.Index(migration[tableStart:], ");")
+		if tableEnd > 0 {
+			table := migration[tableStart : tableStart+tableEnd]
+			for _, forbidden := range []string{"source_ip", "raw_ip", "remote_addr", "forwarded_for"} {
+				if strings.Contains(table, forbidden) {
+					t.Errorf("authorize rate table persists raw source field %q", forbidden)
+				}
+			}
+		}
+	}
+	consume := strings.ToLower(namedQuery(t, queries, "ConsumeOIDCAuthorizeRateLimit"))
+	for _, required := range []string{"insert into oidc_authorize_rate_limits", "on conflict (enterprise_id, client_id, source_hash, window_start)", "do update", "request_count + 1", "request_count <", "returning"} {
+		if !strings.Contains(consume, required) {
+			t.Errorf("atomic authorize rate query missing %q", required)
+		}
+	}
+	cleanup := strings.ToLower(namedQuery(t, queries, "DeleteExpiredOIDCAuthorizeRateLimits"))
+	if !strings.Contains(cleanup, "delete from oidc_authorize_rate_limits") || !strings.Contains(cleanup, "window_start <") {
+		t.Error("authorize rate cleanup must remove old fixed windows")
+	}
+	postgresLimiter := strings.ToLower(mustRead(t, filepath.Join(root, "internal", "browserauth", "postgres_authorize_rate_limiter.go")))
+	cleanupIndex := strings.Index(postgresLimiter, ".deleteexpiredoidcauthorizeratelimits")
+	consumeIndex := strings.Index(postgresLimiter, ".consumeoidcauthorizeratelimit")
+	if cleanupIndex < 0 || consumeIndex <= cleanupIndex || !strings.Contains(postgresLimiter, "errors.is(err, pgx.errnorows)") {
+		t.Errorf("postgres limiter must cleanup then use conditional atomic upsert; cleanup=%d consume=%d", cleanupIndex, consumeIndex)
+	}
+}
+
+func TestNilPostgresAuthorizeRateLimiterFailsUnavailableWithoutPanic(t *testing.T) {
+	limiter, err := NewPostgresAuthorizeRateLimiter(nil, DefaultAuthorizeRateLimitPerMinute, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = limiter.AllowAuthorize(context.Background(), "ent-1", "atlas", strings.Repeat("a", 64))
+	if !errors.Is(err, ErrAuthorizeRateUnavailable) {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 func TestNilPostgresStoreFailsWithoutPanic(t *testing.T) {

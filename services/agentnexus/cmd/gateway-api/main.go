@@ -55,7 +55,21 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		return nil, func() {}, fmt.Errorf("initialize enterprise OIDC: %w", err)
 	}
 	directory := app.NewPostgresBrowserDirectory(pool)
-	router, err := app.NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, app.BrowserAuthDependencies{Config: browserConfig.OIDC, Sessions: browserauth.NewService(browserauth.NewPostgresStore(pool), browserauth.WithLoginAttemptLimits(browserConfig.LoginAttemptLimits)), Upstream: upstream, Identities: directory, Profiles: directory, Audit: app.NewPostgresBrowserAuditSink(pool)})
+	authorizeRateLimiter, err := browserauth.NewPostgresAuthorizeRateLimiter(pool, browserConfig.AuthorizeRateLimitPerMinute, time.Now)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("initialize authorize rate limiter: %w", err)
+	}
+	router, err := app.NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, app.BrowserAuthDependencies{
+		Config:                  browserConfig.OIDC,
+		Sessions:                browserauth.NewService(browserauth.NewPostgresStore(pool), browserauth.WithLoginAttemptLimits(browserConfig.LoginAttemptLimits)),
+		Upstream:                upstream,
+		Identities:              directory,
+		Profiles:                directory,
+		Audit:                   app.NewPostgresBrowserAuditSink(pool),
+		AuthorizeRateLimiter:    authorizeRateLimiter,
+		AuthorizeSourceResolver: app.NewAuthorizeSourceResolver(browserConfig.TrustedProxyCIDRs),
+	})
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err

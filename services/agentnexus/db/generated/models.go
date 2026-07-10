@@ -176,6 +176,14 @@ type OauthAuthorizationCode struct {
 	ConsumedAt       pgtype.Timestamptz
 }
 
+type OidcAuthorizeRateLimit struct {
+	EnterpriseID string
+	ClientID     string
+	SourceHash   string
+	WindowStart  pgtype.Timestamptz
+	RequestCount int32
+}
+
 type OidcLoginAttempt struct {
 	StateHash     string
 	BindingHash   string

@@ -24,6 +24,21 @@ This directory contains open-core development profiles only. Production private-
 | `AGENTNEXUS_SECRET_PROVIDER_EXTERNAL` | Set to `true` when secrets are resolved by an external provider. |
 | `AGENTNEXUS_SECRET_PROVIDER` | Secret provider mode, defaulting to `local-dev`. |
 
+## Browser OIDC Ingress Controls
+
+The browser authorization endpoint has two independent admission controls. Keep their defaults unless deployment capacity and observed ingress behavior justify a deliberate change.
+
+| Variable | Default | Purpose |
+| --- | ---: | --- |
+| `AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE` | `120` | Maximum valid `/oauth2/authorize` requests per enterprise, client, and resolved source in each fixed UTC one-minute window. |
+| `AGENTNEXUS_OIDC_LOGIN_ATTEMPT_PER_BROWSER_LIMIT` | `8` | Maximum unexpired login attempts per enterprise, client, and browser identifier. |
+| `AGENTNEXUS_OIDC_LOGIN_ATTEMPT_GLOBAL_LIMIT` | `65536` | Maximum unexpired login attempts per enterprise and client across all browsers. This value must be greater than five times `AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE`; invalid values stop startup. |
+| `AGENTNEXUS_TRUSTED_PROXY_CIDRS` | empty | Optional comma-separated canonical CIDR prefixes for direct reverse proxies. Invalid, non-canonical, or duplicate prefixes stop startup. |
+
+`X-Forwarded-For` is used only when the request's direct network peer is inside `AGENTNEXUS_TRUSTED_PROXY_CIDRS`. Leave the variable empty when AgentNexus is directly exposed or the immediate proxy is not fully controlled. Trusting an overly broad or incorrect CIDR lets clients spoof the source address and weaken source rate limiting.
+
+HTTP `429` responses at `/oauth2/authorize` are a deployment observation signal: inspect ingress logs and request patterns, then distinguish normal retry bursts from abuse or an undersized limit before tuning. AgentNexus does not currently expose built-in metrics for this limiter, so deployments that need alerts or dashboards must derive them from ingress/application logs or add external telemetry.
+
 ## Compose
 
 Validate the private-dev compose profile:

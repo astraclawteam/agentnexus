@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -90,27 +91,57 @@ func TestLoadBrowserAuthParsesStrictLoginAttemptLimits(t *testing.T) {
 	if cfg.LoginAttemptLimits != browserauth.DefaultLoginAttemptLimits() {
 		t.Fatalf("defaults=%+v", cfg.LoginAttemptLimits)
 	}
-
-	t.Setenv("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_PER_BROWSER_LIMIT", "3")
-	t.Setenv("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_GLOBAL_LIMIT", "10")
-	cfg, err = LoadBrowserAuth()
-	if err != nil || cfg.LoginAttemptLimits != (browserauth.LoginAttemptLimits{PerBrowser: 3, Global: 10}) {
-		t.Fatalf("configured=%+v err=%v", cfg.LoginAttemptLimits, err)
+	if cfg.AuthorizeRateLimitPerMinute != 120 || cfg.LoginAttemptLimits.PerBrowser != 8 || cfg.LoginAttemptLimits.Global != 65536 {
+		t.Fatalf("secure defaults rate=%d attempts=%+v", cfg.AuthorizeRateLimitPerMinute, cfg.LoginAttemptLimits)
 	}
 
-	for name, values := range map[string][2]string{
-		"not integer": {"eight", "4096"},
-		"per zero":    {"0", "4096"},
-		"per high":    {"65", "4096"},
-		"global low":  {"8", "7"},
-		"global high": {"8", "65537"},
+	t.Setenv("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_PER_BROWSER_LIMIT", "3")
+	t.Setenv("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_GLOBAL_LIMIT", "100")
+	t.Setenv("AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE", "10")
+	cfg, err = LoadBrowserAuth()
+	if err != nil || cfg.LoginAttemptLimits != (browserauth.LoginAttemptLimits{PerBrowser: 3, Global: 100}) || cfg.AuthorizeRateLimitPerMinute != 10 {
+		t.Fatalf("configured=%+v rate=%d err=%v", cfg.LoginAttemptLimits, cfg.AuthorizeRateLimitPerMinute, err)
+	}
+
+	for name, values := range map[string][3]string{
+		"not integer":            {"eight", "65536", "120"},
+		"per zero":               {"0", "65536", "120"},
+		"per high":               {"65", "65536", "120"},
+		"global low":             {"8", "7", "1"},
+		"global high":            {"8", "1000001", "120"},
+		"source zero":            {"8", "65536", "0"},
+		"source high":            {"8", "65536", "10001"},
+		"global source headroom": {"8", "600", "120"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			setValidBrowserAuthEnvironment(t)
 			t.Setenv("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_PER_BROWSER_LIMIT", values[0])
 			t.Setenv("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_GLOBAL_LIMIT", values[1])
+			t.Setenv("AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE", values[2])
 			if _, err := LoadBrowserAuth(); err == nil {
 				t.Fatal("invalid limits accepted")
+			}
+		})
+	}
+}
+
+func TestLoadBrowserAuthParsesTrustedProxyCIDRsStrictly(t *testing.T) {
+	setValidBrowserAuthEnvironment(t)
+	t.Setenv("AGENTNEXUS_TRUSTED_PROXY_CIDRS", "10.0.0.0/8,2001:db8:ffff::/48")
+	cfg, err := LoadBrowserAuth()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("2001:db8:ffff::/48")}
+	if len(cfg.TrustedProxyCIDRs) != len(want) || cfg.TrustedProxyCIDRs[0] != want[0] || cfg.TrustedProxyCIDRs[1] != want[1] {
+		t.Fatalf("trusted proxies=%v", cfg.TrustedProxyCIDRs)
+	}
+	for name, raw := range map[string]string{"invalid": "not-a-cidr", "host bits": "10.0.0.1/8", "empty item": "10.0.0.0/8,,192.0.2.0/24"} {
+		t.Run(name, func(t *testing.T) {
+			setValidBrowserAuthEnvironment(t)
+			t.Setenv("AGENTNEXUS_TRUSTED_PROXY_CIDRS", raw)
+			if _, err := LoadBrowserAuth(); err == nil {
+				t.Fatalf("invalid trusted proxies accepted: %q", raw)
 			}
 		})
 	}

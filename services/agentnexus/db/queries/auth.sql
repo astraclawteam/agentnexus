@@ -96,6 +96,21 @@ FOR UPDATE;
 -- name: DeleteOIDCLoginAttempt :execrows
 DELETE FROM oidc_login_attempts WHERE state_hash = $1;
 
+-- name: DeleteExpiredOIDCAuthorizeRateLimits :exec
+DELETE FROM oidc_authorize_rate_limits
+WHERE window_start < $1;
+
+-- name: ConsumeOIDCAuthorizeRateLimit :one
+INSERT INTO oidc_authorize_rate_limits (
+    enterprise_id, client_id, source_hash, window_start, request_count
+) VALUES (
+    sqlc.arg(enterprise_id), sqlc.arg(client_id), sqlc.arg(source_hash), sqlc.arg(window_start), 1
+)
+ON CONFLICT (enterprise_id, client_id, source_hash, window_start)
+DO UPDATE SET request_count = oidc_authorize_rate_limits.request_count + 1
+WHERE oidc_authorize_rate_limits.request_count < sqlc.arg(request_limit)
+RETURNING request_count;
+
 -- name: ResolveExternalIdentity :one
 SELECT enterprise_id, enterprise_user_id
 FROM external_identities

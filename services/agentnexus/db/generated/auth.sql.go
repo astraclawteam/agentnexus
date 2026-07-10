@@ -30,6 +30,39 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAutho
 	return result.RowsAffected(), nil
 }
 
+const consumeOIDCAuthorizeRateLimit = `-- name: ConsumeOIDCAuthorizeRateLimit :one
+INSERT INTO oidc_authorize_rate_limits (
+    enterprise_id, client_id, source_hash, window_start, request_count
+) VALUES (
+    $1, $2, $3, $4, 1
+)
+ON CONFLICT (enterprise_id, client_id, source_hash, window_start)
+DO UPDATE SET request_count = oidc_authorize_rate_limits.request_count + 1
+WHERE oidc_authorize_rate_limits.request_count < $5
+RETURNING request_count
+`
+
+type ConsumeOIDCAuthorizeRateLimitParams struct {
+	EnterpriseID string
+	ClientID     string
+	SourceHash   string
+	WindowStart  pgtype.Timestamptz
+	RequestLimit int32
+}
+
+func (q *Queries) ConsumeOIDCAuthorizeRateLimit(ctx context.Context, arg ConsumeOIDCAuthorizeRateLimitParams) (int32, error) {
+	row := q.db.QueryRow(ctx, consumeOIDCAuthorizeRateLimit,
+		arg.EnterpriseID,
+		arg.ClientID,
+		arg.SourceHash,
+		arg.WindowStart,
+		arg.RequestLimit,
+	)
+	var request_count int32
+	err := row.Scan(&request_count)
+	return request_count, err
+}
+
 const countOIDCLoginAttemptsForBrowser = `-- name: CountOIDCLoginAttemptsForBrowser :one
 SELECT COUNT(*)
 FROM oidc_login_attempts
@@ -224,6 +257,16 @@ func (q *Queries) CreateOIDCLoginAttempt(ctx context.Context, arg CreateOIDCLogi
 		&i.ExpiresAt,
 	)
 	return i, err
+}
+
+const deleteExpiredOIDCAuthorizeRateLimits = `-- name: DeleteExpiredOIDCAuthorizeRateLimits :exec
+DELETE FROM oidc_authorize_rate_limits
+WHERE window_start < $1
+`
+
+func (q *Queries) DeleteExpiredOIDCAuthorizeRateLimits(ctx context.Context, windowStart pgtype.Timestamptz) error {
+	_, err := q.db.Exec(ctx, deleteExpiredOIDCAuthorizeRateLimits, windowStart)
+	return err
 }
 
 const deleteExpiredOIDCLoginAttempts = `-- name: DeleteExpiredOIDCLoginAttempts :exec

@@ -25,16 +25,17 @@ import (
 
 const testVerifier = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
 
-func TestBrowserAuthAuthorizeBootstrapsCanonicalBrowserBeforeCreatingAttempt(t *testing.T) {
+func TestBrowserAuthAuthorizeBootstrapsCanonicalBrowserWithSingleQueryMarker(t *testing.T) {
 	var counting *countingSessionService
 	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
 		counting = &countingSessionService{BrowserSessionService: service}
 		return counting
 	})
-	target := "/oauth2/authorize?" + h.authorizeQuery("console-state", "console-nonce").Encode()
+	target := "/oauth2/authorize?" + h.authorizeQuery("console-state", "console-nonce").Encode() + "&prompt=select%20account"
+	bootstrapTarget := target + "&nexus_bootstrap=1"
 
 	first := performOnce(h.router, http.MethodGet, target, "", nil)
-	if first.Code != http.StatusFound || first.Header().Get("Location") != target {
+	if first.Code != http.StatusFound || first.Header().Get("Location") != bootstrapTarget {
 		t.Fatalf("bootstrap status=%d location=%q", first.Code, first.Header().Get("Location"))
 	}
 	if first.Header().Get("Cache-Control") != "no-store" || counting.createAttempts != 0 {
@@ -45,23 +46,75 @@ func TestBrowserAuthAuthorizeBootstrapsCanonicalBrowserBeforeCreatingAttempt(t *
 		t.Fatalf("browser cookie=%+v", browserCookie)
 	}
 
-	second := perform(h.router, http.MethodGet, target, "", browserCookie)
+	second := performOnce(h.router, http.MethodGet, bootstrapTarget, "", []*http.Cookie{browserCookie})
 	location, _ := url.Parse(second.Header().Get("Location"))
 	if second.Code != http.StatusFound || location.Scheme+"://"+location.Host != h.idp.server.URL || counting.createAttempts != 1 {
 		t.Fatalf("second status=%d location=%s attempts=%d", second.Code, location, counting.createAttempts)
 	}
+	if counting.lastAttempt.RedirectURI != "https://atlas.example.com/auth/callback" || counting.lastAttempt.ConsoleState != "console-state" || counting.lastAttempt.ConsoleNonce != "console-nonce" {
+		t.Fatalf("bootstrap marker polluted login attempt: %+v", counting.lastAttempt)
+	}
 }
 
-func TestBrowserAuthAuthorizeRebootstrapsInvalidBrowserCookieWithoutAttempt(t *testing.T) {
+func TestBrowserAuthAuthorizeStopsWhenBootstrapCookieIsRejected(t *testing.T) {
 	var counting *countingSessionService
 	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
 		counting = &countingSessionService{BrowserSessionService: service}
 		return counting
 	})
-	target := "/oauth2/authorize?" + h.authorizeQuery("s", "n").Encode()
+	target := "/oauth2/authorize?" + h.authorizeQuery("s", "n").Encode() + "&nexus_bootstrap=1"
 	rr := performOnce(h.router, http.MethodGet, target, "", []*http.Cookie{{Name: "nexus_oidc_browser", Value: "not-canonical"}})
-	if rr.Code != http.StatusFound || rr.Header().Get("Location") != target || counting.createAttempts != 0 || !canonicalOpaque(namedCookie(t, rr, "nexus_oidc_browser").Value) {
-		t.Fatalf("status=%d location=%q attempts=%d cookies=%v", rr.Code, rr.Header().Get("Location"), counting.createAttempts, rr.Result().Cookies())
+	if rr.Code != http.StatusBadRequest || rr.Header().Get("Location") != "" || counting.createAttempts != 0 || rr.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("status=%d location=%q attempts=%d headers=%v", rr.Code, rr.Header().Get("Location"), counting.createAttempts, rr.Header())
+	}
+	if !strings.Contains(rr.Body.String(), `"error":"browser_cookie_required"`) {
+		t.Fatalf("body=%s", rr.Body.String())
+	}
+	cleared := namedCookie(t, rr, oidcBrowserCookie)
+	if cleared.MaxAge >= 0 || cleared.Path != "/oauth2/authorize" {
+		t.Fatalf("browser cookie not cleared: %+v", cleared)
+	}
+}
+
+func TestBrowserAuthAuthorizeRejectsInvalidBootstrapMarkerBeforeLimiter(t *testing.T) {
+	cases := map[string][]string{
+		"empty":     {""},
+		"unknown":   {"2"},
+		"duplicate": {"1", "1"},
+	}
+	for name, marker := range cases {
+		t.Run(name, func(t *testing.T) {
+			limiter := &stubAuthorizeRateLimiter{}
+			var counting *countingSessionService
+			h := newBrowserHarnessWithRateLimit(t, limiter, NewAuthorizeSourceResolver(nil), func(service *browserauth.Service) BrowserSessionService {
+				counting = &countingSessionService{BrowserSessionService: service}
+				return counting
+			})
+			query := h.authorizeQuery("s", "n")
+			query["nexus_bootstrap"] = marker
+			rr := performOnce(h.router, http.MethodGet, "/oauth2/authorize?"+query.Encode(), "", nil)
+			if rr.Code != http.StatusBadRequest || limiter.calls != 0 || counting.createAttempts != 0 || rr.Header().Get("Location") != "" || len(rr.Result().Cookies()) != 0 {
+				t.Fatalf("status=%d limiter=%d attempts=%d location=%q cookies=%v", rr.Code, limiter.calls, counting.createAttempts, rr.Header().Get("Location"), rr.Result().Cookies())
+			}
+		})
+	}
+}
+
+func TestBrowserAuthAuthorizeCountsEachValidBootstrapRequestBeforeSideEffects(t *testing.T) {
+	limiter := &stubAuthorizeRateLimiter{}
+	var counting *countingSessionService
+	h := newBrowserHarnessWithRateLimit(t, limiter, NewAuthorizeSourceResolver(nil), func(service *browserauth.Service) BrowserSessionService {
+		counting = &countingSessionService{BrowserSessionService: service}
+		return counting
+	})
+	target := "/oauth2/authorize?" + h.authorizeQuery("s", "n").Encode()
+	first := performOnce(h.router, http.MethodGet, target, "", nil)
+	if first.Code != http.StatusFound || limiter.calls != 1 || counting.createAttempts != 0 {
+		t.Fatalf("first status=%d limiter=%d attempts=%d", first.Code, limiter.calls, counting.createAttempts)
+	}
+	second := performOnce(h.router, http.MethodGet, first.Header().Get("Location"), "", nil)
+	if second.Code != http.StatusBadRequest || limiter.calls != 2 || counting.createAttempts != 0 {
+		t.Fatalf("second status=%d limiter=%d attempts=%d", second.Code, limiter.calls, counting.createAttempts)
 	}
 }
 
@@ -292,7 +345,7 @@ func TestBrowserAuthCallbackClassifiesIdentityDirectoryErrorsWithoutLeakingCrede
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			h := newBrowserHarnessRuntimeWithIdentities(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService { return service }, nil, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream }, failingIdentities{err: test.resolveErr}, 0)
+			h := newBrowserHarnessRuntimeWithIdentities(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService { return service }, nil, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream }, failingIdentities{err: test.resolveErr}, 0, nil, nil)
 			start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("state-identity", "nonce-identity").Encode(), "", nil)
 			location, _ := url.Parse(start.Header().Get("Location"))
 			h.idp.setNonce(location.Query().Get("nonce"))
@@ -731,10 +784,14 @@ func newBrowserHarnessConfigured(t *testing.T, profiles BrowserProfileResolver, 
 }
 
 func newBrowserHarnessRuntime(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService, issuer IDTokenIssuer, upstreamWrap func(UpstreamOIDC) UpstreamOIDC, requestTimeout time.Duration) *browserHarness {
-	return newBrowserHarnessRuntimeWithIdentities(t, profiles, wrap, issuer, upstreamWrap, testIdentities{}, requestTimeout)
+	return newBrowserHarnessRuntimeWithIdentities(t, profiles, wrap, issuer, upstreamWrap, testIdentities{}, requestTimeout, nil, nil)
 }
 
-func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService, issuer IDTokenIssuer, upstreamWrap func(UpstreamOIDC) UpstreamOIDC, identities ExternalIdentityResolver, requestTimeout time.Duration) *browserHarness {
+func newBrowserHarnessWithRateLimit(t *testing.T, limiter browserauth.AuthorizeRateLimiter, sourceResolver AuthorizeSourceResolver, wrap func(*browserauth.Service) BrowserSessionService) *browserHarness {
+	return newBrowserHarnessRuntimeWithIdentities(t, testProfiles{}, wrap, nil, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream }, testIdentities{}, 0, limiter, sourceResolver)
+}
+
+func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService, issuer IDTokenIssuer, upstreamWrap func(UpstreamOIDC) UpstreamOIDC, identities ExternalIdentityResolver, requestTimeout time.Duration, limiter browserauth.AuthorizeRateLimiter, sourceResolver AuthorizeSourceResolver) *browserHarness {
 	t.Helper()
 	idp := newFakeIDP(t)
 	downstreamKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -752,7 +809,16 @@ func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfil
 	store.AddEnterpriseUser("ent-2", "user-2")
 	sessions := browserauth.NewService(store)
 	audit := &memoryAudit{}
-	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrap(sessions), Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout})
+	if limiter == nil {
+		limiter, err = browserauth.NewMemoryAuthorizeRateLimiter(browserauth.DefaultAuthorizeRateLimitPerMinute, time.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sourceResolver == nil {
+		sourceResolver = NewAuthorizeSourceResolver(nil)
+	}
+	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrap(sessions), Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -812,10 +878,18 @@ type failingSessionService struct {
 type countingSessionService struct {
 	BrowserSessionService
 	createAttempts int
+	getSessions    int
+	lastAttempt    browserauth.CreateLoginAttemptInput
+}
+
+func (s *countingSessionService) GetSession(ctx context.Context, token string) (browserauth.BrowserSession, error) {
+	s.getSessions++
+	return s.BrowserSessionService.GetSession(ctx, token)
 }
 
 func (s *countingSessionService) CreateLoginAttempt(ctx context.Context, input browserauth.CreateLoginAttemptInput) (string, string, browserauth.LoginAttempt, error) {
 	s.createAttempts++
+	s.lastAttempt = input
 	return s.BrowserSessionService.CreateLoginAttempt(ctx, input)
 }
 
@@ -1019,11 +1093,11 @@ func perform(handler http.Handler, method, target, body string, cookie *http.Coo
 		cookies = append(cookies, cookie)
 	}
 	rr := performOnce(handler, method, target, body, cookies, headers...)
-	if method == http.MethodGet && strings.HasPrefix(target, "/oauth2/authorize?") && rr.Code == http.StatusFound && rr.Header().Get("Location") == target {
+	if method == http.MethodGet && strings.HasPrefix(target, "/oauth2/authorize?") && rr.Code == http.StatusFound && rr.Header().Get("Location") == target+"&nexus_bootstrap=1" {
 		for _, candidate := range rr.Result().Cookies() {
 			if candidate.Name == oidcBrowserCookie && canonicalOpaque(candidate.Value) {
 				cookies = append(cookies, candidate)
-				return performOnce(handler, method, target, body, cookies, headers...)
+				return performOnce(handler, method, rr.Header().Get("Location"), body, cookies, headers...)
 			}
 		}
 	}

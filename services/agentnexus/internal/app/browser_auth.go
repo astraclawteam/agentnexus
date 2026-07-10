@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 
 const browserSessionCookie = "nexus_browser_session"
 const oidcBrowserCookie = "nexus_oidc_browser"
+const oidcBootstrapQuery = "nexus_bootstrap"
 const loginBindingCookiePrefix = "nexus_oidc_binding_"
 const maxTokenRequestBytes = 16 << 10
 const maxAuthorizeStateLength = 1024
@@ -88,28 +90,32 @@ type BrowserAuditSink interface {
 }
 
 type BrowserAuthDependencies struct {
-	Config         browserauth.OIDCConfig
-	Sessions       BrowserSessionService
-	Upstream       UpstreamOIDC
-	Identities     ExternalIdentityResolver
-	Profiles       BrowserProfileResolver
-	Audit          BrowserAuditSink
-	TokenIssuer    IDTokenIssuer
-	RequestTimeout time.Duration
+	Config                  browserauth.OIDCConfig
+	Sessions                BrowserSessionService
+	Upstream                UpstreamOIDC
+	Identities              ExternalIdentityResolver
+	Profiles                BrowserProfileResolver
+	Audit                   BrowserAuditSink
+	TokenIssuer             IDTokenIssuer
+	RequestTimeout          time.Duration
+	AuthorizeRateLimiter    browserauth.AuthorizeRateLimiter
+	AuthorizeSourceResolver AuthorizeSourceResolver
 }
 
 type browserAuthHandler struct {
-	config     browserauth.OIDCConfig
-	sessions   BrowserSessionService
-	upstream   UpstreamOIDC
-	identities ExternalIdentityResolver
-	profiles   BrowserProfileResolver
-	audit      BrowserAuditSink
-	issuer     IDTokenIssuer
+	config                  browserauth.OIDCConfig
+	sessions                BrowserSessionService
+	upstream                UpstreamOIDC
+	identities              ExternalIdentityResolver
+	profiles                BrowserProfileResolver
+	audit                   BrowserAuditSink
+	issuer                  IDTokenIssuer
+	authorizeRateLimiter    browserauth.AuthorizeRateLimiter
+	authorizeSourceResolver AuthorizeSourceResolver
 }
 
 func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, error) {
-	if deps.Sessions == nil || deps.Upstream == nil || deps.Identities == nil || deps.Profiles == nil || deps.Audit == nil {
+	if deps.Sessions == nil || deps.Upstream == nil || deps.Identities == nil || deps.Profiles == nil || deps.Audit == nil || deps.AuthorizeRateLimiter == nil || deps.AuthorizeSourceResolver == nil {
 		return nil, errors.New("browser auth dependencies incomplete")
 	}
 	issuer := deps.TokenIssuer
@@ -120,7 +126,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
-	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer}, nil
+	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver}, nil
 }
 
 func browserRequestTimeout(value time.Duration) (time.Duration, error) {
@@ -188,15 +194,47 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
+	bootstrap := false
+	if values, present := query[oidcBootstrapQuery]; present {
+		if len(values) != 1 || values[0] != "1" {
+			writeOAuthError(w, http.StatusBadRequest)
+			return
+		}
+		bootstrap = true
+	}
+	sourceHash, err := h.authorizeSourceResolver.ResolveAuthorizeSource(r)
+	if err != nil {
+		writeOAuthError(w, http.StatusServiceUnavailable)
+		return
+	}
+	retryAfter, err := h.authorizeRateLimiter.AllowAuthorize(r.Context(), h.config.EnterpriseID, clientID, sourceHash)
+	if err != nil {
+		if errors.Is(err, browserauth.ErrAuthorizeRateLimited) {
+			seconds := int64((retryAfter + time.Second - 1) / time.Second)
+			if seconds < 1 {
+				seconds = 1
+			}
+			w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+			writeOAuthError(w, http.StatusTooManyRequests)
+			return
+		}
+		writeOAuthError(w, http.StatusServiceUnavailable)
+		return
+	}
 	browserCookie, browserCookieErr := r.Cookie(oidcBrowserCookie)
 	if browserCookieErr != nil || !canonicalOpaque(browserCookie.Value) {
+		if bootstrap {
+			clearOIDCBrowserCookie(w)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "browser_cookie_required"})
+			return
+		}
 		browserID, err := newBrowserID()
 		if err != nil {
 			writeOAuthError(w, http.StatusServiceUnavailable)
 			return
 		}
 		setOIDCBrowserCookie(w, browserID, time.Now().Add(oidcBrowserCookieTTL))
-		http.Redirect(w, r, r.URL.RequestURI(), http.StatusFound)
+		http.Redirect(w, r, r.URL.RequestURI()+"&"+oidcBootstrapQuery+"=1", http.StatusFound)
 		return
 	}
 
@@ -535,6 +573,10 @@ func newBrowserID() (string, error) {
 
 func setOIDCBrowserCookie(w http.ResponseWriter, value string, expiry time.Time) {
 	http.SetCookie(w, &http.Cookie{Name: oidcBrowserCookie, Value: value, Path: "/oauth2/authorize", Expires: expiry, MaxAge: int(oidcBrowserCookieTTL.Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+}
+
+func clearOIDCBrowserCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: oidcBrowserCookie, Value: "", Path: "/oauth2/authorize", Expires: time.Unix(1, 0), MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 }
 
 func loginBindingCookieName(state string) string {

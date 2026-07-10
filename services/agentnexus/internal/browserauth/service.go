@@ -17,9 +17,9 @@ const (
 	defaultCodeTimeout                 = 60 * time.Second
 	defaultLoginTimeout                = 5 * time.Minute
 	defaultPerBrowserLoginAttemptLimit = 8
-	defaultGlobalLoginAttemptLimit     = 4096
+	defaultGlobalLoginAttemptLimit     = 65536
 	maxPerBrowserLoginAttemptLimit     = 64
-	maxGlobalLoginAttemptLimit         = 65536
+	maxGlobalLoginAttemptLimit         = 1000000
 	maxClientIDLength                  = 256
 	maxRedirectURILength               = 2048
 	maxConsoleStateLength              = 1024

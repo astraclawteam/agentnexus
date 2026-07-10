@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -13,10 +14,12 @@ import (
 )
 
 type BrowserAuthConfig struct {
-	Enabled            bool
-	DatabaseURL        string
-	OIDC               browserauth.OIDCConfig
-	LoginAttemptLimits browserauth.LoginAttemptLimits
+	Enabled                     bool
+	DatabaseURL                 string
+	OIDC                        browserauth.OIDCConfig
+	LoginAttemptLimits          browserauth.LoginAttemptLimits
+	AuthorizeRateLimitPerMinute int
+	TrustedProxyCIDRs           []netip.Prefix
 }
 
 func LoadBrowserAuth() (BrowserAuthConfig, error) {
@@ -32,6 +35,13 @@ func LoadBrowserAuth() (BrowserAuthConfig, error) {
 		dsn = os.Getenv("AGENTNEXUS_DATABASE_URL")
 	}
 	limits := browserauth.DefaultLoginAttemptLimits()
+	authorizeRate, err := optionalPositiveInt("AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE", browserauth.DefaultAuthorizeRateLimitPerMinute)
+	if err != nil || !browserauth.ValidAuthorizeRateLimitPerMinute(authorizeRate) {
+		if err != nil {
+			return BrowserAuthConfig{}, err
+		}
+		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE is out of range")
+	}
 	perBrowser, err := optionalPositiveInt("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_PER_BROWSER_LIMIT", limits.PerBrowser)
 	if err != nil {
 		return BrowserAuthConfig{}, err
@@ -44,7 +54,14 @@ func LoadBrowserAuth() (BrowserAuthConfig, error) {
 	if err != nil {
 		return BrowserAuthConfig{}, fmt.Errorf("invalid OIDC login attempt limits: %w", err)
 	}
-	config := BrowserAuthConfig{Enabled: true, DatabaseURL: dsn, LoginAttemptLimits: limits}
+	if limits.Global <= 5*authorizeRate {
+		return BrowserAuthConfig{}, errors.New("OIDC login attempt global limit must exceed five times the authorize source rate")
+	}
+	trustedProxyCIDRs, err := parseTrustedProxyCIDRs(os.Getenv("AGENTNEXUS_TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		return BrowserAuthConfig{}, err
+	}
+	config := BrowserAuthConfig{Enabled: true, DatabaseURL: dsn, LoginAttemptLimits: limits, AuthorizeRateLimitPerMinute: authorizeRate, TrustedProxyCIDRs: trustedProxyCIDRs}
 	if config.DatabaseURL == "" {
 		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_POSTGRES_DSN is required when browser auth is enabled")
 	}
@@ -79,6 +96,30 @@ func LoadBrowserAuth() (BrowserAuthConfig, error) {
 		return BrowserAuthConfig{}, err
 	}
 	return config, nil
+}
+
+func parseTrustedProxyCIDRs(raw string) ([]netip.Prefix, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	prefixes := make([]netip.Prefix, 0, len(parts))
+	seen := make(map[netip.Prefix]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		prefix, err := netip.ParsePrefix(part)
+		if err != nil || prefix != prefix.Masked() {
+			return nil, errors.New("AGENTNEXUS_TRUSTED_PROXY_CIDRS must contain canonical CIDR prefixes")
+		}
+		prefix = prefix.Masked()
+		if _, exists := seen[prefix]; exists {
+			return nil, errors.New("AGENTNEXUS_TRUSTED_PROXY_CIDRS contains a duplicate prefix")
+		}
+		seen[prefix] = struct{}{}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
 }
 
 func optionalPositiveInt(name string, fallback int) (int, error) {
