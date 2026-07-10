@@ -1,4 +1,7 @@
-.PHONY: test build
+.PHONY: generate test build
+
+generate:
+	sqlc generate
 
 test:
 	go test ./...
