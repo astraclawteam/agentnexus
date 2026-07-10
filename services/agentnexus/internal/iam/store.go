@@ -272,20 +272,54 @@ func memoryPolicySnapshotKey(enterpriseID string, versionNumber int64) string {
 }
 
 type PostgresStore struct {
-	pool postgresStoreDB
+	pool            postgresStoreDB
+	publicationPool orgPublicationConnPool
 }
 
 type postgresStoreDB interface {
 	db.DBTX
+}
+
+type orgPublicationConnPool interface {
+	AcquireOrgPublicationConn(context.Context) (orgPublicationConn, error)
+}
+
+type orgPublicationConn interface {
+	db.DBTX
 	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	Release()
+	Destroy(context.Context) error
 }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
-	return newPostgresStoreWithDB(pool)
+	if pool == nil {
+		return &PostgresStore{}
+	}
+	return &PostgresStore{pool: pool, publicationPool: &pgxOrgPublicationPool{pool: pool}}
 }
 
 func newPostgresStoreWithDB(database postgresStoreDB) *PostgresStore {
-	return &PostgresStore{pool: database}
+	store := &PostgresStore{pool: database}
+	if publicationPool, ok := database.(orgPublicationConnPool); ok {
+		store.publicationPool = publicationPool
+	}
+	return store
+}
+
+type pgxOrgPublicationPool struct{ pool *pgxpool.Pool }
+
+func (p *pgxOrgPublicationPool) AcquireOrgPublicationConn(ctx context.Context) (orgPublicationConn, error) {
+	conn, err := p.pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &pgxOrgPublicationConn{Conn: conn}, nil
+}
+
+type pgxOrgPublicationConn struct{ *pgxpool.Conn }
+
+func (c *pgxOrgPublicationConn) Destroy(ctx context.Context) error {
+	return c.Hijack().Close(ctx)
 }
 
 func (s *PostgresStore) CreateEnterprise(ctx context.Context, enterprise Enterprise) (Enterprise, error) {
@@ -359,7 +393,7 @@ func (s *PostgresStore) PublishOrgVersion(ctx context.Context, event OrgEvent, v
 }
 
 func (s *PostgresStore) publishOrgVersion(ctx context.Context, event *OrgEvent, version OrgVersion) (result OrgVersion, resultErr error) {
-	if s == nil || s.pool == nil {
+	if s == nil || s.pool == nil || s.publicationPool == nil {
 		return OrgVersion{}, errors.New("iam store unavailable")
 	}
 	if err := ctx.Err(); err != nil {
@@ -372,7 +406,33 @@ func (s *PostgresStore) publishOrgVersion(ctx context.Context, event *OrgEvent, 
 	} else if err := validateOrgVersion(version, false); err != nil {
 		return OrgVersion{}, err
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadWrite})
+	conn, err := s.publicationPool.AcquireOrgPublicationConn(ctx)
+	if err != nil {
+		return OrgVersion{}, err
+	}
+	locked := false
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), orgPublicationCleanupTimeout)
+		defer cancel()
+		if !locked {
+			resultErr = errors.Join(resultErr, conn.Destroy(cleanupCtx))
+			return
+		}
+		unlocked, unlockErr := releaseOrgPublicationSessionLock(cleanupCtx, conn, version.EnterpriseID)
+		if unlockErr != nil || !unlocked {
+			if unlockErr == nil {
+				unlockErr = errors.New("organization publication session lock was not held")
+			}
+			resultErr = errors.Join(resultErr, unlockErr, conn.Destroy(cleanupCtx))
+			return
+		}
+		conn.Release()
+	}()
+	if err := acquireOrgPublicationSessionLock(ctx, conn, version.EnterpriseID); err != nil {
+		return OrgVersion{}, err
+	}
+	locked = true
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadWrite})
 	if err != nil {
 		return OrgVersion{}, err
 	}
@@ -411,6 +471,17 @@ func (s *PostgresStore) publishOrgVersion(ctx context.Context, event *OrgEvent, 
 		return OrgVersion{}, err
 	}
 	return OrgVersion{ID: sealed.ID, EnterpriseID: sealed.EnterpriseID, VersionNumber: sealed.VersionNumber, SourceEventID: textValue(sealed.SourceEventID), CreatedAt: sealed.CreatedAt.Time}, nil
+}
+
+func acquireOrgPublicationSessionLock(ctx context.Context, conn orgPublicationConn, enterpriseID string) error {
+	var ignored any
+	return conn.QueryRow(ctx, `SELECT pg_advisory_lock(hashtextextended($1, 0))`, enterpriseID).Scan(&ignored)
+}
+
+func releaseOrgPublicationSessionLock(ctx context.Context, conn orgPublicationConn, enterpriseID string) (bool, error) {
+	var unlocked bool
+	err := conn.QueryRow(ctx, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, enterpriseID).Scan(&unlocked)
+	return unlocked, err
 }
 
 type rowScanner interface {

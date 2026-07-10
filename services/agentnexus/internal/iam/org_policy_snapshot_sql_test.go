@@ -88,6 +88,25 @@ func TestOrgPolicySnapshotDeploymentGuidanceIsExplicit(t *testing.T) {
 	}
 }
 
+func TestPostgresPublicationTakesSessionLockBeforeRepeatableReadSnapshot(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join(agentnexusRoot(t), "internal", "iam", "store.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(raw)
+	for _, required := range []string{"AcquireOrgPublicationConn", "pg_advisory_lock(hashtextextended($1, 0))", "pg_advisory_unlock(hashtextextended($1, 0))", "context.WithoutCancel", "Destroy"} {
+		if !strings.Contains(source, required) {
+			t.Errorf("publication connection lifecycle missing %q", required)
+		}
+	}
+	lockAt := strings.Index(source, "acquireOrgPublicationSessionLock")
+	beginAt := strings.Index(source, "BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead")
+	if lockAt < 0 || beginAt <= lockAt {
+		t.Errorf("RepeatableRead snapshot can start before session lock: lock=%d begin=%d", lockAt, beginAt)
+	}
+}
+
 func TestAuthorizationSQLReadsExactImmutableVersion(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join(agentnexusRoot(t), "db", "queries", "org.sql"))
