@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 )
@@ -87,6 +88,24 @@ func TestBuildRouterWiresAuthorizationPolicyAndPostgresTicketActor(t *testing.T)
 		if !strings.Contains(string(raw), required) {
 			t.Errorf("production authorization wiring missing %q", required)
 		}
+	}
+}
+
+func TestBuildRouterWiresPostgresApprovalSourceAndAtomicStore(t *testing.T) {
+	source, store := productionApprovalDependencies(nil)
+	if _, ok := source.(*app.PostgresApprovalSource); !ok {
+		t.Fatalf("source=%T", source)
+	}
+	if _, ok := store.(*app.PostgresApprovalStore); !ok {
+		t.Fatalf("store=%T", store)
+	}
+	if _, err := source.LoadApprovalSnapshot(context.Background(), "enterprise-1", 1, "user-1"); !errors.Is(err, approval.ErrApprovalUnavailable) {
+		t.Fatalf("nil Postgres approval source err=%v", err)
+	}
+	req := approval.Request{EnterpriseID: "enterprise-1", RequesterUserID: "user-1", OrgVersion: 1, OrgUnitID: "unit-1", ResourceType: "workflow", ResourceID: "workflow-1", Action: "workflow.update"}
+	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{}, RequesterUserID: "user-1", OrgPath: []string{"unit-1"}}
+	if err := store.Record(context.Background(), req, route); err == nil {
+		t.Fatal("nil Postgres approval store did not fail closed")
 	}
 }
 

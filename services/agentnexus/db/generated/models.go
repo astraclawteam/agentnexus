@@ -20,6 +20,13 @@ type ApprovalQueueItem struct {
 	ReviewerUserID  pgtype.Text
 	Status          string
 	CreatedAt       pgtype.Timestamptz
+	OrgVersion      int64
+	RiskReasons     []byte
+	RouteMode       string
+	OrgPath         []byte
+	Queue           pgtype.Text
+	RouteInputHash  string
+	RouteOutputHash string
 }
 
 type Artifact struct {

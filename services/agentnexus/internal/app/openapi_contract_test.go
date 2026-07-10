@@ -21,6 +21,11 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 		t.Fatalf("parse gateway runtime OpenAPI: %v", err)
 	}
 	schemas := nestedMap(t, document, "components", "schemas")
+	paths := nestedMap(t, document, "paths")
+	approvalPath := nestedMap(t, paths, "/v1/approvals/resolve", "post")
+	if approvalPath["operationId"] != "resolveApprovalRoute" {
+		t.Fatalf("approval operationId=%v", approvalPath["operationId"])
+	}
 
 	t.Run("BrowserSession", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "BrowserSession")
@@ -73,6 +78,14 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 		autoPublish := property(t, schema, "auto_publish")
 		assertType(t, autoPublish, "boolean")
 		assertEnum(t, autoPublish, []any{false})
+	})
+
+	t.Run("ApprovalResolveRequest", func(t *testing.T) {
+		schema := namedSchema(t, schemas, "ApprovalResolveRequest")
+		assertObjectProperties(t, schema, []string{"org_version", "org_unit_id", "resource_type", "resource_id", "action"}, []string{"changed_fields", "impacted_org_unit_ids", "impacted_user_count", "published_behavior_change", "external_side_effect", "requested_risk"})
+		if _, exists := nestedMap(t, schema, "properties")["requester_user_id"]; exists {
+			t.Fatal("request body must not contain requester_user_id")
+		}
 	})
 }
 

@@ -72,6 +72,23 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TicketResponse'
+  /v1/approvals/resolve:
+    post:
+      operationId: resolveApprovalRoute
+      summary: Resolve and audit the approval route for a governed change.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalResolveRequest'
+      responses:
+        '200':
+          description: Deterministic confirmation, reviewer, or administrator queue route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalRoute'
 components:
   schemas:
     RequestEnvelope:
@@ -343,3 +360,45 @@ components:
           type: boolean
           enum:
             - false
+    ApprovalResolveRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - org_version
+        - org_unit_id
+        - resource_type
+        - resource_id
+        - action
+      properties:
+        org_version:
+          type: integer
+          minimum: 1
+        org_unit_id:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+        action:
+          type: string
+        changed_fields:
+          type: array
+          items:
+            type: string
+        impacted_org_unit_ids:
+          type: array
+          items:
+            type: string
+        impacted_user_count:
+          type: integer
+          minimum: 0
+        published_behavior_change:
+          type: boolean
+        external_side_effect:
+          type: boolean
+        requested_risk:
+          type: string
+          enum:
+            - low
+            - medium
+            - high

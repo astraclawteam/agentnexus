@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
@@ -62,6 +63,7 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		return nil, func() {}, fmt.Errorf("initialize authorize rate limiter: %w", err)
 	}
 	authorizationPolicy, ticketActors := productionAuthorizationDependencies(browserConfig.OIDC.EnterpriseID, pool)
+	approvalSource, approvalStore := productionApprovalDependencies(pool)
 	router, err := app.NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, app.BrowserAuthDependencies{
 		Config:                  browserConfig.OIDC,
 		Sessions:                browserauth.NewService(browserauth.NewPostgresStore(pool), browserauth.WithLoginAttemptLimits(browserConfig.LoginAttemptLimits)),
@@ -73,6 +75,9 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		AuthorizeSourceResolver: app.NewAuthorizeSourceResolver(browserConfig.TrustedProxyCIDRs),
 		AuthorizationPolicy:     authorizationPolicy,
 		TicketActors:            ticketActors,
+		ApprovalSource:          approvalSource,
+		ApprovalStore:           approvalStore,
+		ApprovalPolicy:          approval.DefaultPolicy(),
 	})
 	if err != nil {
 		cleanup()
@@ -83,6 +88,10 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 
 func productionAuthorizationDependencies(enterpriseID string, pool *pgxpool.Pool) (policy.AtlasPolicySource, app.TicketActorAuthenticator) {
 	return app.NewPostgresAtlasPolicySource(pool), app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)
+}
+
+func productionApprovalDependencies(pool *pgxpool.Pool) (app.ApprovalSnapshotSource, app.ApprovalRouteStore) {
+	return app.NewPostgresApprovalSource(pool), app.NewPostgresApprovalStore(pool)
 }
 
 func newHTTPServer(cfg config.Config, handler http.Handler) *http.Server {
