@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
-	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
@@ -64,6 +64,11 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 	}
 	authorizationPolicy, ticketActors := productionAuthorizationDependencies(browserConfig.OIDC.EnterpriseID, pool)
 	approvalSource, approvalStore := productionApprovalDependencies(pool)
+	approvalFactsVerifier, err := app.LoadChangeFactsVerifierFromFile(os.Getenv("AGENTNEXUS_APPROVAL_FACTS_SECRET_FILE"), time.Now)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
 	router, err := app.NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, app.BrowserAuthDependencies{
 		Config:                  browserConfig.OIDC,
 		Sessions:                browserauth.NewService(browserauth.NewPostgresStore(pool), browserauth.WithLoginAttemptLimits(browserConfig.LoginAttemptLimits)),
@@ -77,7 +82,7 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		TicketActors:            ticketActors,
 		ApprovalSource:          approvalSource,
 		ApprovalStore:           approvalStore,
-		ApprovalPolicy:          approval.DefaultPolicy(),
+		ApprovalFactsVerifier:   approvalFactsVerifier,
 	})
 	if err != nil {
 		cleanup()

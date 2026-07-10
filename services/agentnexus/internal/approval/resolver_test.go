@@ -3,32 +3,13 @@ package approval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 )
 
-type permissionKey struct {
-	userID     string
-	permission Permission
-}
-
-type fakePermissionChecker struct {
-	allowed map[permissionKey]bool
-	err     error
-	calls   []PermissionRequest
-}
-
-func (f *fakePermissionChecker) Allows(_ context.Context, req PermissionRequest) (bool, error) {
-	f.calls = append(f.calls, req)
-	if f.err != nil {
-		return false, f.err
-	}
-	return f.allowed[permissionKey{userID: req.UserID, permission: req.Permission}], nil
-}
-
 func TestResolveAuthorizedLowUsesSingleConfirmationWithoutPublishing(t *testing.T) {
-	checker := &fakePermissionChecker{allowed: map[permissionKey]bool{{"requester", PermissionPublishLowRisk}: true}}
-	route, err := NewResolver(checker, DefaultPolicy()).Resolve(context.Background(), baseRequest(), validSnapshot())
+	route, err := NewIndexedResolver(DefaultPolicy()).Resolve(context.Background(), baseRequest(), snapshotWithPermissions(t, SnapshotMembership{UserID: "requester", OrgUnitID: "team", Role: string(PermissionPublishLowRisk)}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,8 +19,7 @@ func TestResolveAuthorizedLowUsesSingleConfirmationWithoutPublishing(t *testing.
 }
 
 func TestResolveUnauthorizedLowWalksUpUsingPublishPermission(t *testing.T) {
-	checker := &fakePermissionChecker{allowed: map[permissionKey]bool{{"dept-head", PermissionPublishLowRisk}: true, {"root-head", PermissionPublishLowRisk}: true}}
-	route, err := NewResolver(checker, DefaultPolicy()).Resolve(context.Background(), baseRequest(), validSnapshot())
+	route, err := NewIndexedResolver(DefaultPolicy()).Resolve(context.Background(), baseRequest(), snapshotWithPermissions(t, SnapshotMembership{UserID: "dept-head", OrgUnitID: "dept", Role: string(PermissionPublishLowRisk)}, SnapshotMembership{UserID: "root-head", OrgUnitID: "root", Role: string(PermissionPublishLowRisk)}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,18 +31,17 @@ func TestResolveUnauthorizedLowWalksUpUsingPublishPermission(t *testing.T) {
 func TestResolveMediumAndHighUseApprovePermissionAndExcludeRequester(t *testing.T) {
 	tests := []struct {
 		name  string
-		input RiskInput
+		input riskFactsInput
 	}{
-		{name: "medium", input: RiskInput{ImpactedUserCount: 26}},
-		{name: "high", input: RiskInput{ExternalSideEffect: true}},
+		{name: "medium", input: riskFactsInput{ImpactedUserCount: 26}},
+		{name: "high", input: riskFactsInput{ExternalSideEffect: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := baseRequest()
 			req.RequesterUserID = "team-manager"
-			req.Risk = tt.input
-			checker := &fakePermissionChecker{allowed: map[permissionKey]bool{{"team-manager", PermissionApproveHighRisk}: true, {"dept-head", PermissionApproveHighRisk}: true}}
-			route, err := NewResolver(checker, DefaultPolicy()).Resolve(context.Background(), req, validSnapshot())
+			req.Facts = verifiedFacts(tt.input)
+			route, err := NewIndexedResolver(DefaultPolicy()).Resolve(context.Background(), req, snapshotWithPermissions(t, SnapshotMembership{UserID: "dept-head", OrgUnitID: "dept", Role: string(PermissionApproveHighRisk)}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -88,9 +67,13 @@ func TestResolveSkipsUnauthorizedManagerAndChoosesStableNearestCandidate(t *test
 		t.Fatal(err)
 	}
 	req := baseRequest()
-	req.Risk.ExternalSideEffect = true
-	checker := &fakePermissionChecker{allowed: map[permissionKey]bool{{"team-manager-b", PermissionApproveHighRisk}: true, {"team-manager-a", PermissionApproveHighRisk}: true}}
-	route, err := NewResolver(checker, DefaultPolicy()).Resolve(context.Background(), req, snapshot)
+	req.Facts = NewVerifiedChangeFacts(VerifiedChangeFactsInput{ExternalSideEffect: true})
+	memberships = append(memberships, SnapshotMembership{UserID: "team-manager-b", OrgUnitID: "team", Role: string(PermissionApproveHighRisk)}, SnapshotMembership{UserID: "team-manager-a", OrgUnitID: "team", Role: string(PermissionApproveHighRisk)})
+	snapshot, err = NewOrgSnapshot("enterprise-1", 7, units, memberships, users)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err := NewIndexedResolver(DefaultPolicy()).Resolve(context.Background(), req, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,8 +84,8 @@ func TestResolveSkipsUnauthorizedManagerAndChoosesStableNearestCandidate(t *test
 
 func TestResolveNoReviewerUsesKnowledgeAdminQueue(t *testing.T) {
 	req := baseRequest()
-	req.Risk.ExternalSideEffect = true
-	route, err := NewResolver(&fakePermissionChecker{allowed: map[permissionKey]bool{}}, DefaultPolicy()).Resolve(context.Background(), req, validSnapshot())
+	req.Facts = NewVerifiedChangeFacts(VerifiedChangeFactsInput{ExternalSideEffect: true})
+	route, err := NewIndexedResolver(DefaultPolicy()).Resolve(context.Background(), req, validSnapshot())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +109,7 @@ func TestResolveFailsClosedForInvalidSnapshotBindings(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewResolver(&fakePermissionChecker{allowed: map[permissionKey]bool{}}, DefaultPolicy()).Resolve(context.Background(), tt.request(), tt.snapshot())
+			_, err := NewIndexedResolver(DefaultPolicy()).Resolve(context.Background(), tt.request(), tt.snapshot())
 			if !errors.Is(err, ErrApprovalUnavailable) {
 				t.Fatalf("err=%v", err)
 			}
@@ -163,18 +146,47 @@ func TestResolveFailsClosedForLimitsCancellationAndPermissionUnavailable(t *test
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := NewResolver(&fakePermissionChecker{allowed: map[permissionKey]bool{}}, DefaultPolicy()).Resolve(cancelled, baseRequest(), validSnapshot()); !errors.Is(err, ErrApprovalUnavailable) {
+	if _, err := NewIndexedResolver(DefaultPolicy()).Resolve(cancelled, baseRequest(), validSnapshot()); !errors.Is(err, ErrApprovalUnavailable) {
 		t.Fatalf("cancel err=%v", err)
 	}
+}
+
+func TestResolveBuildsPermissionIndexOnceForManyManagers(t *testing.T) {
+	units := []SnapshotUnit{{ID: "root"}, {ID: "team", ParentID: "root"}}
+	memberships := make([]SnapshotMembership, 0, 2000)
+	users := make([]SnapshotUser, 0, 1001)
+	users = append(users, SnapshotUser{ID: "requester", DisplayName: "Requester"})
+	for i := 0; i < 1000; i++ {
+		id := fmt.Sprintf("manager-%04d", i)
+		users = append(users, SnapshotUser{ID: id, DisplayName: id})
+		memberships = append(memberships, SnapshotMembership{UserID: id, OrgUnitID: "team", Role: RoleManager}, SnapshotMembership{UserID: id, OrgUnitID: "root", Role: string(PermissionApproveHighRisk)})
+	}
+	snapshot := mustSnapshot(t, "enterprise-1", 7, units, memberships, users)
 	req := baseRequest()
-	req.Risk.ExternalSideEffect = true
-	if _, err := NewResolver(&fakePermissionChecker{err: errors.New("down")}, DefaultPolicy()).Resolve(context.Background(), req, validSnapshot()); !errors.Is(err, ErrApprovalUnavailable) {
-		t.Fatalf("checker err=%v", err)
+	req.Facts = NewVerifiedChangeFacts(VerifiedChangeFactsInput{ExternalSideEffect: true})
+	counts := map[string]int{}
+	resolver := NewIndexedResolver(DefaultPolicy())
+	resolver.observe = func(work string) { counts[work]++ }
+	if _, err := resolver.Resolve(context.Background(), req, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if counts["membership"] != len(memberships) || counts["candidate"] > 1 {
+		t.Fatalf("counts=%v memberships=%d", counts, len(memberships))
 	}
 }
 
 func baseRequest() Request {
-	return Request{EnterpriseID: "enterprise-1", RequesterUserID: "requester", OrgVersion: 7, OrgUnitID: "team", ResourceType: "workflow", ResourceID: "workflow-1", Action: "workflow.update"}
+	return Request{EnterpriseID: "enterprise-1", RequesterUserID: "requester", OrgVersion: 7, OrgUnitID: "team", ResourceType: "knowledge", ResourceID: "article-1", Action: "knowledge.publish_low_risk", Facts: NewVerifiedChangeFacts(VerifiedChangeFactsInput{}), PolicyVersion: 1}
+}
+
+func verifiedFacts(input riskFactsInput) VerifiedChangeFacts {
+	return NewVerifiedChangeFacts(VerifiedChangeFactsInput{ChangedFields: input.ChangedFields, ImpactedOrgUnitIDs: input.ImpactedOrgUnitIDs, ImpactedUserCount: input.ImpactedUserCount, PublishedBehaviorChange: input.PublishedBehaviorChange, ExternalSideEffect: input.ExternalSideEffect})
+}
+
+func snapshotWithPermissions(t *testing.T, extra ...SnapshotMembership) OrgSnapshot {
+	units, memberships, users := validSnapshotRows()
+	memberships = append(memberships, extra...)
+	return mustSnapshot(t, "enterprise-1", 7, units, memberships, users)
 }
 
 func validSnapshot() OrgSnapshot {

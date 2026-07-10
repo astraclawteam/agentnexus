@@ -11,6 +11,96 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const acquireEnterpriseOrgPublicationLock = `-- name: AcquireEnterpriseOrgPublicationLock :one
+SELECT pg_advisory_xact_lock(hashtextextended($1, 0))
+`
+
+func (q *Queries) AcquireEnterpriseOrgPublicationLock(ctx context.Context, hashtextextended string) (interface{}, error) {
+	row := q.db.QueryRow(ctx, acquireEnterpriseOrgPublicationLock, hashtextextended)
+	var pg_advisory_xact_lock interface{}
+	err := row.Scan(&pg_advisory_xact_lock)
+	return pg_advisory_xact_lock, err
+}
+
+const getApprovalResolution = `-- name: GetApprovalResolution :one
+SELECT enterprise_id, idempotency_key_hash, request_hash, requester_user_id, org_version, org_unit_id,
+       policy_version, policy_version_ref, resource_type, resource_id, action, route_mode, risk_level,
+       risk_reasons, reviewer_user_id, reviewer_org_unit_id, reviewer_display_name, org_path, queue, auto_publish,
+       queue_item_id, audit_event_id, created_at
+FROM approval_resolution_idempotency
+WHERE enterprise_id = $1 AND idempotency_key_hash = $2
+`
+
+type GetApprovalResolutionParams struct {
+	EnterpriseID       string
+	IdempotencyKeyHash string
+}
+
+func (q *Queries) GetApprovalResolution(ctx context.Context, arg GetApprovalResolutionParams) (ApprovalResolutionIdempotency, error) {
+	row := q.db.QueryRow(ctx, getApprovalResolution, arg.EnterpriseID, arg.IdempotencyKeyHash)
+	var i ApprovalResolutionIdempotency
+	err := row.Scan(
+		&i.EnterpriseID,
+		&i.IdempotencyKeyHash,
+		&i.RequestHash,
+		&i.RequesterUserID,
+		&i.OrgVersion,
+		&i.OrgUnitID,
+		&i.PolicyVersion,
+		&i.PolicyVersionRef,
+		&i.ResourceType,
+		&i.ResourceID,
+		&i.Action,
+		&i.RouteMode,
+		&i.RiskLevel,
+		&i.RiskReasons,
+		&i.ReviewerUserID,
+		&i.ReviewerOrgUnitID,
+		&i.ReviewerDisplayName,
+		&i.OrgPath,
+		&i.Queue,
+		&i.AutoPublish,
+		&i.QueueItemID,
+		&i.AuditEventID,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getCurrentApprovalPolicyVersion = `-- name: GetCurrentApprovalPolicyVersion :one
+SELECT COALESCE((
+    SELECT policy_version FROM enterprise_approval_policies WHERE enterprise_id = $1
+), 0)::BIGINT AS policy_version
+`
+
+func (q *Queries) GetCurrentApprovalPolicyVersion(ctx context.Context, enterpriseID string) (int64, error) {
+	row := q.db.QueryRow(ctx, getCurrentApprovalPolicyVersion, enterpriseID)
+	var policy_version int64
+	err := row.Scan(&policy_version)
+	return policy_version, err
+}
+
+const getEnterpriseApprovalPolicy = `-- name: GetEnterpriseApprovalPolicy :one
+SELECT enterprise_id, minimum_risk, max_low_impacted_users, max_low_impacted_org_units,
+       policy_version, updated_at
+FROM enterprise_approval_policies
+WHERE enterprise_id = $1
+`
+
+func (q *Queries) GetEnterpriseApprovalPolicy(ctx context.Context, enterpriseID string) (EnterpriseApprovalPolicy, error) {
+	row := q.db.QueryRow(ctx, getEnterpriseApprovalPolicy, enterpriseID)
+	var i EnterpriseApprovalPolicy
+	err := row.Scan(
+		&i.EnterpriseID,
+		&i.MinimumRisk,
+		&i.MaxLowImpactedUsers,
+		&i.MaxLowImpactedOrgUnits,
+		&i.PolicyVersion,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getLatestApprovalOrgVersion = `-- name: GetLatestApprovalOrgVersion :one
 SELECT version_number
 FROM org_versions
@@ -31,34 +121,40 @@ const insertApprovalQueueItem = `-- name: InsertApprovalQueueItem :one
 INSERT INTO approval_queue_items (
     id, enterprise_id, requester_user_id, resource_type, resource_id, action,
     risk_level, org_unit_id, reviewer_user_id, status, org_version,
-    risk_reasons, route_mode, org_path, queue, route_input_hash, route_output_hash
+    risk_reasons, route_mode, org_path, queue, route_input_hash, route_output_hash, policy_version, policy_version_ref,
+    idempotency_key_hash, reviewer_org_unit_id, reviewer_display_name
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10,
-    $11, $12, $13, $14, $15, $16
+    $11, $12, $13, $14, $15, $16, $17, NULLIF($17, 0), $18, $19, $20
 )
 RETURNING id, enterprise_id, requester_user_id, resource_type, resource_id, action,
     risk_level, org_unit_id, reviewer_user_id, status, created_at, org_version,
-    risk_reasons, route_mode, org_path, queue, route_input_hash, route_output_hash
+    risk_reasons, route_mode, org_path, queue, route_input_hash, route_output_hash, policy_version, policy_version_ref,
+    idempotency_key_hash, reviewer_org_unit_id, reviewer_display_name
 `
 
 type InsertApprovalQueueItemParams struct {
-	ID              string
-	EnterpriseID    string
-	RequesterUserID string
-	ResourceType    string
-	ResourceID      string
-	Action          string
-	RiskLevel       string
-	OrgUnitID       string
-	ReviewerUserID  pgtype.Text
-	OrgVersion      int64
-	RiskReasons     []byte
-	RouteMode       string
-	OrgPath         []byte
-	Queue           pgtype.Text
-	RouteInputHash  string
-	RouteOutputHash string
+	ID                  string
+	EnterpriseID        string
+	RequesterUserID     string
+	ResourceType        string
+	ResourceID          string
+	Action              string
+	RiskLevel           string
+	OrgUnitID           string
+	ReviewerUserID      pgtype.Text
+	OrgVersion          int64
+	RiskReasons         []byte
+	RouteMode           string
+	OrgPath             []byte
+	Queue               pgtype.Text
+	RouteInputHash      string
+	RouteOutputHash     string
+	PolicyVersion       int64
+	IdempotencyKeyHash  string
+	ReviewerOrgUnitID   pgtype.Text
+	ReviewerDisplayName pgtype.Text
 }
 
 func (q *Queries) InsertApprovalQueueItem(ctx context.Context, arg InsertApprovalQueueItemParams) (ApprovalQueueItem, error) {
@@ -79,6 +175,10 @@ func (q *Queries) InsertApprovalQueueItem(ctx context.Context, arg InsertApprova
 		arg.Queue,
 		arg.RouteInputHash,
 		arg.RouteOutputHash,
+		arg.PolicyVersion,
+		arg.IdempotencyKeyHash,
+		arg.ReviewerOrgUnitID,
+		arg.ReviewerDisplayName,
 	)
 	var i ApprovalQueueItem
 	err := row.Scan(
@@ -100,8 +200,76 @@ func (q *Queries) InsertApprovalQueueItem(ctx context.Context, arg InsertApprova
 		&i.Queue,
 		&i.RouteInputHash,
 		&i.RouteOutputHash,
+		&i.PolicyVersion,
+		&i.PolicyVersionRef,
+		&i.IdempotencyKeyHash,
+		&i.ReviewerOrgUnitID,
+		&i.ReviewerDisplayName,
 	)
 	return i, err
+}
+
+const insertApprovalResolution = `-- name: InsertApprovalResolution :execrows
+INSERT INTO approval_resolution_idempotency (
+    enterprise_id, idempotency_key_hash, request_hash, requester_user_id, org_version, org_unit_id,
+    policy_version, policy_version_ref, resource_type, resource_id, action, route_mode, risk_level,
+    risk_reasons, reviewer_user_id, reviewer_org_unit_id, reviewer_display_name, org_path, queue, auto_publish,
+    queue_item_id, audit_event_id
+)
+VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($7,0),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,false,$19,$20)
+ON CONFLICT (enterprise_id, idempotency_key_hash) DO NOTHING
+`
+
+type InsertApprovalResolutionParams struct {
+	EnterpriseID        string
+	IdempotencyKeyHash  string
+	RequestHash         string
+	RequesterUserID     string
+	OrgVersion          int64
+	OrgUnitID           string
+	PolicyVersion       int64
+	ResourceType        string
+	ResourceID          string
+	Action              string
+	RouteMode           string
+	RiskLevel           string
+	RiskReasons         []byte
+	ReviewerUserID      pgtype.Text
+	ReviewerOrgUnitID   pgtype.Text
+	ReviewerDisplayName pgtype.Text
+	OrgPath             []byte
+	Queue               pgtype.Text
+	QueueItemID         pgtype.Text
+	AuditEventID        string
+}
+
+func (q *Queries) InsertApprovalResolution(ctx context.Context, arg InsertApprovalResolutionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertApprovalResolution,
+		arg.EnterpriseID,
+		arg.IdempotencyKeyHash,
+		arg.RequestHash,
+		arg.RequesterUserID,
+		arg.OrgVersion,
+		arg.OrgUnitID,
+		arg.PolicyVersion,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.Action,
+		arg.RouteMode,
+		arg.RiskLevel,
+		arg.RiskReasons,
+		arg.ReviewerUserID,
+		arg.ReviewerOrgUnitID,
+		arg.ReviewerDisplayName,
+		arg.OrgPath,
+		arg.Queue,
+		arg.QueueItemID,
+		arg.AuditEventID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const listApprovalMemberships = `-- name: ListApprovalMemberships :many
@@ -109,6 +277,7 @@ SELECT enterprise_id, version_number, enterprise_user_id, org_unit_id, role
 FROM org_policy_snapshot_memberships
 WHERE enterprise_id = $1
   AND version_number = $2
+  AND role IN ('manager', 'publish_low_risk', 'approve_high_risk')
 ORDER BY enterprise_user_id, org_unit_id, role
 LIMIT 100001
 `
@@ -193,6 +362,7 @@ WHERE users.enterprise_id = $1
       WHERE memberships.enterprise_id = $1
         AND memberships.version_number = $2
         AND memberships.enterprise_user_id = users.id
+        AND memberships.role IN ('manager', 'publish_low_risk', 'approve_high_risk')
   )
 ORDER BY users.id
 LIMIT 100001

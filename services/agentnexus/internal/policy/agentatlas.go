@@ -44,6 +44,8 @@ const (
 	ActionKnowledgeApproveHighRisk AtlasAction = "knowledge.approve_high_risk"
 	ActionWorkflowEdit             AtlasAction = "workflow.edit"
 	ActionWorkflowEditAdvanced     AtlasAction = "workflow.edit_advanced"
+	ActionWorkflowPublishLowRisk   AtlasAction = "workflow.publish_low_risk"
+	ActionWorkflowApproveHighRisk  AtlasAction = "workflow.approve_high_risk"
 	ActionServiceMode              AtlasAction = "service.mode"
 )
 
@@ -69,6 +71,8 @@ var actionRequirements = map[AtlasAction]actionRequirement{
 	ActionKnowledgeApproveHighRisk: {resourceType: ResourceKnowledge, permission: PermissionApproveHighRisk, baselineRisk: AtlasRiskHigh},
 	ActionWorkflowEdit:             {resourceType: ResourceWorkflow, permission: PermissionWorkflowEdit, baselineRisk: AtlasRiskMedium},
 	ActionWorkflowEditAdvanced:     {resourceType: ResourceWorkflow, permission: PermissionWorkflowAdvanced, baselineRisk: AtlasRiskHigh},
+	ActionWorkflowPublishLowRisk:   {resourceType: ResourceWorkflow, permission: PermissionPublishLowRisk, baselineRisk: AtlasRiskLow},
+	ActionWorkflowApproveHighRisk:  {resourceType: ResourceWorkflow, permission: PermissionApproveHighRisk, baselineRisk: AtlasRiskHigh},
 	ActionServiceMode:              {resourceType: ResourceService, permission: PermissionServiceMode, baselineRisk: AtlasRiskHigh},
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -28,14 +29,26 @@ func (s *stubApprovalSource) LoadApprovalSnapshot(_ context.Context, enterprise 
 }
 
 type capturingApprovalStore struct {
-	req   approval.Request
-	route approval.Route
-	err   error
+	req       approval.Request
+	route     approval.Route
+	err       error
+	replay    *approval.Route
+	lookupErr error
 }
 
-func (s *capturingApprovalStore) Record(_ context.Context, req approval.Request, route approval.Route) error {
+func (s *capturingApprovalStore) LookupResolution(context.Context, string, string, string) (approval.Route, bool, error) {
+	if s.lookupErr != nil {
+		return approval.Route{}, false, s.lookupErr
+	}
+	if s.replay != nil {
+		return *s.replay, true, nil
+	}
+	return approval.Route{}, false, nil
+}
+
+func (s *capturingApprovalStore) RecordResolution(_ context.Context, req approval.Request, route approval.Route) (approval.Route, error) {
 	s.req, s.route = req, route
-	return s.err
+	return route, s.err
 }
 
 func TestApprovalResolveUsesAuthenticatedActorAndReturnsFrozenRoute(t *testing.T) {
@@ -44,6 +57,7 @@ func TestApprovalResolveUsesAuthenticatedActorAndReturnsFrozenRoute(t *testing.T
 	router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, source, store)
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(validApprovalBody()))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	addApprovalHeaders(req)
 	req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "opaque-session"})
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
@@ -69,6 +83,7 @@ func TestApprovalResolveUsesCaseTicketActor(t *testing.T) {
 	router := newApprovalTestRouter(t, stubAuthorizationSessions{}, tickets, source, store)
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(validApprovalBody()))
 	req.Header.Set("Content-Type", "application/json")
+	addApprovalHeaders(req)
 	req.Header.Set("Authorization", "CaseTicket opaque-ticket")
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
@@ -86,7 +101,7 @@ func TestApprovalResolveRejectsStrictJSONAndRequesterOverride(t *testing.T) {
 	}{
 		{name: "requester", body: strings.TrimSuffix(validApprovalBody(), "}") + `,"requester_user_id":"attacker"}`, contentType: "application/json", status: http.StatusBadRequest},
 		{name: "duplicate", body: strings.TrimSuffix(validApprovalBody(), "}") + `,"action":"other"}`, contentType: "application/json", status: http.StatusBadRequest},
-		{name: "null", body: strings.Replace(validApprovalBody(), `"resource_id":"workflow-1"`, `"resource_id":null`, 1), contentType: "application/json", status: http.StatusBadRequest},
+		{name: "null", body: strings.Replace(validApprovalBody(), `"resource_id":"article-1"`, `"resource_id":null`, 1), contentType: "application/json", status: http.StatusBadRequest},
 		{name: "trailing", body: validApprovalBody() + `{}`, contentType: "application/json", status: http.StatusBadRequest},
 		{name: "wrong content type", body: validApprovalBody(), contentType: "text/plain", status: http.StatusUnsupportedMediaType},
 		{name: "noncanonical changed field", body: strings.Replace(validApprovalBody(), `"title"`, `" title"`, 1), contentType: "application/json", status: http.StatusBadRequest},
@@ -97,6 +112,7 @@ func TestApprovalResolveRejectsStrictJSONAndRequesterOverride(t *testing.T) {
 			router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), &capturingApprovalStore{})
 			req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", tt.contentType)
+			addApprovalHeaders(req)
 			req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "opaque-session"})
 			rr := httptest.NewRecorder()
 			router.ServeHTTP(rr, req)
@@ -112,11 +128,105 @@ func TestApprovalResolveFailsClosedWithoutLeakingCandidates(t *testing.T) {
 	router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, source, &capturingApprovalStore{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(validApprovalBody()))
 	req.Header.Set("Content-Type", "application/json")
+	addApprovalHeaders(req)
 	req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "opaque-session"})
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusServiceUnavailable || strings.Contains(rr.Body.String(), "secret-user") || strings.Contains(rr.Body.String(), "candidate") {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestApprovalResolveRequiresCanonicalSingleSecurityHeaders(t *testing.T) {
+	tests := []func(*http.Request){
+		func(r *http.Request) { r.Header.Del("Idempotency-Key") },
+		func(r *http.Request) { r.Header.Add("Idempotency-Key", "second-123456789012") },
+		func(r *http.Request) { r.Header.Set("Idempotency-Key", "short") },
+		func(r *http.Request) { r.Header.Del("X-Approval-Facts-Attestation") },
+		func(r *http.Request) { r.Header.Add("X-Approval-Facts-Attestation", "second") },
+	}
+	for i, mutate := range tests {
+		router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), &capturingApprovalStore{})
+		req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(validApprovalBody()))
+		req.Header.Set("Content-Type", "application/json")
+		addApprovalHeaders(req)
+		mutate(req)
+		req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "opaque-session"})
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("case=%d status=%d", i, rr.Code)
+		}
+	}
+}
+
+func TestApprovalResolveMissingFactsRejectsAndUnknownOrUnverifiedFactsForceHigh(t *testing.T) {
+	missing := strings.Replace(validApprovalBody(), `,"external_side_effect":false`, "", 1)
+	router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), &capturingApprovalStore{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(missing))
+	req.Header.Set("Content-Type", "application/json")
+	addApprovalHeaders(req)
+	req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "opaque-session"})
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing status=%d", rr.Code)
+	}
+
+	for _, tc := range []struct {
+		body     string
+		verifier ChangeFactsVerifier
+		reason   approval.RiskReason
+	}{
+		{body: strings.Replace(validApprovalBody(), `"title"`, `"future_field"`, 1), verifier: trustingFactsVerifier{}, reason: approval.RiskReasonUnknownChangedField},
+		{body: validApprovalBody(), verifier: RejectChangeFactsVerifier{}, reason: approval.RiskReasonUnverifiedChangeFacts},
+	} {
+		store := &capturingApprovalStore{}
+		router = newApprovalTestRouterWithVerifier(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), store, tc.verifier)
+		req = httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		addApprovalHeaders(req)
+		req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "opaque-session"})
+		rr = httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK || store.route.RiskLevel != approval.RiskHigh || !slices.Contains(store.route.RiskReasons, tc.reason) {
+			t.Fatalf("status=%d route=%+v", rr.Code, store.route)
+		}
+	}
+}
+
+type failingFactsVerifier struct{}
+
+func (failingFactsVerifier) VerifyChangeFacts(context.Context, ChangeFactsVerificationInput) (approval.VerifiedChangeFacts, error) {
+	return approval.VerifiedChangeFacts{}, errors.New("verifier must not run on replay")
+}
+
+func TestApprovalResolveReplaysBeforeExpiredVerificationOrUnavailableSource(t *testing.T) {
+	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: "user-1", OrgPath: []string{"team"}, PolicyVersion: 3}
+	store := &capturingApprovalStore{replay: &route}
+	source := &stubApprovalSource{err: errors.New("source unavailable after org version advanced")}
+	router := newApprovalTestRouterWithVerifier(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, source, store, failingFactsVerifier{})
+	body := strings.Replace(validApprovalBody(), `"facts_expires_at":"2026-07-11T00:05:00Z"`, `"facts_expires_at":"2020-01-01T00:05:00Z"`, 1)
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	addApprovalHeaders(req)
+	req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "opaque-session"})
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || store.req.RequesterUserID != "" || source.requester != "" {
+		t.Fatalf("status=%d store=%+v source=%+v body=%s", rr.Code, store, source, rr.Body.String())
+	}
+
+	store = &capturingApprovalStore{lookupErr: ErrApprovalIdempotencyConflict}
+	router = newApprovalTestRouterWithVerifier(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, source, store, failingFactsVerifier{})
+	req = httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(validApprovalBody()))
+	req.Header.Set("Content-Type", "application/json")
+	addApprovalHeaders(req)
+	req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "opaque-session"})
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("conflict status=%d", rr.Code)
 	}
 }
 
@@ -154,8 +264,12 @@ func TestBrowserHandlerRegistersApprovalAndExistingProtectedRoutes(t *testing.T)
 }
 
 func newApprovalTestRouter(t *testing.T, sessions authorizationSessionResolver, tickets TicketActorAuthenticator, source ApprovalSnapshotSource, store ApprovalRouteStore) http.Handler {
+	return newApprovalTestRouterWithVerifier(t, sessions, tickets, source, store, trustingFactsVerifier{})
+}
+
+func newApprovalTestRouterWithVerifier(t *testing.T, sessions authorizationSessionResolver, tickets TicketActorAuthenticator, source ApprovalSnapshotSource, store ApprovalRouteStore, verifier ChangeFactsVerifier) http.Handler {
 	t.Helper()
-	handler, err := newApprovalHandler(approvalDependencies{EnterpriseID: "ent-1", Sessions: sessions, TicketActors: tickets, Source: source, Store: store, Policy: approval.DefaultPolicy()})
+	handler, err := newApprovalHandler(approvalDependencies{EnterpriseID: "ent-1", Sessions: sessions, TicketActors: tickets, Source: source, Store: store, FactsVerifier: verifier})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,20 +280,24 @@ func newApprovalTestRouter(t *testing.T, sessions authorizationSessionResolver, 
 
 func directApprovalSource(t *testing.T, enterprise string, version int64, requester string) *stubApprovalSource {
 	t.Helper()
-	snapshot, err := approval.NewOrgSnapshot(enterprise, version, []approval.SnapshotUnit{{ID: "team"}}, nil, nil)
+	snapshot, err := approval.NewOrgSnapshot(enterprise, version, []approval.SnapshotUnit{{ID: "team"}}, []approval.SnapshotMembership{{UserID: requester, OrgUnitID: "team", Role: string(approval.PermissionPublishLowRisk)}}, []approval.SnapshotUser{{ID: requester, DisplayName: "Requester"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	permissions := &fakeAppApprovalPermissions{allowedUser: requester}
-	return &stubApprovalSource{loaded: LoadedApprovalSnapshot{Snapshot: snapshot, Permissions: permissions}}
-}
-
-type fakeAppApprovalPermissions struct{ allowedUser string }
-
-func (f *fakeAppApprovalPermissions) Allows(_ context.Context, req approval.PermissionRequest) (bool, error) {
-	return req.UserID == f.allowedUser && req.Permission == approval.PermissionPublishLowRisk, nil
+	return &stubApprovalSource{loaded: LoadedApprovalSnapshot{Snapshot: snapshot, Policy: approval.DefaultPolicy(), PolicyVersion: 0}}
 }
 
 func validApprovalBody() string {
-	return `{"org_version":12,"org_unit_id":"team","resource_type":"workflow","resource_id":"workflow-1","action":"workflow.update","changed_fields":["title"],"impacted_org_unit_ids":["team"],"impacted_user_count":1,"published_behavior_change":false,"external_side_effect":false,"requested_risk":"low"}`
+	return `{"org_version":12,"org_unit_id":"team","resource_type":"knowledge","resource_id":"article-1","action":"knowledge.publish_low_risk","changed_fields":["title"],"impacted_org_unit_ids":["team"],"impacted_user_count":1,"published_behavior_change":false,"external_side_effect":false,"requested_risk":"low","facts_issued_at":"2026-07-11T00:00:00Z","facts_expires_at":"2026-07-11T00:05:00Z","facts_nonce":"nonce-123456789012"}`
+}
+
+type trustingFactsVerifier struct{}
+
+func (trustingFactsVerifier) VerifyChangeFacts(_ context.Context, input ChangeFactsVerificationInput) (approval.VerifiedChangeFacts, error) {
+	return approval.NewVerifiedChangeFacts(approval.VerifiedChangeFactsInput{ChangedFields: input.ChangedFields, ImpactedOrgUnitIDs: input.ImpactedOrgUnitIDs, ImpactedUserCount: input.ImpactedUserCount, PublishedBehaviorChange: input.PublishedBehaviorChange, ExternalSideEffect: input.ExternalSideEffect, Digest: strings.Repeat("a", 64)}), nil
+}
+
+func addApprovalHeaders(req *http.Request) {
+	req.Header.Set("Idempotency-Key", "idem-1234567890123456")
+	req.Header.Set("X-Approval-Facts-Attestation", "test-attestation")
 }

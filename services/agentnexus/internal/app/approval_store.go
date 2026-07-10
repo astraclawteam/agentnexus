@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"sort"
 	"sync"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
@@ -24,78 +23,129 @@ const (
 )
 
 type ApprovalQueueEvidence struct {
-	ID             string
-	EnterpriseID   string
-	RequesterID    string
-	OrgVersion     int64
-	OrgUnitID      string
-	ResourceType   string
-	ResourceID     string
-	Action         string
-	RiskLevel      approval.RiskLevel
-	RiskReasons    []approval.RiskReason
-	RouteMode      approval.RouteMode
-	ReviewerUserID string
-	OrgPath        []string
-	Queue          string
-	InputHash      string
-	OutputHash     string
+	ID              string
+	EnterpriseID    string
+	RequesterID     string
+	OrgVersion      int64
+	OrgUnitID       string
+	ResourceType    string
+	ResourceID      string
+	Action          string
+	RiskLevel       approval.RiskLevel
+	RiskReasons     []approval.RiskReason
+	RouteMode       approval.RouteMode
+	ReviewerUserID  string
+	OrgPath         []string
+	Queue           string
+	InputHash       string
+	OutputHash      string
+	PolicyVersion   int64
+	IdempotencyHash string
 }
 
 type ApprovalRouteStore interface {
-	Record(context.Context, approval.Request, approval.Route) error
+	LookupResolution(context.Context, string, string, string) (approval.Route, bool, error)
+	RecordResolution(context.Context, approval.Request, approval.Route) (approval.Route, error)
+}
+
+var (
+	ErrApprovalIdempotencyConflict = errors.New("approval idempotency conflict")
+	ErrApprovalStale               = errors.New("approval resolution stale")
+)
+
+type memoryApprovalVersion struct{ orgVersion, policyVersion int64 }
+type memoryApprovalResolution struct {
+	requestHash string
+	route       approval.Route
 }
 
 type MemoryApprovalStore struct {
-	mu     sync.Mutex
-	random io.Reader
-	fail   func(ApprovalRecordStage) error
-	queues []ApprovalQueueEvidence
-	events []audit.Event
+	mu          sync.Mutex
+	random      io.Reader
+	fail        func(ApprovalRecordStage) error
+	queues      []ApprovalQueueEvidence
+	events      []audit.Event
+	versions    map[string]memoryApprovalVersion
+	resolutions map[string]memoryApprovalResolution
 }
 
 func NewMemoryApprovalStore(randomSource io.Reader, fail func(ApprovalRecordStage) error) *MemoryApprovalStore {
 	if randomSource == nil {
 		randomSource = rand.Reader
 	}
-	return &MemoryApprovalStore{random: randomSource, fail: fail, queues: []ApprovalQueueEvidence{}, events: []audit.Event{}}
+	return &MemoryApprovalStore{random: randomSource, fail: fail, queues: []ApprovalQueueEvidence{}, events: []audit.Event{}, versions: map[string]memoryApprovalVersion{}, resolutions: map[string]memoryApprovalResolution{}}
+}
+
+func (s *MemoryApprovalStore) SetCurrentVersions(enterpriseID string, orgVersion, policyVersion int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.versions[enterpriseID] = memoryApprovalVersion{orgVersion: orgVersion, policyVersion: policyVersion}
+}
+
+func (s *MemoryApprovalStore) LookupResolution(_ context.Context, enterpriseID, idempotencyHash, requestHash string) (approval.Route, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.resolutions[enterpriseID+"\x00"+idempotencyHash]
+	if !ok {
+		return approval.Route{}, false, nil
+	}
+	if existing.requestHash != requestHash {
+		return approval.Route{}, false, ErrApprovalIdempotencyConflict
+	}
+	return existing.route, true, nil
 }
 
 func (s *MemoryApprovalStore) Record(ctx context.Context, req approval.Request, route approval.Route) error {
+	_, err := s.RecordResolution(ctx, req, route)
+	return err
+}
+
+func (s *MemoryApprovalStore) RecordResolution(ctx context.Context, req approval.Request, route approval.Route) (approval.Route, error) {
 	if s == nil || s.random == nil || ctx.Err() != nil || !validRecordedRoute(req, route) {
-		return errors.New("approval record unavailable")
+		return approval.Route{}, errors.New("approval record unavailable")
 	}
 	inputHash, outputHash, err := approvalEvidenceHashes(req, route)
 	if err != nil {
-		return err
+		return approval.Route{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return err
+		return approval.Route{}, err
+	}
+	key := req.EnterpriseID + "\x00" + req.IdempotencyHash
+	if existing, ok := s.resolutions[key]; ok {
+		if existing.requestHash != req.ReplayHash {
+			return approval.Route{}, ErrApprovalIdempotencyConflict
+		}
+		return existing.route, nil
+	}
+	current, ok := s.versions[req.EnterpriseID]
+	if !ok || current.orgVersion != req.OrgVersion || current.policyVersion != req.PolicyVersion {
+		return approval.Route{}, ErrApprovalStale
 	}
 
 	var queued *ApprovalQueueEvidence
 	if route.Mode != approval.ModeSingleConfirmation {
 		if s.fail != nil {
 			if err := s.fail(ApprovalStageQueue); err != nil {
-				return err
+				return approval.Route{}, err
 			}
 		}
 		id, err := randomApprovalID(s.random, "approval_")
 		if err != nil {
-			return err
+			return approval.Route{}, err
 		}
-		queued = &ApprovalQueueEvidence{ID: id, EnterpriseID: req.EnterpriseID, RequesterID: req.RequesterUserID, OrgVersion: req.OrgVersion, OrgUnitID: req.OrgUnitID, ResourceType: req.ResourceType, ResourceID: req.ResourceID, Action: req.Action, RiskLevel: route.RiskLevel, RiskReasons: append([]approval.RiskReason{}, route.RiskReasons...), RouteMode: route.Mode, ReviewerUserID: route.ReviewerUserID, OrgPath: append([]string{}, route.OrgPath...), Queue: route.Queue, InputHash: inputHash, OutputHash: outputHash}
+		queued = &ApprovalQueueEvidence{ID: id, EnterpriseID: req.EnterpriseID, RequesterID: req.RequesterUserID, OrgVersion: req.OrgVersion, OrgUnitID: req.OrgUnitID, ResourceType: req.ResourceType, ResourceID: req.ResourceID, Action: req.Action, RiskLevel: route.RiskLevel, RiskReasons: append([]approval.RiskReason{}, route.RiskReasons...), RouteMode: route.Mode, ReviewerUserID: route.ReviewerUserID, OrgPath: append([]string{}, route.OrgPath...), Queue: route.Queue, InputHash: inputHash, OutputHash: outputHash, PolicyVersion: req.PolicyVersion, IdempotencyHash: req.IdempotencyHash}
 	}
 	if s.fail != nil {
 		if err := s.fail(ApprovalStageAudit); err != nil {
-			return err
+			return approval.Route{}, err
 		}
 	}
 	auditID, err := randomApprovalID(s.random, "approvalaudit_")
 	if err != nil {
-		return err
+		return approval.Route{}, err
 	}
 	previous := ""
 	if len(s.events) > 0 {
@@ -110,7 +160,8 @@ func (s *MemoryApprovalStore) Record(ctx context.Context, req approval.Request, 
 		s.queues = append(s.queues, *queued)
 	}
 	s.events = append(s.events, event)
-	return nil
+	s.resolutions[key] = memoryApprovalResolution{requestHash: req.ReplayHash, route: route}
+	return route, nil
 }
 
 func (s *MemoryApprovalStore) Snapshot() ([]ApprovalQueueEvidence, []audit.Event) {
@@ -125,25 +176,19 @@ func (s *MemoryApprovalStore) Snapshot() ([]ApprovalQueueEvidence, []audit.Event
 }
 
 func approvalEvidenceHashes(req approval.Request, route approval.Route) (string, string, error) {
-	changed := append([]string{}, req.Risk.ChangedFields...)
-	impacted := append([]string{}, req.Risk.ImpactedOrgUnitIDs...)
-	sort.Strings(changed)
-	sort.Strings(impacted)
 	input := struct {
-		EnterpriseID            string             `json:"enterprise_id"`
-		RequesterUserID         string             `json:"requester_user_id"`
-		OrgVersion              int64              `json:"org_version"`
-		OrgUnitID               string             `json:"org_unit_id"`
-		ResourceType            string             `json:"resource_type"`
-		ResourceID              string             `json:"resource_id"`
-		Action                  string             `json:"action"`
-		ChangedFields           []string           `json:"changed_fields"`
-		ImpactedOrgUnitIDs      []string           `json:"impacted_org_unit_ids"`
-		ImpactedUserCount       int                `json:"impacted_user_count"`
-		PublishedBehaviorChange bool               `json:"published_behavior_change"`
-		ExternalSideEffect      bool               `json:"external_side_effect"`
-		RequestedRisk           approval.RiskLevel `json:"requested_risk,omitempty"`
-	}{req.EnterpriseID, req.RequesterUserID, req.OrgVersion, req.OrgUnitID, req.ResourceType, req.ResourceID, req.Action, changed, impacted, req.Risk.ImpactedUserCount, req.Risk.PublishedBehaviorChange, req.Risk.ExternalSideEffect, req.Risk.RequestedRisk}
+		EnterpriseID       string             `json:"enterprise_id"`
+		RequesterUserID    string             `json:"requester_user_id"`
+		OrgVersion         int64              `json:"org_version"`
+		OrgUnitID          string             `json:"org_unit_id"`
+		ResourceType       string             `json:"resource_type"`
+		ResourceID         string             `json:"resource_id"`
+		Action             string             `json:"action"`
+		FactsDigest        string             `json:"facts_digest"`
+		RequestedRisk      approval.RiskLevel `json:"requested_risk,omitempty"`
+		PolicyVersion      int64              `json:"policy_version"`
+		IdempotencyKeyHash string             `json:"idempotency_key_hash"`
+	}{req.EnterpriseID, req.RequesterUserID, req.OrgVersion, req.OrgUnitID, req.ResourceType, req.ResourceID, req.Action, req.Facts.Digest(), req.RequestedRisk, req.PolicyVersion, req.IdempotencyHash}
 	inputBytes, err := json.Marshal(input)
 	if err != nil {
 		return "", "", err
@@ -169,14 +214,36 @@ func randomApprovalID(source io.Reader, prefix string) (string, error) {
 }
 
 func validRecordedRoute(req approval.Request, route approval.Route) bool {
-	if req.EnterpriseID == "" || req.RequesterUserID == "" || req.OrgVersion < 1 || route.RequesterUserID != req.RequesterUserID || route.AutoPublish || route.RiskReasons == nil || route.OrgPath == nil || len(route.OrgPath) == 0 || route.ReviewerUserID == req.RequesterUserID {
+	if req.EnterpriseID == "" || req.RequesterUserID == "" || req.OrgVersion < 1 || len(req.IdempotencyHash) != 64 || len(req.ReplayHash) != 64 || route.PolicyVersion != req.PolicyVersion || route.RequesterUserID != req.RequesterUserID || route.AutoPublish || len(route.RiskReasons) == 0 || route.OrgPath == nil || len(route.OrgPath) == 0 || route.ReviewerUserID == req.RequesterUserID {
 		return false
+	}
+	allowedReasons := map[approval.RiskReason]bool{
+		approval.RiskReasonPublishedBehaviorChange: true, approval.RiskReasonPermissionApprovalChange: true,
+		approval.RiskReasonEvidenceRequirementChange: true, approval.RiskReasonExecutionDeadlineChange: true,
+		approval.RiskReasonExternalSideEffect: true, approval.RiskReasonEnterpriseMinimumRisk: true,
+		approval.RiskReasonImpactedOrgScope: true, approval.RiskReasonImpactedUserScope: true,
+		approval.RiskReasonRequestedRiskOverride: true, approval.RiskReasonUnverifiedChangeFacts: true,
+		approval.RiskReasonUnknownChangedField: true, approval.RiskReasonUnknownAction: true,
+		approval.RiskReasonActionBaseline: true, approval.RiskReasonExplicitReviewRequired: true,
+		approval.RiskReasonExplicitConfirmation: true,
+	}
+	for i, reason := range route.RiskReasons {
+		if !allowedReasons[reason] || (i > 0 && route.RiskReasons[i-1] >= reason) {
+			return false
+		}
+	}
+	seenUnits := map[string]bool{}
+	for i, unitID := range route.OrgPath {
+		if !canonicalAuthorizationValue(unitID) || seenUnits[unitID] || (i == 0 && unitID != req.OrgUnitID) {
+			return false
+		}
+		seenUnits[unitID] = true
 	}
 	switch route.Mode {
 	case approval.ModeSingleConfirmation:
 		return route.RiskLevel == approval.RiskLow && route.ReviewerUserID == "" && route.Queue == ""
 	case approval.ModeUpwardReview:
-		return route.ReviewerUserID != "" && route.Queue == ""
+		return route.ReviewerUserID != "" && canonicalAuthorizationValue(route.ReviewerDisplayName) && route.Queue == ""
 	case approval.ModeEnterpriseKnowledgeAdminQueue:
 		return route.ReviewerUserID == "" && route.Queue == approval.EnterpriseKnowledgeAdminQueue
 	default:

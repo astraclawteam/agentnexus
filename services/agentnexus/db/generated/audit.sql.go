@@ -12,7 +12,7 @@ import (
 )
 
 const acquireEnterpriseAuditLock = `-- name: AcquireEnterpriseAuditLock :one
-SELECT pg_advisory_xact_lock(hashtextextended($1, 0))
+SELECT pg_advisory_xact_lock(hashtextextended($1, 1))
 `
 
 func (q *Queries) AcquireEnterpriseAuditLock(ctx context.Context, hashtextextended string) (interface{}, error) {

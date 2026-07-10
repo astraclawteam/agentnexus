@@ -103,8 +103,8 @@ func TestBuildRouterWiresPostgresApprovalSourceAndAtomicStore(t *testing.T) {
 		t.Fatalf("nil Postgres approval source err=%v", err)
 	}
 	req := approval.Request{EnterpriseID: "enterprise-1", RequesterUserID: "user-1", OrgVersion: 1, OrgUnitID: "unit-1", ResourceType: "workflow", ResourceID: "workflow-1", Action: "workflow.update"}
-	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{}, RequesterUserID: "user-1", OrgPath: []string{"unit-1"}}
-	if err := store.Record(context.Background(), req, route); err == nil {
+	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: "user-1", OrgPath: []string{"unit-1"}}
+	if _, err := store.RecordResolution(context.Background(), req, route); err == nil {
 		t.Fatal("nil Postgres approval store did not fail closed")
 	}
 }

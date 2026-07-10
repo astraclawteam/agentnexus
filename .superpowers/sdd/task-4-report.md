@@ -6,6 +6,55 @@ Implemented deterministic low/medium/high risk classification, immutable sealed-
 
 The implementation remains inside Task 4. No Task 5 behavior was added.
 
+## Post-review hardening wave
+
+The first Task 4 commit (`c5e6c35`) was rejected in dual review because browser-supplied change facts were trusted, permission checks could multiply full-graph evaluation by reviewer count, policy/org state could advance between resolution and persistence, and POST resolution lacked durable idempotency. The remediation replaces those trust boundaries rather than patching individual symptoms.
+
+### Verified facts and closed actions RED/GREEN
+
+- RED: new `ClassifyVerifiedRisk` tests failed to compile because verified/unverified facts and closed action baselines did not exist.
+- GREEN: risk classification now accepts only `VerifiedChangeFacts`; the production-exported raw `RiskInput/ClassifyRisk` path was removed. Unknown fields/actions and unverified attestations deterministically force high with canonical reasons.
+- RED: HMAC tests failed to compile without attestation APIs.
+- GREEN: canonical HMAC-SHA256 binds enterprise, actor, org version/unit, exact resource/action, all explicit facts, issued/expiry/nonce, and the hashed Idempotency-Key. Tests mutate actor, enterprise, resource, idempotency hash, and one fact; test expiry, >5-minute lifetime, short/missing secret, and reject verifier behavior.
+- RED: secret-file loader tests failed before loader implementation.
+- GREEN: `AGENTNEXUS_APPROVAL_FACTS_SECRET_FILE` loads a trimmed >=32-byte deployment secret; absent config injects a safe Reject verifier, while unreadable/short configured secrets fail startup.
+- Task 3 vocabulary now includes exact `workflow.publish_low_risk` and `workflow.approve_high_risk` mappings. Unknown/mismatched resource/action cannot produce low.
+
+### Linear permission index RED/GREEN
+
+- Replaced per-candidate `AgentAtlasEvaluator` calls with one immutable snapshot index over only `manager`, `publish_low_risk`, and `approve_high_risk` memberships.
+- Parent permission scope covers child target with Task 3 semantics; manager remains only candidate identity and grants no implicit permission.
+- A 1,000-manager structural counter test first failed without observation support, then proved exactly one membership pass and at most one selected candidate check. Complexity is O(V+M), bounded by 10k units, 100k memberships/users, and depth 256.
+
+### Enterprise policy and stale-state RED/GREEN
+
+- RED: migration/query contracts failed without enterprise policy schema and queries.
+- GREEN: `enterprise_approval_policies` has strict risk/threshold/version checks and monotonic update trigger. Version history provides composite FK evidence; no row maps to safe defaults with explicit policy version 0. Database errors fail closed.
+- The PostgreSQL source loads policy, units, relevant memberships, and users in the same read-only repeatable-read snapshot. Handler uses this loaded policy; production no longer injects `DefaultPolicy`.
+- Write path uses ReadCommitted and lock order: org publication lock (publisher seed) → idempotency lookup → latest sealed org/policy revalidation → audit lock (separate seed) → latest hash → resolution reservation → optional queue → audit → commit.
+- Memory and PostgreSQL tests cover org/policy advancement, direct-low revalidation, queue/audit/commit/random failure rollback, and replay exception for already committed results.
+
+### Idempotency RED/GREEN
+
+- RED: memory tests failed before `RecordResolution`, version state, replay, and conflict APIs existed.
+- GREEN: the endpoint requires one canonical `Idempotency-Key` and stores only SHA-256. Durable `approval_resolution_idempotency` records the normalized route, request hash, policy/org versions, queue/audit IDs, and evidence.
+- Same key/request replays without new queue/audit; same key/different request returns 409; 20 concurrent same-key memory requests commit once.
+- A second RED exposed that handler verified expired facts and loaded a possibly unavailable/newer snapshot before replay. Handler now computes an actor-bound canonical raw request/attestation replay hash and performs `LookupResolution` first. Tests prove expired facts, advanced org state, failing verifier, and unavailable source still replay an already committed route without recording again; conflict still returns 409.
+
+### Database evidence hardening
+
+- Queue rows reject `single_confirmation`; only upward review/admin queue shapes are accepted. Status is closed to pending/approved/rejected/cancelled.
+- Policy/version refs, requester/reviewer, target/reviewer snapshot units, reviewer display/manager evidence, and idempotency hashes are constrained. Self-review remains prohibited.
+- PL/pgSQL validation rejects null/object/non-string reasons/path items, empty arrays, unknown/duplicate/unsorted reasons, duplicate/non-adjacent paths, wrong first unit, stale/unsealed/non-latest versions, stale policy, invalid reviewer evidence, and high risk without a raise reason.
+- Resolution→queue/audit foreign keys are deferred so resolution reservation, optional queue, and audit can be inserted in one transaction and validated at commit.
+- SQL contract tests include structural negative checks (including proving the queue route enum segment cannot contain `single_confirmation`). sqlc parsing/generation is the non-live migration syntax gate; live PostgreSQL remains Task 6 when no DSN is available.
+
+### Endpoint and OpenAPI hardening
+
+- Every facts field is required even when false, zero, or empty. Duplicate/null/trailing/unknown/noncanonical data remains rejected.
+- Idempotency and attestation headers are single-valued, bounded, and canonical. Requester still comes only from session/CaseTicket actor.
+- OpenAPI documents required headers, all required facts/attestation timing fields, policy version, and that AgentAtlas BFF signs server-side while UI users never receive the secret.
+
 ## TDD RED/GREEN Evidence
 
 ### Risk classification

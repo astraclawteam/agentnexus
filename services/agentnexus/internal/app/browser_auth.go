@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 )
@@ -106,7 +105,7 @@ type BrowserAuthDependencies struct {
 	TicketActors            TicketActorAuthenticator
 	ApprovalSource          ApprovalSnapshotSource
 	ApprovalStore           ApprovalRouteStore
-	ApprovalPolicy          approval.Policy
+	ApprovalFactsVerifier   ChangeFactsVerifier
 }
 
 type browserAuthHandler struct {
@@ -136,7 +135,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 		if deps.ApprovalSource == nil || deps.ApprovalStore == nil {
 			return nil, errors.New("approval dependencies incomplete")
 		}
-		approvalRoutes, err = newApprovalHandler(approvalDependencies{EnterpriseID: deps.Config.EnterpriseID, Sessions: deps.Sessions, TicketActors: deps.TicketActors, Source: deps.ApprovalSource, Store: deps.ApprovalStore, Policy: deps.ApprovalPolicy})
+		approvalRoutes, err = newApprovalHandler(approvalDependencies{EnterpriseID: deps.Config.EnterpriseID, Sessions: deps.Sessions, TicketActors: deps.TicketActors, Source: deps.ApprovalSource, Store: deps.ApprovalStore, FactsVerifier: deps.ApprovalFactsVerifier})
 		if err != nil {
 			return nil, err
 		}

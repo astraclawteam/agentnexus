@@ -33,7 +33,7 @@ WHERE enterprise_id = $1 AND case_ticket_id = $2
 ORDER BY created_at ASC;
 
 -- name: AcquireEnterpriseAuditLock :one
-SELECT pg_advisory_xact_lock(hashtextextended($1, 0));
+SELECT pg_advisory_xact_lock(hashtextextended($1, 1));
 
 -- name: GetLatestEnterpriseAuditHash :one
 SELECT COALESCE((

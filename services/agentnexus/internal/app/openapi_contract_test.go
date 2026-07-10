@@ -26,6 +26,10 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 	if approvalPath["operationId"] != "resolveApprovalRoute" {
 		t.Fatalf("approval operationId=%v", approvalPath["operationId"])
 	}
+	parameters, ok := approvalPath["parameters"].([]any)
+	if !ok || len(parameters) != 2 {
+		t.Fatalf("approval parameters=%v", approvalPath["parameters"])
+	}
 
 	t.Run("BrowserSession", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "BrowserSession")
@@ -63,7 +67,7 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 	t.Run("ApprovalRoute", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "ApprovalRoute")
 		assertObjectProperties(t, schema, []string{
-			"mode", "risk_level", "risk_reasons", "requester_user_id", "org_path", "auto_publish",
+			"mode", "risk_level", "risk_reasons", "requester_user_id", "org_path", "auto_publish", "policy_version",
 		}, []string{"reviewer_user_id", "reviewer_display_name", "queue"})
 		assertEnum(t, property(t, schema, "mode"), []any{
 			"single_confirmation", "upward_review", "enterprise_knowledge_admin_queue",
@@ -82,7 +86,7 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 
 	t.Run("ApprovalResolveRequest", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "ApprovalResolveRequest")
-		assertObjectProperties(t, schema, []string{"org_version", "org_unit_id", "resource_type", "resource_id", "action"}, []string{"changed_fields", "impacted_org_unit_ids", "impacted_user_count", "published_behavior_change", "external_side_effect", "requested_risk"})
+		assertObjectProperties(t, schema, []string{"org_version", "org_unit_id", "resource_type", "resource_id", "action", "changed_fields", "impacted_org_unit_ids", "impacted_user_count", "published_behavior_change", "external_side_effect", "requested_risk", "facts_issued_at", "facts_expires_at", "facts_nonce"}, nil)
 		if _, exists := nestedMap(t, schema, "properties")["requester_user_id"]; exists {
 			t.Fatal("request body must not contain requester_user_id")
 		}

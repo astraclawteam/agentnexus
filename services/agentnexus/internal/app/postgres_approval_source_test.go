@@ -16,6 +16,8 @@ type fakeApprovalSnapshotTx struct {
 	units       []db.OrgPolicySnapshotUnit
 	memberships []db.OrgPolicySnapshotMembership
 	users       []db.ListApprovalUsersRow
+	policy      db.EnterpriseApprovalPolicy
+	policyErr   error
 	err         error
 	committed   bool
 	rolledBack  bool
@@ -23,6 +25,9 @@ type fakeApprovalSnapshotTx struct {
 
 func (t *fakeApprovalSnapshotTx) GetLatestApprovalOrgVersion(context.Context, string) (int64, error) {
 	return t.version, t.err
+}
+func (t *fakeApprovalSnapshotTx) GetEnterpriseApprovalPolicy(context.Context, string) (db.EnterpriseApprovalPolicy, error) {
+	return t.policy, t.policyErr
 }
 func (t *fakeApprovalSnapshotTx) ListApprovalOrgUnits(context.Context, db.ListApprovalOrgUnitsParams) ([]db.OrgPolicySnapshotUnit, error) {
 	return t.units, t.err
@@ -56,8 +61,8 @@ func TestPostgresApprovalSourceLoadsExactSealedRepeatableReadSnapshot(t *testing
 	if pool.options.IsoLevel != pgx.RepeatableRead || pool.options.AccessMode != pgx.ReadOnly || !tx.committed {
 		t.Fatalf("options=%+v committed=%v", pool.options, tx.committed)
 	}
-	req := approval.Request{EnterpriseID: "enterprise-1", RequesterUserID: "requester", OrgVersion: 7, OrgUnitID: "team", ResourceType: "workflow", ResourceID: "workflow-1", Action: "workflow.update", Risk: approval.RiskInput{ExternalSideEffect: true}}
-	route, err := approval.NewResolver(loaded.Permissions, approval.DefaultPolicy()).Resolve(context.Background(), req, loaded.Snapshot)
+	req := approval.Request{EnterpriseID: "enterprise-1", RequesterUserID: "requester", OrgVersion: 7, OrgUnitID: "team", ResourceType: "knowledge", ResourceID: "article-1", Action: "knowledge.publish_low_risk", Facts: approval.NewVerifiedChangeFacts(approval.VerifiedChangeFactsInput{ExternalSideEffect: true}), PolicyVersion: 1}
+	route, err := approval.NewIndexedResolver(loaded.Policy).Resolve(context.Background(), req, loaded.Snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,13 +78,27 @@ func TestPostgresApprovalSourceDoesNotGiveManagerImplicitPermission(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := approval.Request{EnterpriseID: "enterprise-1", RequesterUserID: "requester", OrgVersion: 7, OrgUnitID: "team", ResourceType: "workflow", ResourceID: "workflow-1", Action: "workflow.update", Risk: approval.RiskInput{ExternalSideEffect: true}}
-	route, err := approval.NewResolver(loaded.Permissions, approval.DefaultPolicy()).Resolve(context.Background(), req, loaded.Snapshot)
+	req := approval.Request{EnterpriseID: "enterprise-1", RequesterUserID: "requester", OrgVersion: 7, OrgUnitID: "team", ResourceType: "knowledge", ResourceID: "article-1", Action: "knowledge.publish_low_risk", Facts: approval.NewVerifiedChangeFacts(approval.VerifiedChangeFactsInput{ExternalSideEffect: true}), PolicyVersion: 1}
+	route, err := approval.NewIndexedResolver(loaded.Policy).Resolve(context.Background(), req, loaded.Snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if route.Mode != approval.ModeEnterpriseKnowledgeAdminQueue {
 		t.Fatalf("route=%+v", route)
+	}
+}
+
+func TestPostgresApprovalSourceLoadsEnterprisePolicyOrSafeVersionZeroDefault(t *testing.T) {
+	defaultLoaded, err := newPostgresApprovalSourceWithPool(&fakeApprovalSnapshotPool{tx: validApprovalSnapshotTx()}).LoadApprovalSnapshot(context.Background(), "enterprise-1", 7, "requester")
+	if err != nil || defaultLoaded.PolicyVersion != 0 || defaultLoaded.Policy != approval.DefaultPolicy() {
+		t.Fatalf("default=%+v err=%v", defaultLoaded, err)
+	}
+	tx := validApprovalSnapshotTx()
+	tx.policyErr = nil
+	tx.policy = db.EnterpriseApprovalPolicy{EnterpriseID: "enterprise-1", MinimumRisk: "high", MaxLowImpactedUsers: 2, MaxLowImpactedOrgUnits: 1, PolicyVersion: 9}
+	loaded, err := newPostgresApprovalSourceWithPool(&fakeApprovalSnapshotPool{tx: tx}).LoadApprovalSnapshot(context.Background(), "enterprise-1", 7, "requester")
+	if err != nil || loaded.PolicyVersion != 9 || loaded.Policy.MinimumRisk != approval.RiskHigh || loaded.Policy.MaxLowImpactedUsers != 2 {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
 	}
 }
 
@@ -120,7 +139,8 @@ func TestPostgresApprovalSourceFailsClosedForStaleCrossTenantLimitsAndCancellati
 
 func validApprovalSnapshotTx() *fakeApprovalSnapshotTx {
 	return &fakeApprovalSnapshotTx{
-		version: 7,
+		version:   7,
+		policyErr: pgx.ErrNoRows,
 		units: []db.OrgPolicySnapshotUnit{
 			{EnterpriseID: "enterprise-1", VersionNumber: 7, OrgUnitID: "root"},
 			{EnterpriseID: "enterprise-1", VersionNumber: 7, OrgUnitID: "team", ParentID: pgtype.Text{String: "root", Valid: true}},

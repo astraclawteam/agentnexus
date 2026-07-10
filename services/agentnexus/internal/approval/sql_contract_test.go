@@ -35,11 +35,29 @@ func TestApprovalMigrationBindsImmutableRouteEvidence(t *testing.T) {
 		"enterprise_knowledge_admin_queue",
 		"enterprise_knowledge_admin",
 		"drop column if exists org_version",
+		"create table enterprise_approval_policies",
+		"policy_version bigint not null",
+		"minimum_risk text not null",
+		"max_low_impacted_users integer not null",
+		"max_low_impacted_org_units integer not null",
+		"new.policy_version <= old.policy_version",
+		"create table approval_resolution_idempotency",
+		"jsonb_array_elements(new.risk_reasons)",
+		"count(distinct value)",
+		"new.org_path->>0 <> new.org_unit_id",
+		"non-adjacent organization path",
+		"invalid reviewer evidence",
+		"validate_approval_resolution_route_evidence",
 	}
 	for _, value := range required {
 		if !strings.Contains(sql, value) {
 			t.Errorf("migration missing %q", value)
 		}
+	}
+	queueModeStart := strings.Index(sql, "add column route_mode text not null check")
+	queueModeEnd := strings.Index(sql[queueModeStart:], "add column org_path")
+	if queueModeStart < 0 || queueModeEnd < 0 || strings.Contains(sql[queueModeStart:queueModeStart+queueModeEnd], "single_confirmation") {
+		t.Fatal("queue route_mode must reject single_confirmation")
 	}
 }
 
@@ -49,7 +67,7 @@ func TestApprovalQueriesAreVersionTenantAndLimitScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	sql := strings.ToLower(string(raw))
-	for _, value := range []string{"getlatestapprovalorgversion", "listapprovalorgunits", "listapprovalmemberships", "listapprovalusers", "insertapprovalqueueitem", "enterprise_id = $1", "version_number = $2", "limit 10001", "limit 100001"} {
+	for _, value := range []string{"getlatestapprovalorgversion", "getenterpriseapprovalpolicy", "getcurrentapprovalpolicyversion", "listapprovalorgunits", "listapprovalmemberships", "listapprovalusers", "insertapprovalqueueitem", "enterprise_id = $1", "version_number = $2", "limit 10001", "limit 100001"} {
 		if !strings.Contains(sql, value) {
 			t.Errorf("queries missing %q", value)
 		}

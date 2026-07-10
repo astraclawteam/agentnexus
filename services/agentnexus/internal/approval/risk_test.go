@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+type RiskInput = riskFactsInput
+
+func ClassifyRisk(input RiskInput, policy Policy) (RiskAssessment, error) {
+	return classifyRiskFacts(input, policy)
+}
+
 func TestClassifyRiskForcesHighForGovernedChanges(t *testing.T) {
 	tests := []struct {
 		name   string

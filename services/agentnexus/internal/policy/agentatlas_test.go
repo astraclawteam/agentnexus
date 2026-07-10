@@ -26,6 +26,8 @@ func TestAgentAtlasVocabulary(t *testing.T) {
 		{name: "approve high risk", resourceType: ResourceKnowledge, action: ActionKnowledgeApproveHighRisk, permission: PermissionApproveHighRisk, risk: AtlasRiskHigh},
 		{name: "workflow edit", resourceType: ResourceWorkflow, action: ActionWorkflowEdit, permission: PermissionWorkflowEdit, risk: AtlasRiskMedium},
 		{name: "workflow advanced", resourceType: ResourceWorkflow, action: ActionWorkflowEditAdvanced, permission: PermissionWorkflowAdvanced, risk: AtlasRiskHigh},
+		{name: "workflow publish", resourceType: ResourceWorkflow, action: ActionWorkflowPublishLowRisk, permission: PermissionPublishLowRisk, risk: AtlasRiskLow},
+		{name: "workflow approve", resourceType: ResourceWorkflow, action: ActionWorkflowApproveHighRisk, permission: PermissionApproveHighRisk, risk: AtlasRiskHigh},
 		{name: "service mode", resourceType: ResourceService, action: ActionServiceMode, permission: PermissionServiceMode, risk: AtlasRiskHigh},
 	}
 

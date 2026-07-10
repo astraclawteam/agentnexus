@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -12,13 +15,14 @@ import (
 )
 
 func TestMemoryApprovalStoreCreatesQueueOnlyForReviewRoutesAndAlwaysAudits(t *testing.T) {
-	store := NewMemoryApprovalStore(bytes.NewReader(make([]byte, 4096)), nil)
+	store := newMemoryApprovalTestStore(nil)
 	req := storeRequest()
-	direct := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{}, RequesterUserID: req.RequesterUserID, OrgPath: []string{req.OrgUnitID}}
+	direct := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, OrgPath: []string{req.OrgUnitID}, PolicyVersion: req.PolicyVersion}
 	if err := store.Record(context.Background(), req, direct); err != nil {
 		t.Fatal(err)
 	}
-	review := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", OrgPath: []string{"team", "root"}}
+	review := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", OrgPath: []string{"team", "root"}, PolicyVersion: req.PolicyVersion}
+	req.IdempotencyHash = strings.Repeat("f", 64)
 	if err := store.Record(context.Background(), req, review); err != nil {
 		t.Fatal(err)
 	}
@@ -34,14 +38,14 @@ func TestMemoryApprovalStoreCreatesQueueOnlyForReviewRoutesAndAlwaysAudits(t *te
 func TestMemoryApprovalStoreRollsBackQueueAndAuditFailures(t *testing.T) {
 	for _, stage := range []ApprovalRecordStage{ApprovalStageQueue, ApprovalStageAudit} {
 		t.Run(string(stage), func(t *testing.T) {
-			store := NewMemoryApprovalStore(bytes.NewReader(make([]byte, 4096)), func(got ApprovalRecordStage) error {
+			store := newMemoryApprovalTestStore(func(got ApprovalRecordStage) error {
 				if got == stage {
 					return errors.New("injected")
 				}
 				return nil
 			})
 			req := storeRequest()
-			route := approval.Route{Mode: approval.ModeEnterpriseKnowledgeAdminQueue, RiskLevel: approval.RiskMedium, RiskReasons: []approval.RiskReason{approval.RiskReasonImpactedUserScope}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team", "root"}, Queue: approval.EnterpriseKnowledgeAdminQueue}
+			route := approval.Route{Mode: approval.ModeEnterpriseKnowledgeAdminQueue, RiskLevel: approval.RiskMedium, RiskReasons: []approval.RiskReason{approval.RiskReasonImpactedUserScope}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team", "root"}, Queue: approval.EnterpriseKnowledgeAdminQueue, PolicyVersion: req.PolicyVersion}
 			if err := store.Record(context.Background(), req, route); err == nil {
 				t.Fatal("expected failure")
 			}
@@ -54,17 +58,19 @@ func TestMemoryApprovalStoreRollsBackQueueAndAuditFailures(t *testing.T) {
 }
 
 func TestMemoryApprovalStoreSerializesConcurrentAuditChain(t *testing.T) {
-	store := NewMemoryApprovalStore(bytes.NewReader(make([]byte, 16384)), nil)
+	store := newMemoryApprovalTestStore(nil)
 	req := storeRequest()
-	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team"}}
+	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
 	var wg sync.WaitGroup
 	errs := make(chan error, 20)
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			errs <- store.Record(context.Background(), req, route)
-		}()
+			request := req
+			request.IdempotencyHash = fmt.Sprintf("%064x", i+1)
+			errs <- store.Record(context.Background(), request, route)
+		}(i)
 	}
 	wg.Wait()
 	close(errs)
@@ -82,6 +88,95 @@ func TestMemoryApprovalStoreSerializesConcurrentAuditChain(t *testing.T) {
 	}
 }
 
+func TestMemoryApprovalStoreIdempotentReplayConflictAndStaleRevalidation(t *testing.T) {
+	store := newMemoryApprovalTestStore(nil)
+	req := storeRequest()
+	route := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+	first, err := store.RecordResolution(context.Background(), req, route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetCurrentVersions(req.EnterpriseID, req.OrgVersion+1, req.PolicyVersion+1)
+	replayed, err := store.RecordResolution(context.Background(), req, route)
+	if err != nil || !reflect.DeepEqual(first, replayed) {
+		t.Fatalf("replay=%+v err=%v", replayed, err)
+	}
+	queues, events := store.Snapshot()
+	if len(queues) != 1 || len(events) != 1 {
+		t.Fatalf("queues=%d events=%d", len(queues), len(events))
+	}
+	conflict := req
+	conflict.ResourceID = "other"
+	conflict.ReplayHash = strings.Repeat("f", 64)
+	if _, err := store.RecordResolution(context.Background(), conflict, route); !errors.Is(err, ErrApprovalIdempotencyConflict) {
+		t.Fatalf("conflict err=%v", err)
+	}
+	stale := req
+	stale.IdempotencyHash = strings.Repeat("e", 64)
+	if _, err := store.RecordResolution(context.Background(), stale, route); !errors.Is(err, ErrApprovalStale) {
+		t.Fatalf("stale err=%v", err)
+	}
+}
+
+func TestMemoryApprovalStoreConcurrentSameKeyCommitsOnce(t *testing.T) {
+	store := newMemoryApprovalTestStore(nil)
+	req := storeRequest()
+	route := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := store.RecordResolution(context.Background(), req, route)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	queues, events := store.Snapshot()
+	if len(queues) != 1 || len(events) != 1 {
+		t.Fatalf("queues=%d events=%d", len(queues), len(events))
+	}
+}
+
+func newMemoryApprovalTestStore(fail func(ApprovalRecordStage) error) *MemoryApprovalStore {
+	store := NewMemoryApprovalStore(bytes.NewReader(make([]byte, 16384)), fail)
+	store.SetCurrentVersions("enterprise-1", 7, 1)
+	return store
+}
+
+func TestRecordedRouteRejectsMalformedDatabaseEvidence(t *testing.T) {
+	req := storeRequest()
+	valid := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+	tests := []approval.Route{
+		func() approval.Route { v := valid; v.RiskReasons = []approval.RiskReason{}; return v }(),
+		func() approval.Route {
+			v := valid
+			v.RiskReasons = []approval.RiskReason{approval.RiskReasonExternalSideEffect, approval.RiskReasonExternalSideEffect}
+			return v
+		}(),
+		func() approval.Route {
+			v := valid
+			v.RiskReasons = []approval.RiskReason{approval.RiskReasonUnknownAction, approval.RiskReasonExternalSideEffect}
+			return v
+		}(),
+		func() approval.Route { v := valid; v.OrgPath = []string{"other"}; return v }(),
+		func() approval.Route { v := valid; v.OrgPath = []string{"team", "team"}; return v }(),
+		func() approval.Route { v := valid; v.ReviewerDisplayName = ""; return v }(),
+	}
+	for _, route := range tests {
+		if validRecordedRoute(req, route) {
+			t.Fatalf("accepted malformed route=%+v", route)
+		}
+	}
+}
+
 func storeRequest() approval.Request {
-	return approval.Request{EnterpriseID: "enterprise-1", RequesterUserID: "requester", OrgVersion: 7, OrgUnitID: "team", ResourceType: "workflow", ResourceID: "workflow-1", Action: "workflow.update", Risk: approval.RiskInput{ChangedFields: []string{"title"}}}
+	return approval.Request{EnterpriseID: "enterprise-1", RequesterUserID: "requester", OrgVersion: 7, OrgUnitID: "team", ResourceType: "knowledge", ResourceID: "article-1", Action: "knowledge.publish_low_risk", Facts: approval.NewVerifiedChangeFacts(approval.VerifiedChangeFactsInput{ChangedFields: []string{"title"}, Digest: strings.Repeat("c", 64)}), PolicyVersion: 1, IdempotencyHash: strings.Repeat("d", 64), ReplayHash: strings.Repeat("a", 64)}
 }
