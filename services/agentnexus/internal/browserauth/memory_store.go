@@ -26,9 +26,15 @@ func (s *MemoryStore) AddEnterpriseUser(enterpriseID, userID string) {
 	s.users[bindingKey(enterpriseID, userID)] = struct{}{}
 }
 
-func (s *MemoryStore) EnterpriseUserBindingExists(_ context.Context, enterpriseID, userID string) (bool, error) {
+func (s *MemoryStore) EnterpriseUserBindingExists(ctx context.Context, enterpriseID, userID string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if s.err != nil {
 		return false, s.err
 	}
@@ -36,22 +42,37 @@ func (s *MemoryStore) EnterpriseUserBindingExists(_ context.Context, enterpriseI
 	return ok, nil
 }
 
-func (s *MemoryStore) CreateSession(_ context.Context, session storedSession) error {
+func (s *MemoryStore) CreateSession(ctx context.Context, session storedSession) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if s.err != nil {
 		return s.err
 	}
 	if _, ok := s.users[bindingKey(session.EnterpriseID, session.UserID)]; !ok {
 		return errInvalidBinding
 	}
+	if _, ok := s.sessions[session.IDHash]; ok {
+		return errDuplicate
+	}
 	s.sessions[session.IDHash] = session
 	return nil
 }
 
-func (s *MemoryStore) UseSession(_ context.Context, idHash string, now time.Time, idleTimeout time.Duration) (storedSession, error) {
+func (s *MemoryStore) UseSession(ctx context.Context, idHash string, now time.Time, idleTimeout time.Duration) (storedSession, error) {
+	if err := ctx.Err(); err != nil {
+		return storedSession{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return storedSession{}, err
+	}
 	if s.err != nil {
 		return storedSession{}, s.err
 	}
@@ -65,9 +86,15 @@ func (s *MemoryStore) UseSession(_ context.Context, idHash string, now time.Time
 	return record, nil
 }
 
-func (s *MemoryStore) RevokeSession(_ context.Context, idHash string, now time.Time) error {
+func (s *MemoryStore) RevokeSession(ctx context.Context, idHash string, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if s.err != nil {
 		return s.err
 	}
@@ -83,22 +110,37 @@ func (s *MemoryStore) RevokeSession(_ context.Context, idHash string, now time.T
 	return nil
 }
 
-func (s *MemoryStore) CreateAuthorizationCode(_ context.Context, code storedAuthorizationCode) error {
+func (s *MemoryStore) CreateAuthorizationCode(ctx context.Context, code storedAuthorizationCode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if s.err != nil {
 		return s.err
 	}
 	if _, ok := s.users[bindingKey(code.EnterpriseID, code.UserID)]; !ok {
 		return errInvalidBinding
 	}
+	if _, ok := s.codes[code.CodeHash]; ok {
+		return errDuplicate
+	}
 	s.codes[code.CodeHash] = code
 	return nil
 }
 
-func (s *MemoryStore) ExchangeAuthorizationCode(_ context.Context, request exchangeRequest) (storedAuthorizationCode, error) {
+func (s *MemoryStore) ExchangeAuthorizationCode(ctx context.Context, request exchangeRequest) (storedAuthorizationCode, error) {
+	if err := ctx.Err(); err != nil {
+		return storedAuthorizationCode{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return storedAuthorizationCode{}, err
+	}
 	if s.err != nil {
 		return storedAuthorizationCode{}, s.err
 	}

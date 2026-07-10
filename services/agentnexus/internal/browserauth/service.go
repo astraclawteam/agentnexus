@@ -26,6 +26,7 @@ var (
 var (
 	errNotFound       = errors.New("browser authorization record not found")
 	errInvalidBinding = errors.New("enterprise user binding invalid")
+	errDuplicate      = errors.New("browser authorization record already exists")
 )
 
 type Store interface {
@@ -139,7 +140,7 @@ func (s *Service) IssueCode(ctx context.Context, input IssueCodeInput) (string, 
 }
 
 func (s *Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (ExchangeResult, error) {
-	if s == nil || s.store == nil || input.Code == "" || input.Verifier == "" || input.ClientID == "" || input.RedirectURI == "" {
+	if s == nil || s.store == nil || input.Code == "" || !validPKCEVerifier(input.Verifier) || input.ClientID == "" || input.RedirectURI == "" {
 		return ExchangeResult{}, ErrInvalidGrant
 	}
 	digest := sha256.Sum256([]byte(input.Verifier))
@@ -163,14 +164,24 @@ func randomOpaqueSecret() (string, error) {
 
 func validateGeneratedSecret(secret string) error {
 	decoded, err := base64.RawURLEncoding.DecodeString(secret)
-	if err == nil && len(decoded) >= 32 {
-		return nil
-	}
-	// Explicit test generators may return human-readable fixtures; production always uses randomOpaqueSecret.
-	if secret != "" {
+	if err == nil && len(decoded) >= 32 && base64.RawURLEncoding.EncodeToString(decoded) == secret {
 		return nil
 	}
 	return ErrInvalidInput
+}
+
+func validPKCEVerifier(verifier string) bool {
+	if len(verifier) < 43 || len(verifier) > 128 {
+		return false
+	}
+	for i := range len(verifier) {
+		char := verifier[i]
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '-' || char == '.' || char == '_' || char == '~' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validS256Challenge(challenge string) bool {

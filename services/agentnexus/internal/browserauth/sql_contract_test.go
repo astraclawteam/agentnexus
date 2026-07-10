@@ -23,11 +23,24 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 			t.Errorf("migration persists plaintext field %q", forbidden)
 		}
 	}
-	if !strings.Contains(strings.ToUpper(queries), "FOR UPDATE") {
-		t.Error("queries must lock authorization/session records")
+	for _, name := range []string{"GetBrowserSessionForUpdate", "GetAuthorizationCodeForUpdate"} {
+		if !strings.Contains(strings.ToUpper(namedQuery(t, queries, name)), "FOR UPDATE") {
+			t.Errorf("%s must lock its record", name)
+		}
 	}
-	if !strings.Contains(strings.ToLower(queries), "consumed_at") {
-		t.Error("queries must consume authorization codes")
+	consume := strings.ToLower(namedQuery(t, queries, "ConsumeAuthorizationCode"))
+	if !strings.Contains(consume, "update oauth_authorization_codes") || !strings.Contains(consume, "consumed_at is null") {
+		t.Error("ConsumeAuthorizationCode must atomically update only an unconsumed code")
+	}
+	for _, required := range []string{
+		"add constraint uq_org_units_enterprise_id_id unique (enterprise_id, id)",
+		"foreign key (enterprise_id, org_unit_id)",
+		"references org_units(enterprise_id, id)",
+		"risk_level in ('low', 'medium', 'high')",
+	} {
+		if !strings.Contains(strings.ToLower(strings.Join(strings.Fields(migration), " ")), required) {
+			t.Errorf("migration missing approval invariant %q", required)
+		}
 	}
 }
 
@@ -42,4 +55,18 @@ func mustRead(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func namedQuery(t *testing.T, queries, name string) string {
+	t.Helper()
+	marker := "-- name: " + name + " "
+	start := strings.Index(queries, marker)
+	if start < 0 {
+		t.Fatalf("query %s not found", name)
+	}
+	rest := queries[start+len(marker):]
+	if next := strings.Index(rest, "-- name:"); next >= 0 {
+		rest = rest[:next]
+	}
+	return rest
 }

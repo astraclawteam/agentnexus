@@ -3,6 +3,9 @@
 ALTER TABLE enterprise_users
     ADD CONSTRAINT uq_enterprise_users_enterprise_id_id UNIQUE (enterprise_id, id);
 
+ALTER TABLE org_units
+    ADD CONSTRAINT uq_org_units_enterprise_id_id UNIQUE (enterprise_id, id);
+
 CREATE TABLE browser_sessions (
     id_hash TEXT PRIMARY KEY CHECK (char_length(id_hash) = 64 AND id_hash ~ '^[0-9a-f]{64}$'),
     enterprise_id TEXT NOT NULL,
@@ -40,13 +43,15 @@ CREATE TABLE approval_queue_items (
     resource_type TEXT NOT NULL,
     resource_id TEXT NOT NULL,
     action TEXT NOT NULL,
-    risk_level TEXT NOT NULL CHECK (risk_level IN ('low', 'high')),
-    org_unit_id TEXT NOT NULL REFERENCES org_units(id),
+    risk_level TEXT NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
+    org_unit_id TEXT NOT NULL,
     reviewer_user_id TEXT,
     status TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     FOREIGN KEY (enterprise_id, requester_user_id)
         REFERENCES enterprise_users(enterprise_id, id),
+    FOREIGN KEY (enterprise_id, org_unit_id)
+        REFERENCES org_units(enterprise_id, id),
     FOREIGN KEY (enterprise_id, reviewer_user_id)
         REFERENCES enterprise_users(enterprise_id, id)
 );
@@ -62,5 +67,6 @@ CREATE INDEX idx_approval_queue_items_enterprise_status ON approval_queue_items(
 DROP TABLE IF EXISTS approval_queue_items;
 DROP TABLE IF EXISTS oauth_authorization_codes;
 DROP TABLE IF EXISTS browser_sessions;
+ALTER TABLE org_units DROP CONSTRAINT IF EXISTS uq_org_units_enterprise_id_id;
 ALTER TABLE enterprise_users DROP CONSTRAINT IF EXISTS uq_enterprise_users_enterprise_id_id;
 -- +goose StatementEnd
