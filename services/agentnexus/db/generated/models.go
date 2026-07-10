@@ -256,12 +256,13 @@ type OrgUnit struct {
 }
 
 type OrgVersion struct {
-	ID                   string
-	EnterpriseID         string
-	VersionNumber        int64
-	SourceEventID        pgtype.Text
-	CreatedAt            pgtype.Timestamptz
-	PolicySnapshotSealed bool
+	ID                        string
+	EnterpriseID              string
+	VersionNumber             int64
+	SourceEventID             pgtype.Text
+	CreatedAt                 pgtype.Timestamptz
+	PolicySnapshotSealed      bool
+	PolicySnapshotPublishable bool
 }
 
 type StepGrant struct {

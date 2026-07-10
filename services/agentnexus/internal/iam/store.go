@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -139,16 +140,37 @@ func (s *MemoryStore) CreateOrgEvent(_ context.Context, event OrgEvent) (OrgEven
 	return event, nil
 }
 
-func (s *MemoryStore) CreateOrgVersion(_ context.Context, version OrgVersion) (OrgVersion, error) {
+func (s *MemoryStore) CreateOrgVersion(ctx context.Context, version OrgVersion) (OrgVersion, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return OrgVersion{}, err
+	}
+	if err := validateOrgVersion(version, false); err != nil {
+		return OrgVersion{}, err
+	}
+	if err := s.validateNextOrgVersionLocked(version); err != nil {
+		return OrgVersion{}, err
+	}
 	return s.createOrgVersionLocked(version), nil
 }
 
-func (s *MemoryStore) PublishOrgVersion(_ context.Context, event OrgEvent, version OrgVersion) (OrgVersion, error) {
+func (s *MemoryStore) PublishOrgVersion(ctx context.Context, event OrgEvent, version OrgVersion) (OrgVersion, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return OrgVersion{}, err
+	}
+	if err := validateOrgPublication(event, version); err != nil {
+		return OrgVersion{}, err
+	}
+	if err := s.validateNextOrgVersionLocked(version); err != nil {
+		return OrgVersion{}, err
+	}
+	if _, exists := s.orgEvents[key(event.EnterpriseID, event.ID)]; exists {
+		return OrgVersion{}, errors.New("organization event already exists")
+	}
 	now := s.now().UTC()
 	event.CreatedAt = now
 	s.orgEvents[key(event.EnterpriseID, event.ID)] = event
@@ -163,6 +185,51 @@ func (s *MemoryStore) createOrgVersionLocked(version OrgVersion) OrgVersion {
 	s.orgVersions[key(version.EnterpriseID, version.ID)] = version
 	s.capturePolicySnapshotLocked(version)
 	return version
+}
+
+func (s *MemoryStore) validateNextOrgVersionLocked(version OrgVersion) error {
+	if _, exists := s.orgVersions[key(version.EnterpriseID, version.ID)]; exists {
+		return errors.New("organization version already exists")
+	}
+	if _, exists := s.policySnapshots[memoryPolicySnapshotKey(version.EnterpriseID, version.VersionNumber)]; exists {
+		return errors.New("organization policy snapshot already exists")
+	}
+	for _, existing := range s.orgVersions {
+		if existing.EnterpriseID == version.EnterpriseID && existing.VersionNumber >= version.VersionNumber {
+			return errors.New("organization version must strictly increase")
+		}
+	}
+	return nil
+}
+
+func validateOrgPublication(event OrgEvent, version OrgVersion) error {
+	if !canonicalNonEmpty(event.ID) || !canonicalNonEmpty(event.EnterpriseID) || !canonicalNonEmpty(event.EventType) {
+		return errors.New("invalid organization event")
+	}
+	if err := validateOrgVersion(version, true); err != nil {
+		return err
+	}
+	if event.EnterpriseID != version.EnterpriseID || version.SourceEventID != event.ID {
+		return errors.New("organization publication event/version mismatch")
+	}
+	return nil
+}
+
+func validateOrgVersion(version OrgVersion, requireSourceEvent bool) error {
+	if !canonicalNonEmpty(version.ID) || !canonicalNonEmpty(version.EnterpriseID) || version.VersionNumber <= 0 {
+		return errors.New("invalid organization version")
+	}
+	if requireSourceEvent && !canonicalNonEmpty(version.SourceEventID) {
+		return errors.New("invalid organization version source event")
+	}
+	if version.SourceEventID != "" && strings.TrimSpace(version.SourceEventID) != version.SourceEventID {
+		return errors.New("invalid organization version source event")
+	}
+	return nil
+}
+
+func canonicalNonEmpty(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value
 }
 
 func (s *MemoryStore) capturePolicySnapshotLocked(version OrgVersion) {
@@ -294,6 +361,16 @@ func (s *PostgresStore) PublishOrgVersion(ctx context.Context, event OrgEvent, v
 func (s *PostgresStore) publishOrgVersion(ctx context.Context, event *OrgEvent, version OrgVersion) (result OrgVersion, resultErr error) {
 	if s == nil || s.pool == nil {
 		return OrgVersion{}, errors.New("iam store unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return OrgVersion{}, err
+	}
+	if event != nil {
+		if err := validateOrgPublication(*event, version); err != nil {
+			return OrgVersion{}, err
+		}
+	} else if err := validateOrgVersion(version, false); err != nil {
+		return OrgVersion{}, err
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadWrite})
 	if err != nil {

@@ -78,5 +78,6 @@ UPDATE org_versions
 SET policy_snapshot_sealed = true
 WHERE enterprise_id = $1
   AND version_number = $2
+  AND policy_snapshot_publishable = true
   AND policy_snapshot_sealed = false
 RETURNING id, enterprise_id, version_number, source_event_id, created_at, policy_snapshot_sealed;

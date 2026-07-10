@@ -18,6 +18,7 @@ func TestOrgPolicySnapshotMigrationContract(t *testing.T) {
 	migration := strings.ToLower(strings.Join(strings.Fields(string(raw)), " "))
 	for _, required := range []string{
 		"alter table org_versions add column policy_snapshot_sealed boolean not null default false",
+		"add column policy_snapshot_publishable boolean not null default false",
 		"create table org_policy_snapshot_units",
 		"primary key (enterprise_id, version_number, org_unit_id)",
 		"foreign key (enterprise_id, version_number) references org_versions(enterprise_id, version_number)",
@@ -29,10 +30,16 @@ func TestOrgPolicySnapshotMigrationContract(t *testing.T) {
 		"create trigger reject_org_policy_snapshot_units_truncate before truncate",
 		"create trigger reject_org_policy_snapshot_memberships_truncate before truncate",
 		"create trigger guard_org_policy_version_seal before insert or update or delete",
-		"sealed policy snapshot version cannot be deleted",
+		"pg_advisory_xact_lock(hashtextextended(new.enterprise_id, 0))",
+		"new.version_number <= 0",
+		"v.version_number >= new.version_number",
+		"new.policy_snapshot_publishable := true",
+		"new.policy_snapshot_sealed := false",
+		"organization policy versions cannot be deleted",
+		"legacy organization policy version cannot be sealed",
+		"policy snapshot publishability cannot be changed",
 		"policy snapshot is sealed",
-		"sealed policy snapshot cannot be unsealed or changed",
-		"policy snapshot seal cannot change version identity",
+		"for no key update",
 		"create index idx_org_policy_snapshot_memberships_actor",
 	} {
 		if !strings.Contains(migration, required) {
@@ -44,16 +51,39 @@ func TestOrgPolicySnapshotMigrationContract(t *testing.T) {
 			t.Errorf("migration fabricates an old snapshot via %q", forbidden)
 		}
 	}
+	if strings.Count(migration, "for no key update") != 2 {
+		t.Errorf("snapshot guard must lock the version row in both INSERT and UPDATE/DELETE branches: %s", migration)
+	}
+	lockAt := strings.Index(migration, "pg_advisory_xact_lock(hashtextextended(new.enterprise_id, 0))")
+	monotonicAt := strings.Index(migration, "v.version_number >= new.version_number")
+	if lockAt < 0 || monotonicAt <= lockAt {
+		t.Errorf("version maximum is checked before publisher serialization: lock=%d monotonic=%d", lockAt, monotonicAt)
+	}
 	membershipsDrop := strings.Index(migration, "drop table if exists org_policy_snapshot_memberships")
 	unitsDrop := strings.Index(migration, "drop table if exists org_policy_snapshot_units")
 	functionDrop := strings.Index(migration, "drop function if exists guard_org_policy_snapshot_row")
-	columnDrop := strings.Index(migration, "alter table org_versions drop column if exists policy_snapshot_sealed")
-	if membershipsDrop < 0 || unitsDrop <= membershipsDrop || functionDrop <= unitsDrop || columnDrop <= functionDrop {
+	sealedColumnDrop := strings.Index(migration, "alter table org_versions drop column if exists policy_snapshot_sealed")
+	publishableColumnDrop := strings.Index(migration, "alter table org_versions drop column if exists policy_snapshot_publishable")
+	if membershipsDrop < 0 || unitsDrop <= membershipsDrop || functionDrop <= unitsDrop || sealedColumnDrop <= functionDrop || publishableColumnDrop <= sealedColumnDrop {
 		t.Fatalf("unsafe Down order: memberships=%d units=%d function=%d", membershipsDrop, unitsDrop, functionDrop)
 	}
 	for _, required := range []string{"drop function if exists reject_org_policy_snapshot_truncate", "drop trigger if exists guard_org_policy_version_seal on org_versions", "drop function if exists guard_org_policy_version_seal"} {
 		if !strings.Contains(migration, required) {
 			t.Errorf("Down migration leaves publication object %q", required)
+		}
+	}
+}
+
+func TestOrgPolicySnapshotDeploymentGuidanceIsExplicit(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join(agentnexusRoot(t), "db", "migrations", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	guidance := strings.ToLower(string(raw))
+	for _, required := range []string{"deployment prerequisite", "does not create environment-specific roles", "grant", "revoke", "two-connection", "mutation-first", "seal-first", "concurrent publishers"} {
+		if !strings.Contains(guidance, required) {
+			t.Errorf("deployment guidance missing %q", required)
 		}
 	}
 }
@@ -89,6 +119,14 @@ func TestAuthorizationSQLReadsExactImmutableVersion(t *testing.T) {
 		if !strings.Contains(queries, required) {
 			t.Errorf("publication query missing %q", required)
 		}
+	}
+	createVersion := namedSQL(queries, "-- name: createorgversion")
+	if strings.Contains(createVersion, "policy_snapshot_sealed") && strings.Contains(createVersion, "values ($1, $2, $3, $4, $5") {
+		t.Errorf("publisher can supply snapshot state flags: %s", createVersion)
+	}
+	seal := namedSQL(queries, "-- name: sealorgpolicysnapshot")
+	if !strings.Contains(seal, "policy_snapshot_publishable = true") || !strings.Contains(seal, "policy_snapshot_sealed = false") {
+		t.Errorf("seal query can seal legacy or already sealed versions: %s", seal)
 	}
 	captureMemberships := namedSQL(queries, "-- name: captureorgpolicysnapshotmemberships")
 	if strings.Contains(captureMemberships, "join org_policy_snapshot_units") {

@@ -15,14 +15,49 @@ import (
 )
 
 type PostgresBrowserDirectory struct {
-	pool       *pgxpool.Pool
 	identityDB db.DBTX
+	profileDB  browserProfileTxBeginner
+}
+
+type browserProfileTx interface {
+	GetBrowserProfile(context.Context, db.GetBrowserProfileParams) (db.GetBrowserProfileRow, error)
+	ListBrowserProfileOrgUnits(context.Context, db.ListBrowserProfileOrgUnitsParams) ([]string, error)
+	Commit(context.Context) error
+	Rollback(context.Context) error
+}
+
+type browserProfileTxBeginner interface {
+	BeginBrowserProfileTx(context.Context, pgx.TxOptions) (browserProfileTx, error)
+}
+
+type postgresBrowserProfileDB struct{ pool *pgxpool.Pool }
+
+func (d *postgresBrowserProfileDB) BeginBrowserProfileTx(ctx context.Context, options pgx.TxOptions) (browserProfileTx, error) {
+	tx, err := d.pool.BeginTx(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return &postgresBrowserProfileTx{Tx: tx, queries: db.New(tx)}, nil
+}
+
+type postgresBrowserProfileTx struct {
+	pgx.Tx
+	queries *db.Queries
+}
+
+func (t *postgresBrowserProfileTx) GetBrowserProfile(ctx context.Context, params db.GetBrowserProfileParams) (db.GetBrowserProfileRow, error) {
+	return t.queries.GetBrowserProfile(ctx, params)
+}
+
+func (t *postgresBrowserProfileTx) ListBrowserProfileOrgUnits(ctx context.Context, params db.ListBrowserProfileOrgUnitsParams) ([]string, error) {
+	return t.queries.ListBrowserProfileOrgUnits(ctx, params)
 }
 
 func NewPostgresBrowserDirectory(pool *pgxpool.Pool) *PostgresBrowserDirectory {
-	directory := &PostgresBrowserDirectory{pool: pool}
+	directory := &PostgresBrowserDirectory{}
 	if pool != nil {
 		directory.identityDB = pool
+		directory.profileDB = &postgresBrowserProfileDB{pool: pool}
 	}
 	return directory
 }
@@ -41,21 +76,26 @@ func (d *PostgresBrowserDirectory) ResolveExternalIdentity(ctx context.Context, 
 	return record.EnterpriseID, record.EnterpriseUserID, nil
 }
 
-func (d *PostgresBrowserDirectory) ResolveBrowserProfile(ctx context.Context, enterpriseID, userID string) (BrowserProfile, error) {
-	if d == nil || d.pool == nil || enterpriseID == "" || userID == "" {
+func (d *PostgresBrowserDirectory) ResolveBrowserProfile(ctx context.Context, enterpriseID, userID string) (profile BrowserProfile, resultErr error) {
+	if d == nil || d.profileDB == nil || enterpriseID == "" || userID == "" {
 		return BrowserProfile{}, errors.New("profile directory unavailable")
 	}
-	tx, err := d.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	tx, err := d.profileDB.BeginBrowserProfileTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return BrowserProfile{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	queries := db.New(tx)
-	record, err := queries.GetBrowserProfile(ctx, db.GetBrowserProfileParams{EnterpriseID: enterpriseID, ID: userID})
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
+		defer cancel()
+		if cleanupErr := tx.Rollback(cleanupCtx); cleanupErr != nil && !errors.Is(cleanupErr, pgx.ErrTxClosed) {
+			resultErr = errors.Join(resultErr, cleanupErr)
+		}
+	}()
+	record, err := tx.GetBrowserProfile(ctx, db.GetBrowserProfileParams{EnterpriseID: enterpriseID, ID: userID})
 	if err != nil {
 		return BrowserProfile{}, err
 	}
-	units, err := queries.ListBrowserProfileOrgUnits(ctx, db.ListBrowserProfileOrgUnitsParams{EnterpriseID: enterpriseID, EnterpriseUserID: userID})
+	units, err := tx.ListBrowserProfileOrgUnits(ctx, db.ListBrowserProfileOrgUnitsParams{EnterpriseID: enterpriseID, EnterpriseUserID: userID})
 	if err != nil {
 		return BrowserProfile{}, err
 	}

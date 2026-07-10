@@ -1,7 +1,8 @@
 -- +goose Up
 -- +goose StatementBegin
 ALTER TABLE org_versions
-    ADD COLUMN policy_snapshot_sealed BOOLEAN NOT NULL DEFAULT false;
+    ADD COLUMN policy_snapshot_sealed BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN policy_snapshot_publishable BOOLEAN NOT NULL DEFAULT false;
 
 CREATE TABLE org_policy_snapshot_units (
     enterprise_id TEXT NOT NULL CHECK (enterprise_id <> '' AND btrim(enterprise_id) = enterprise_id),
@@ -43,21 +44,34 @@ CREATE INDEX idx_org_policy_snapshot_memberships_actor
 
 CREATE FUNCTION guard_org_policy_snapshot_row() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE
+    snapshot_sealed BOOLEAN;
+    snapshot_publishable BOOLEAN;
 BEGIN
-    IF TG_OP IN ('UPDATE', 'DELETE') AND NOT EXISTS (
-        SELECT 1 FROM org_versions AS v
-        WHERE v.enterprise_id = OLD.enterprise_id
-          AND v.version_number = OLD.version_number
-          AND v.policy_snapshot_sealed = false
+    IF TG_OP = 'UPDATE' AND (
+        NEW.enterprise_id IS DISTINCT FROM OLD.enterprise_id OR
+        NEW.version_number IS DISTINCT FROM OLD.version_number
     ) THEN
-        RAISE EXCEPTION 'policy snapshot is sealed or unpublished';
+        RAISE EXCEPTION 'policy snapshot version identity cannot be changed';
     END IF;
-    IF TG_OP IN ('INSERT', 'UPDATE') AND NOT EXISTS (
-        SELECT 1 FROM org_versions AS v
+
+    IF TG_OP = 'INSERT' THEN
+        SELECT v.policy_snapshot_sealed, v.policy_snapshot_publishable
+        INTO snapshot_sealed, snapshot_publishable
+        FROM org_versions AS v
         WHERE v.enterprise_id = NEW.enterprise_id
           AND v.version_number = NEW.version_number
-          AND v.policy_snapshot_sealed = false
-    ) THEN
+        FOR NO KEY UPDATE;
+    ELSE
+        SELECT v.policy_snapshot_sealed, v.policy_snapshot_publishable
+        INTO snapshot_sealed, snapshot_publishable
+        FROM org_versions AS v
+        WHERE v.enterprise_id = OLD.enterprise_id
+          AND v.version_number = OLD.version_number
+        FOR NO KEY UPDATE;
+    END IF;
+
+    IF NOT FOUND OR snapshot_sealed OR NOT snapshot_publishable THEN
         RAISE EXCEPTION 'policy snapshot is sealed or unpublished';
     END IF;
     IF TG_OP = 'DELETE' THEN
@@ -77,33 +91,45 @@ $$;
 CREATE FUNCTION guard_org_policy_version_seal() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-	IF TG_OP = 'DELETE' THEN
-		IF OLD.policy_snapshot_sealed THEN
-			RAISE EXCEPTION 'sealed policy snapshot version cannot be deleted';
-		END IF;
-		RETURN OLD;
-	END IF;
-    IF TG_OP = 'INSERT' AND NEW.policy_snapshot_sealed THEN
-        RAISE EXCEPTION 'policy snapshot must be inserted unsealed';
+    IF TG_OP = 'INSERT' THEN
+        PERFORM pg_advisory_xact_lock(hashtextextended(NEW.enterprise_id, 0));
+        IF NEW.version_number <= 0 THEN
+            RAISE EXCEPTION 'organization policy version number must be positive';
+        END IF;
+        IF EXISTS (
+            SELECT 1
+            FROM org_versions AS v
+            WHERE v.enterprise_id = NEW.enterprise_id
+              AND v.version_number >= NEW.version_number
+        ) THEN
+            RAISE EXCEPTION 'organization policy version must strictly increase';
+        END IF;
+        NEW.policy_snapshot_publishable := true;
+        NEW.policy_snapshot_sealed := false;
+        RETURN NEW;
     END IF;
-	IF TG_OP = 'UPDATE' AND NOT OLD.policy_snapshot_sealed AND NEW.policy_snapshot_sealed AND (
-		NEW.id IS DISTINCT FROM OLD.id OR
-		NEW.enterprise_id IS DISTINCT FROM OLD.enterprise_id OR
-		NEW.version_number IS DISTINCT FROM OLD.version_number OR
-		NEW.source_event_id IS DISTINCT FROM OLD.source_event_id OR
-		NEW.created_at IS DISTINCT FROM OLD.created_at
-	) THEN
-		RAISE EXCEPTION 'policy snapshot seal cannot change version identity';
-	END IF;
-    IF TG_OP = 'UPDATE' AND OLD.policy_snapshot_sealed AND (
-        NOT NEW.policy_snapshot_sealed OR
+
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'organization policy versions cannot be deleted';
+    END IF;
+
+    IF (
         NEW.id IS DISTINCT FROM OLD.id OR
         NEW.enterprise_id IS DISTINCT FROM OLD.enterprise_id OR
         NEW.version_number IS DISTINCT FROM OLD.version_number OR
         NEW.source_event_id IS DISTINCT FROM OLD.source_event_id OR
         NEW.created_at IS DISTINCT FROM OLD.created_at
     ) THEN
-        RAISE EXCEPTION 'sealed policy snapshot cannot be unsealed or changed';
+        RAISE EXCEPTION 'policy snapshot seal cannot change version identity';
+    END IF;
+    IF NEW.policy_snapshot_publishable IS DISTINCT FROM OLD.policy_snapshot_publishable THEN
+        RAISE EXCEPTION 'policy snapshot publishability cannot be changed';
+    END IF;
+    IF NOT OLD.policy_snapshot_publishable THEN
+        RAISE EXCEPTION 'legacy organization policy version cannot be sealed';
+    END IF;
+    IF OLD.policy_snapshot_sealed OR NOT NEW.policy_snapshot_sealed THEN
+        RAISE EXCEPTION 'only an unsealed publishable policy snapshot can be sealed once';
     END IF;
     RETURN NEW;
 END;
@@ -137,4 +163,5 @@ DROP FUNCTION IF EXISTS reject_org_policy_snapshot_truncate();
 DROP TRIGGER IF EXISTS guard_org_policy_version_seal ON org_versions;
 DROP FUNCTION IF EXISTS guard_org_policy_version_seal();
 ALTER TABLE org_versions DROP COLUMN IF EXISTS policy_snapshot_sealed;
+ALTER TABLE org_versions DROP COLUMN IF EXISTS policy_snapshot_publishable;
 -- +goose StatementEnd

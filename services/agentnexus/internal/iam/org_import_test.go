@@ -191,9 +191,116 @@ func TestMemoryStoreCreateOrgVersionDirectlyCapturesSnapshot(t *testing.T) {
 	if _, err := store.UpsertOrgUnit(context.Background(), OrgUnit{ID: "dept", EnterpriseID: "enterprise-1", Name: "After"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.CreateOrgVersion(context.Background(), OrgVersion{ID: "version-2-retry", EnterpriseID: "enterprise-1", VersionNumber: 2}); err == nil {
+		t.Fatal("direct duplicate version was accepted")
+	}
 	snapshot, ok := store.policySnapshot("enterprise-1", 2)
 	if !ok || len(snapshot.units) != 1 || snapshot.units[0].Name != "Before" {
 		t.Fatalf("direct version snapshot = %#v, ok=%t", snapshot, ok)
+	}
+}
+
+func TestMemoryStoreRejectsNonMonotonicPublicationWithoutOverwritingSnapshot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	store.orgVersions[key("enterprise-1", "legacy-42")] = OrgVersion{ID: "legacy-42", EnterpriseID: "enterprise-1", VersionNumber: 42}
+	if _, err := store.UpsertOrgUnit(ctx, OrgUnit{ID: "dept", EnterpriseID: "enterprise-1", Name: "Before"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishOrgVersion(ctx,
+		OrgEvent{ID: "event-1", EnterpriseID: "enterprise-1", EventType: "org_import"},
+		OrgVersion{ID: "version-1", EnterpriseID: "enterprise-1", VersionNumber: 1, SourceEventID: "event-1"},
+	); err == nil {
+		t.Fatal("publication below legacy maximum was accepted")
+	}
+	if len(store.orgEvents) != 0 || len(store.policySnapshots) != 0 {
+		t.Fatalf("failed publication wrote state: events=%d snapshots=%d", len(store.orgEvents), len(store.policySnapshots))
+	}
+	if _, err := store.PublishOrgVersion(ctx,
+		OrgEvent{ID: "event-43", EnterpriseID: "enterprise-1", EventType: "org_import"},
+		OrgVersion{ID: "version-43", EnterpriseID: "enterprise-1", VersionNumber: 43, SourceEventID: "event-43"},
+	); err != nil {
+		t.Fatalf("publication above legacy maximum failed: %v", err)
+	}
+	if _, err := store.UpsertOrgUnit(ctx, OrgUnit{ID: "dept", EnterpriseID: "enterprise-1", Name: "After"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishOrgVersion(ctx,
+		OrgEvent{ID: "event-duplicate", EnterpriseID: "enterprise-1", EventType: "org_import"},
+		OrgVersion{ID: "version-duplicate", EnterpriseID: "enterprise-1", VersionNumber: 43, SourceEventID: "event-duplicate"},
+	); err == nil {
+		t.Fatal("duplicate version publication was accepted")
+	}
+	snapshot, ok := store.policySnapshot("enterprise-1", 43)
+	if !ok || len(snapshot.units) != 1 || snapshot.units[0].Name != "Before" {
+		t.Fatalf("duplicate publication overwrote snapshot: %#v, ok=%t", snapshot, ok)
+	}
+	if _, ok := store.orgEvents[key("enterprise-1", "event-duplicate")]; ok {
+		t.Fatal("failed duplicate publication orphaned an event")
+	}
+}
+
+func TestMemoryStoreConcurrentSameVersionOnlyOnePublishes(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, suffix := range []string{"a", "b"} {
+		suffix := suffix
+		go func() {
+			<-start
+			_, err := store.PublishOrgVersion(context.Background(),
+				OrgEvent{ID: "event-" + suffix, EnterpriseID: "enterprise-1", EventType: "org_import"},
+				OrgVersion{ID: "version-" + suffix, EnterpriseID: "enterprise-1", VersionNumber: 1, SourceEventID: "event-" + suffix},
+			)
+			results <- err
+		}()
+	}
+	close(start)
+	successes := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			successes++
+		}
+	}
+	if successes != 1 || len(store.orgEvents) != 1 || len(store.orgVersions) != 1 || len(store.policySnapshots) != 1 {
+		t.Fatalf("successes=%d events=%d versions=%d snapshots=%d", successes, len(store.orgEvents), len(store.orgVersions), len(store.policySnapshots))
+	}
+}
+
+func TestMemoryStoreRejectsInvalidPublicationBeforeWriting(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		event   OrgEvent
+		version OrgVersion
+	}{
+		{name: "enterprise mismatch", ctx: context.Background(), event: OrgEvent{ID: "event", EnterpriseID: "enterprise-1", EventType: "org_import"}, version: OrgVersion{ID: "version", EnterpriseID: "enterprise-2", VersionNumber: 1, SourceEventID: "event"}},
+		{name: "source event mismatch", ctx: context.Background(), event: OrgEvent{ID: "event", EnterpriseID: "enterprise-1", EventType: "org_import"}, version: OrgVersion{ID: "version", EnterpriseID: "enterprise-1", VersionNumber: 1, SourceEventID: "other"}},
+		{name: "noncanonical identifier", ctx: context.Background(), event: OrgEvent{ID: " event", EnterpriseID: "enterprise-1", EventType: "org_import"}, version: OrgVersion{ID: "version", EnterpriseID: "enterprise-1", VersionNumber: 1, SourceEventID: " event"}},
+		{name: "zero version", ctx: context.Background(), event: OrgEvent{ID: "event", EnterpriseID: "enterprise-1", EventType: "org_import"}, version: OrgVersion{ID: "version", EnterpriseID: "enterprise-1", VersionNumber: 0, SourceEventID: "event"}},
+		{name: "negative version", ctx: context.Background(), event: OrgEvent{ID: "event", EnterpriseID: "enterprise-1", EventType: "org_import"}, version: OrgVersion{ID: "version", EnterpriseID: "enterprise-1", VersionNumber: -1, SourceEventID: "event"}},
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests = append(tests, struct {
+		name    string
+		ctx     context.Context
+		event   OrgEvent
+		version OrgVersion
+	}{name: "canceled context", ctx: canceled, event: OrgEvent{ID: "event", EnterpriseID: "enterprise-1", EventType: "org_import"}, version: OrgVersion{ID: "version", EnterpriseID: "enterprise-1", VersionNumber: 1, SourceEventID: "event"}})
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewMemoryStore()
+			if _, err := store.PublishOrgVersion(test.ctx, test.event, test.version); err == nil {
+				t.Fatal("invalid publication was accepted")
+			}
+			if len(store.orgEvents) != 0 || len(store.orgVersions) != 0 || len(store.policySnapshots) != 0 {
+				t.Fatalf("invalid publication wrote state: events=%d versions=%d snapshots=%d", len(store.orgEvents), len(store.orgVersions), len(store.policySnapshots))
+			}
+		})
 	}
 }
 

@@ -205,6 +205,32 @@ func TestPostgresPublishOrgVersionIncludesEventAndSealAtomically(t *testing.T) {
 	}
 }
 
+func TestPostgresPublishOrgVersionRejectsInvalidLinkageBeforeBegin(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		event   OrgEvent
+		version OrgVersion
+	}{
+		{name: "enterprise mismatch", event: OrgEvent{ID: "event-id", EnterpriseID: "enterprise-1", EventType: "org_import"}, version: OrgVersion{ID: "version-id", EnterpriseID: "enterprise-2", VersionNumber: 23, SourceEventID: "event-id"}},
+		{name: "source event mismatch", event: OrgEvent{ID: "event-id", EnterpriseID: "enterprise-1", EventType: "org_import"}, version: OrgVersion{ID: "version-id", EnterpriseID: "enterprise-1", VersionNumber: 23, SourceEventID: "other-event"}},
+		{name: "blank event id", event: OrgEvent{EnterpriseID: "enterprise-1", EventType: "org_import"}, version: OrgVersion{ID: "version-id", EnterpriseID: "enterprise-1", VersionNumber: 23}},
+		{name: "noncanonical version id", event: OrgEvent{ID: "event-id", EnterpriseID: "enterprise-1", EventType: "org_import"}, version: OrgVersion{ID: " version-id", EnterpriseID: "enterprise-1", VersionNumber: 23, SourceEventID: "event-id"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database := &fakeIAMSnapshotDB{tx: &fakeIAMSnapshotTx{}}
+			store := newPostgresStoreWithDB(database)
+			if _, err := store.PublishOrgVersion(context.Background(), test.event, test.version); err == nil {
+				t.Fatal("invalid publication was accepted")
+			}
+			if len(database.options) != 0 {
+				t.Fatalf("invalid publication began %d transactions", len(database.options))
+			}
+		})
+	}
+}
+
 func TestPostgresPublishOrgVersionRollsBackEventAndUsesBoundedCleanupAfterCancel(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())

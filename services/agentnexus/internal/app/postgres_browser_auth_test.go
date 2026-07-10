@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -17,6 +18,74 @@ func TestPostgresBrowserAuthDependenciesImplementProductionInterfaces(t *testing
 	var _ ExternalIdentityResolver = (*PostgresBrowserDirectory)(nil)
 	var _ BrowserProfileResolver = (*PostgresBrowserDirectory)(nil)
 	var _ BrowserAuditSink = (*PostgresBrowserAuditSink)(nil)
+}
+
+type fakeBrowserProfileDB struct {
+	tx      *fakeBrowserProfileTx
+	options []pgx.TxOptions
+}
+
+func (f *fakeBrowserProfileDB) BeginBrowserProfileTx(_ context.Context, options pgx.TxOptions) (browserProfileTx, error) {
+	f.options = append(f.options, options)
+	return f.tx, nil
+}
+
+type fakeBrowserProfileTx struct {
+	cancel              context.CancelFunc
+	queryErr            error
+	rollbackErr         error
+	rollbackContextErr  error
+	rollbackHasDeadline bool
+	calls               []string
+}
+
+func (f *fakeBrowserProfileTx) GetBrowserProfile(context.Context, db.GetBrowserProfileParams) (db.GetBrowserProfileRow, error) {
+	f.calls = append(f.calls, "profile")
+	if f.cancel != nil {
+		f.cancel()
+	}
+	return db.GetBrowserProfileRow{}, f.queryErr
+}
+
+func (f *fakeBrowserProfileTx) ListBrowserProfileOrgUnits(context.Context, db.ListBrowserProfileOrgUnitsParams) ([]string, error) {
+	f.calls = append(f.calls, "units")
+	return nil, nil
+}
+
+func (f *fakeBrowserProfileTx) Commit(context.Context) error {
+	f.calls = append(f.calls, "commit")
+	return nil
+}
+
+func (f *fakeBrowserProfileTx) Rollback(ctx context.Context) error {
+	f.calls = append(f.calls, "rollback")
+	f.rollbackContextErr = ctx.Err()
+	_, f.rollbackHasDeadline = ctx.Deadline()
+	return f.rollbackErr
+}
+
+func TestPostgresBrowserProfileRollbackSurvivesCancellationAndJoinsErrors(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	queryErr := errors.New("profile query failed")
+	cleanupErr := errors.New("profile rollback failed")
+	tx := &fakeBrowserProfileTx{cancel: cancel, queryErr: queryErr, rollbackErr: cleanupErr}
+	database := &fakeBrowserProfileDB{tx: tx}
+	directory := &PostgresBrowserDirectory{profileDB: database}
+
+	_, err := directory.ResolveBrowserProfile(ctx, "enterprise-1", "user-1")
+	if !errors.Is(err, queryErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("joined profile error = %v", err)
+	}
+	if tx.rollbackContextErr != nil || !tx.rollbackHasDeadline {
+		t.Fatalf("rollback context error=%v deadline=%t", tx.rollbackContextErr, tx.rollbackHasDeadline)
+	}
+	if len(database.options) != 1 || database.options[0].IsoLevel != pgx.RepeatableRead || database.options[0].AccessMode != pgx.ReadOnly {
+		t.Fatalf("profile transaction options = %#v", database.options)
+	}
+	if strings.Join(tx.calls, ",") != "profile,rollback" {
+		t.Fatalf("profile calls = %#v", tx.calls)
+	}
 }
 
 func TestPostgresBrowserDirectoryClassifiesIdentityLookupErrors(t *testing.T) {
@@ -107,7 +176,7 @@ func TestBrowserDirectoryAndAuditSQLAreQuerySpecificAndSerialized(t *testing.T) 
 		t.Error("profile memberships are not bound to a sealed enterprise/version snapshot")
 	}
 	productionSource := string(production)
-	for _, required := range []string{"pgx.RepeatableRead", "tx.Commit(ctx)"} {
+	for _, required := range []string{"pgx.RepeatableRead", "tx.Commit(ctx)", "context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)", "errors.Join"} {
 		if !strings.Contains(productionSource, required) {
 			t.Errorf("profile snapshot missing %q", required)
 		}
