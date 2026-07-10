@@ -3,12 +3,14 @@ package browserauth
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -32,9 +34,17 @@ func TestOIDCConfigRejectsUnsafeOrAmbiguousRedirectsAndKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	loopback := valid
+	loopback.PublicIssuerURL = "http://localhost:8080"
 	loopback.CallbackURL = "http://localhost:8080/oauth2/idp/callback"
 	if err := loopback.Validate(); err != nil {
 		t.Fatalf("loopback callback rejected: %v", err)
+	}
+	for _, callback := range []string{"https://nexus.example.com/other", "https://nexus.example.com/oauth2/idp/callback?x=1"} {
+		cfg := valid
+		cfg.CallbackURL = callback
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("callback mismatch accepted: %s", callback)
+		}
 	}
 	for _, bad := range []string{"/relative", "https://user@example.com/cb", "https://atlas.example.com/cb#fragment", "http://atlas.example.com/cb"} {
 		cfg := valid
@@ -71,13 +81,64 @@ func TestTokenIssuerAdvertisesTheECDSACurveAlgorithm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/cb", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, SigningKeyID: "ec", SigningPrivateKey: key}
+	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, SigningKeyID: "ec", SigningPrivateKey: key}
 	issuer, err := NewTokenIssuer(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if issuer.Algorithm() != string(jose.ES384) {
 		t.Fatalf("alg=%s", issuer.Algorithm())
+	}
+}
+
+func TestTokenIssuerAdvertisesAlgorithmsForMixedRotationKeys(t *testing.T) {
+	current := mustRSAKey(t)
+	ec, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, SigningKeyID: "rsa", SigningPrivateKey: current, PreviousSigningKeys: map[string]crypto.PublicKey{"ec": &ec.PublicKey, "ed": edPublic}}
+	issuer, err := NewTokenIssuer(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(issuer.Algorithms(), ","); got != "RS256,ES384,EdDSA" {
+		t.Fatalf("algorithms=%s", got)
+	}
+	raw, err := issuer.JWKS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var set jose.JSONWebKeySet
+	if err := json.Unmarshal(raw, &set); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range set.Keys {
+		if key.Algorithm == "" {
+			t.Fatalf("kid %s has no alg", key.KeyID)
+		}
+	}
+}
+
+func TestOIDCConfigRejectsMalformedPreviousPublicKeys(t *testing.T) {
+	base := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, SigningKeyID: "rsa", SigningPrivateKey: mustRSAKey(t)}
+	weak, _ := rsa.GenerateKey(rand.Reader, 1024)
+	badExponent := mustRSAKey(t).PublicKey
+	badExponent.E = 2
+	invalidEC := &ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)}
+	invalidEd := ed25519.PublicKey(make([]byte, ed25519.PublicKeySize-1))
+	for name, key := range map[string]crypto.PublicKey{"weak-rsa": &weak.PublicKey, "bad-exponent": &badExponent, "bad-point": invalidEC, "bad-ed": invalidEd} {
+		t.Run(name, func(t *testing.T) {
+			cfg := base
+			cfg.PreviousSigningKeys = map[string]crypto.PublicKey{"old": key}
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("invalid public key accepted")
+			}
+		})
 	}
 }
 

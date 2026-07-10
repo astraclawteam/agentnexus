@@ -46,15 +46,22 @@ func (c OIDCConfig) Validate() error {
 	if c.EnterpriseID == "" || c.EnterpriseIssuerURL == "" || c.PublicIssuerURL == "" || c.ClientID == "" || c.ClientSecret == "" || c.CallbackURL == "" || c.SigningKeyID == "" || c.SigningPrivateKey == nil || len(c.ConsoleClients) == 0 {
 		return errors.New("browser OIDC configuration incomplete")
 	}
-	for _, raw := range []string{c.EnterpriseIssuerURL, c.PublicIssuerURL} {
-		if err := validateIssuerURL(raw); err != nil {
-			return err
-		}
+	if err := validateIssuerURL(c.EnterpriseIssuerURL, false); err != nil {
+		return err
+	}
+	if err := validateIssuerURL(c.PublicIssuerURL, true); err != nil {
+		return err
 	}
 	if err := validateAbsoluteHTTPSURL(c.CallbackURL, true); err != nil {
 		return err
 	}
+	if c.CallbackURL != strings.TrimRight(c.PublicIssuerURL, "/")+"/oauth2/idp/callback" {
+		return errors.New("OIDC callback URL must match the public issuer callback endpoint")
+	}
 	if _, err := signerAlgorithm(c.SigningPrivateKey); err != nil {
+		return err
+	}
+	if err := validatePublicKey(c.SigningPrivateKey.Public()); err != nil {
 		return err
 	}
 	seen := map[string]struct{}{c.SigningKeyID: {}}
@@ -88,8 +95,8 @@ func (c OIDCConfig) Validate() error {
 	return nil
 }
 
-func validateIssuerURL(raw string) error {
-	if err := validateAbsoluteHTTPSURL(raw, false); err != nil {
+func validateIssuerURL(raw string, allowLoopback bool) error {
+	if err := validateAbsoluteHTTPSURL(raw, allowLoopback); err != nil {
 		return err
 	}
 	u, _ := url.Parse(raw)
@@ -194,7 +201,8 @@ func (i *TokenIssuer) JWKS() ([]byte, error) {
 	sort.Strings(kids)
 	for _, kid := range kids {
 		key := i.config.PreviousSigningKeys[kid]
-		keys = append(keys, jose.JSONWebKey{Key: key, KeyID: kid, Use: "sig"})
+		alg, _ := publicKeyAlgorithm(key)
+		keys = append(keys, jose.JSONWebKey{Key: key, KeyID: kid, Algorithm: string(alg), Use: "sig"})
 	}
 	return json.Marshal(jose.JSONWebKeySet{Keys: keys})
 }
@@ -204,6 +212,28 @@ func (i *TokenIssuer) Algorithm() string {
 		return ""
 	}
 	return string(i.alg)
+}
+
+func (i *TokenIssuer) Algorithms() []string {
+	if i == nil {
+		return []string{}
+	}
+	result := []string{string(i.alg)}
+	seen := map[string]struct{}{string(i.alg): {}}
+	kids := make([]string, 0, len(i.config.PreviousSigningKeys))
+	for kid := range i.config.PreviousSigningKeys {
+		kids = append(kids, kid)
+	}
+	sort.Strings(kids)
+	for _, kid := range kids {
+		alg, _ := publicKeyAlgorithm(i.config.PreviousSigningKeys[kid])
+		value := string(alg)
+		if _, ok := seen[value]; !ok {
+			seen[value] = struct{}{}
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func DecodeS256Challenge(value string) ([]byte, error) {
@@ -244,10 +274,16 @@ func validatePublicKey(key crypto.PublicKey) error {
 		if value.N == nil || value.N.BitLen() < 2048 {
 			return errors.New("RSA public key must be at least 2048 bits")
 		}
+		if value.E < 3 || value.E%2 == 0 {
+			return errors.New("RSA public exponent is invalid")
+		}
 		return nil
 	case *ecdsa.PublicKey:
 		if value.Curve == nil {
 			return errors.New("ECDSA public key has no curve")
+		}
+		if value.X == nil || value.Y == nil || !value.Curve.IsOnCurve(value.X, value.Y) {
+			return errors.New("ECDSA public key point is invalid")
 		}
 		switch value.Curve.Params().Name {
 		case "P-256", "P-384", "P-521":
@@ -256,10 +292,35 @@ func validatePublicKey(key crypto.PublicKey) error {
 			return errors.New("unsupported ECDSA public curve")
 		}
 	case ed25519.PublicKey:
+		if len(value) != ed25519.PublicKeySize {
+			return errors.New("Ed25519 public key has invalid length")
+		}
 		return nil
 	default:
 		return errors.New("unsupported public key type")
 	}
+}
+
+func publicKeyAlgorithm(key crypto.PublicKey) (jose.SignatureAlgorithm, error) {
+	if err := validatePublicKey(key); err != nil {
+		return "", err
+	}
+	switch value := key.(type) {
+	case *rsa.PublicKey:
+		return jose.RS256, nil
+	case *ecdsa.PublicKey:
+		switch value.Curve.Params().Name {
+		case "P-256":
+			return jose.ES256, nil
+		case "P-384":
+			return jose.ES384, nil
+		case "P-521":
+			return jose.ES512, nil
+		}
+	case ed25519.PublicKey:
+		return jose.EdDSA, nil
+	}
+	return "", errors.New("unsupported public key type")
 }
 
 func LoadSigningPrivateKey(path string) (crypto.Signer, error) {
@@ -333,6 +394,7 @@ type EnterpriseOIDC struct {
 	oauth2   oauth2.Config
 	verifier *oidc.IDTokenVerifier
 	client   *http.Client
+	clientID string
 }
 
 func NewEnterpriseOIDC(ctx context.Context, config OIDCConfig) (*EnterpriseOIDC, error) {
@@ -344,7 +406,7 @@ func NewEnterpriseOIDC(ctx context.Context, config OIDCConfig) (*EnterpriseOIDC,
 		return nil, err
 	}
 	client, _ := ctx.Value(oauth2.HTTPClient).(*http.Client)
-	return &EnterpriseOIDC{oauth2: oauth2.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, Endpoint: provider.Endpoint(), RedirectURL: config.CallbackURL, Scopes: []string{oidc.ScopeOpenID}}, verifier: provider.Verifier(&oidc.Config{ClientID: config.ClientID}), client: client}, nil
+	return &EnterpriseOIDC{oauth2: oauth2.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, Endpoint: provider.Endpoint(), RedirectURL: config.CallbackURL, Scopes: []string{oidc.ScopeOpenID}}, verifier: provider.Verifier(&oidc.Config{ClientID: config.ClientID}), client: client, clientID: config.ClientID}, nil
 }
 
 func (o *EnterpriseOIDC) AuthCodeURL(state, nonce string) string {
@@ -368,10 +430,14 @@ func (o *EnterpriseOIDC) ExchangeAndVerify(ctx context.Context, code string) (Ve
 		return VerifiedIdentity{}, "", err
 	}
 	var claims struct {
-		Nonce string `json:"nonce"`
+		Nonce           string `json:"nonce"`
+		AuthorizedParty string `json:"azp"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		return VerifiedIdentity{}, "", err
+	}
+	if len(idToken.Audience) > 1 && claims.AuthorizedParty != o.clientID {
+		return VerifiedIdentity{}, "", errors.New("upstream ID token authorized party mismatch")
 	}
 	return VerifiedIdentity{Issuer: idToken.Issuer, Subject: idToken.Subject}, claims.Nonce, nil
 }

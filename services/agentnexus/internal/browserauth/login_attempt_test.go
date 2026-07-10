@@ -13,8 +13,8 @@ import (
 func TestLoginAttemptStoresStateHashAndExpiresAtFiveMinuteBoundary(t *testing.T) {
 	store := NewMemoryStore()
 	clock := &mutableClock{now: fixedNow}
-	svc := NewService(store, WithClock(clock.Now), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n')}}).Generate))
-	state, attempt, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{
+	svc := NewService(store, WithClock(clock.Now), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
+	state, binding, attempt, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{
 		EnterpriseID: "ent-1", ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback",
 		ConsoleState: "console-state", ConsoleNonce: "console-nonce", CodeChallenge: s256(validVerifier),
 	})
@@ -28,20 +28,23 @@ func TestLoginAttemptStoresStateHashAndExpiresAtFiveMinuteBoundary(t *testing.T)
 		if key == state || strings.Contains(key, state) || len(key) != 64 {
 			t.Fatalf("state stored unsafely: %q", key)
 		}
-		if record.StateHash != key || record.UpstreamNonce == "" {
+		if record.StateHash != key || record.UpstreamNonce == "" || record.BindingHash == "" || record.BindingHash == binding || strings.Contains(record.BindingHash, binding) {
 			t.Fatalf("record=%+v", record)
 		}
 	}
 	clock.now = fixedNow.Add(5 * time.Minute)
-	if _, err := svc.ConsumeLoginAttempt(context.Background(), state); !errors.Is(err, ErrInvalidLoginAttempt) {
+	if _, err := svc.ConsumeLoginAttempt(context.Background(), state, binding); !errors.Is(err, ErrInvalidLoginAttempt) {
 		t.Fatalf("boundary err=%v", err)
+	}
+	if got := len(store.loginAttemptSnapshot()); got != 0 {
+		t.Fatalf("expired attempts retained=%d", got)
 	}
 }
 
 func TestLoginAttemptIsConsumedExactlyOnceConcurrently(t *testing.T) {
 	store := NewMemoryStore()
-	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n')}}).Generate))
-	state, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{
+	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
+	state, binding, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{
 		EnterpriseID: "ent-1", ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback",
 		ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier),
 	})
@@ -54,7 +57,7 @@ func TestLoginAttemptIsConsumedExactlyOnceConcurrently(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := svc.ConsumeLoginAttempt(context.Background(), state); err == nil {
+			if _, err := svc.ConsumeLoginAttempt(context.Background(), state, binding); err == nil {
 				success.Add(1)
 			} else if !errors.Is(err, ErrInvalidLoginAttempt) {
 				t.Errorf("err=%v", err)
@@ -69,25 +72,83 @@ func TestLoginAttemptIsConsumedExactlyOnceConcurrently(t *testing.T) {
 
 func TestLoginAttemptCanceledContextDoesNotMutateStore(t *testing.T) {
 	store := NewMemoryStore()
-	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n')}}).Generate))
-	state, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
+	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
+	state, binding, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := svc.ConsumeLoginAttempt(ctx, state); !errors.Is(err, ErrInvalidLoginAttempt) {
+	if _, err := svc.ConsumeLoginAttempt(ctx, state, binding); !errors.Is(err, ErrInvalidLoginAttempt) {
 		t.Fatalf("err=%v", err)
 	}
-	if _, err := svc.ConsumeLoginAttempt(context.Background(), state); err != nil {
+	if _, err := svc.ConsumeLoginAttempt(context.Background(), state, binding); err != nil {
 		t.Fatalf("valid consume after cancellation: %v", err)
 	}
 }
 
 func TestMemoryLoginAttemptStoreRejectsTTLAboveFiveMinutes(t *testing.T) {
 	store := NewMemoryStore()
-	attempt := storedLoginAttempt{StateHash: strings.Repeat("a", 64), LoginAttempt: LoginAttempt{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier), UpstreamNonce: "up", CreatedAt: fixedNow, ExpiresAt: fixedNow.Add(5*time.Minute + time.Nanosecond)}}
+	attempt := storedLoginAttempt{StateHash: strings.Repeat("a", 64), BindingHash: strings.Repeat("b", 64), LoginAttempt: LoginAttempt{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier), UpstreamNonce: "up", CreatedAt: fixedNow, ExpiresAt: fixedNow.Add(5*time.Minute + time.Nanosecond)}}
 	if err := store.CreateLoginAttempt(context.Background(), attempt); err == nil {
 		t.Fatal("overlong login attempt accepted")
+	}
+}
+
+func TestLoginAttemptWrongBrowserBindingDoesNotConsume(t *testing.T) {
+	store := NewMemoryStore()
+	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
+	state, binding, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ConsumeLoginAttempt(context.Background(), state, secretFixture('x')); !errors.Is(err, ErrInvalidLoginAttempt) {
+		t.Fatalf("wrong binding err=%v", err)
+	}
+	if _, err := svc.ConsumeLoginAttempt(context.Background(), state, binding); err != nil {
+		t.Fatalf("valid binding after attack=%v", err)
+	}
+}
+
+func TestLoginAttemptCleanupRemovesAllExpiredRows(t *testing.T) {
+	store := NewMemoryStore()
+	for i := 0; i < 10; i++ {
+		key := string(rune('a' + i))
+		store.loginAttempts[strings.Repeat(key, 64)] = storedLoginAttempt{StateHash: strings.Repeat(key, 64), BindingHash: strings.Repeat("b", 64), LoginAttempt: LoginAttempt{CreatedAt: fixedNow.Add(-10 * time.Minute), ExpiresAt: fixedNow.Add(-5 * time.Minute)}}
+	}
+	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
+	if _, _, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(store.loginAttemptSnapshot()); got != 1 {
+		t.Fatalf("attempts=%d", got)
+	}
+}
+
+func TestBrowserAuthorizationServiceRejectsOversizedProtocolInputs(t *testing.T) {
+	base := CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}
+	for name, mutate := range map[string]func(*CreateLoginAttemptInput){"client": func(v *CreateLoginAttemptInput) { v.ClientID = strings.Repeat("c", maxClientIDLength+1) }, "redirect": func(v *CreateLoginAttemptInput) { v.RedirectURI = strings.Repeat("r", maxRedirectURILength+1) }, "state": func(v *CreateLoginAttemptInput) { v.ConsoleState = strings.Repeat("s", maxConsoleStateLength+1) }, "nonce": func(v *CreateLoginAttemptInput) { v.ConsoleNonce = strings.Repeat("n", maxNonceLength+1) }} {
+		t.Run(name, func(t *testing.T) {
+			input := base
+			mutate(&input)
+			svc := NewService(NewMemoryStore(), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
+			if _, _, _, err := svc.CreateLoginAttempt(context.Background(), input); !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+	svc, store, _ := newTestService(t)
+	issue := validIssueInput()
+	issue.Nonce = strings.Repeat("n", maxNonceLength+1)
+	if _, err := svc.IssueCode(context.Background(), issue); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("issue err=%v", err)
+	}
+	if len(store.codeSnapshot()) != 0 {
+		t.Fatal("oversized code input persisted")
+	}
+	longCode := strings.Repeat("c", 44)
+	store.codes[hashHex(longCode)] = storedAuthorizationCode{CodeHash: hashHex(longCode), EnterpriseID: "ent-1", UserID: "user-1", ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback", Nonce: "n", CodeChallenge: s256(validVerifier), CreatedAt: fixedNow, ExpiresAt: fixedNow.Add(time.Minute)}
+	if _, err := svc.ExchangeCode(context.Background(), ExchangeCodeInput{Code: longCode, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"}); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("exchange err=%v", err)
 	}
 }

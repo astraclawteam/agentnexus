@@ -1,11 +1,13 @@
 package browserauth
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
@@ -13,7 +15,7 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 	root := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
 	migration := mustRead(t, filepath.Join(root, "db", "migrations", "000002_browser_sessions_and_approvals.sql"))
 	queries := mustRead(t, filepath.Join(root, "db", "queries", "auth.sql"))
-	for _, required := range []string{"browser_sessions", "oauth_authorization_codes", "oidc_login_attempts", "approval_queue_items", "id_hash", "code_hash", "state_hash", "user_agent_hash", "foreign key (enterprise_id, enterprise_user_id)", "check (char_length(id_hash) = 64", "check (char_length(code_hash) = 64", "check (char_length(state_hash) = 64", "create index"} {
+	for _, required := range []string{"browser_sessions", "oauth_authorization_codes", "oidc_login_attempts", "approval_queue_items", "id_hash", "code_hash", "state_hash", "binding_hash", "user_agent_hash", "foreign key (enterprise_id, enterprise_user_id)", "check (char_length(id_hash) = 64", "check (char_length(code_hash) = 64", "check (char_length(state_hash) = 64", "check (char_length(binding_hash) = 64", "create index"} {
 		if !strings.Contains(strings.ToLower(migration), required) {
 			t.Errorf("migration missing %q", required)
 		}
@@ -32,9 +34,17 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 	if !strings.Contains(consume, "update oauth_authorization_codes") || !strings.Contains(consume, "consumed_at is null") {
 		t.Error("ConsumeAuthorizationCode must atomically update only an unconsumed code")
 	}
-	loginConsume := strings.ToLower(namedQuery(t, queries, "ConsumeOIDCLoginAttempt"))
-	if !strings.Contains(loginConsume, "delete from oidc_login_attempts") || !strings.Contains(loginConsume, "expires_at >") || !strings.Contains(loginConsume, "returning") {
-		t.Error("ConsumeOIDCLoginAttempt must atomically delete and return only an unexpired attempt")
+	logout := strings.ToLower(namedQuery(t, queries, "RevokeAndGetBrowserSession"))
+	if !strings.Contains(logout, "update browser_sessions") || !strings.Contains(logout, "returning") || !strings.Contains(logout, "revoked_at is null") {
+		t.Error("logout must atomically revoke and return one live session")
+	}
+	loginGet := strings.ToLower(namedQuery(t, queries, "GetOIDCLoginAttemptForUpdate"))
+	if !strings.Contains(loginGet, "for update") {
+		t.Error("login attempt consume must lock its state row")
+	}
+	createAttempt := strings.ToLower(namedQuery(t, queries, "CreateOIDCLoginAttempt"))
+	if !strings.Contains(createAttempt, "delete from oidc_login_attempts where expires_at <=") {
+		t.Error("login attempt creation must clean expired attempts")
 	}
 	for _, required := range []string{
 		"add constraint uq_org_units_enterprise_id_id unique (enterprise_id, id)",
@@ -50,6 +60,18 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 
 func TestPostgresStoreImplementsStore(t *testing.T) {
 	var _ Store = (*PostgresStore)(nil)
+}
+
+func TestNilPostgresStoreFailsWithoutPanic(t *testing.T) {
+	store := NewPostgresStore(nil)
+	ctx := context.Background()
+	now := time.Now()
+	checks := []func() error{func() error { _, err := store.EnterpriseUserBindingExists(ctx, "e", "u"); return err }, func() error { return store.CreateSession(ctx, storedSession{}) }, func() error { _, err := store.UseSession(ctx, "h", now, time.Hour); return err }, func() error { return store.RevokeSession(ctx, "h", now) }, func() error { _, err := store.RevokeAndGetSession(ctx, "h", now); return err }, func() error { return store.CreateAuthorizationCode(ctx, storedAuthorizationCode{}) }, func() error { _, err := store.ExchangeAuthorizationCode(ctx, exchangeRequest{}); return err }, func() error { return store.CreateLoginAttempt(ctx, storedLoginAttempt{}) }, func() error { _, err := store.ConsumeLoginAttempt(ctx, "s", "b", now); return err }}
+	for index, check := range checks {
+		if err := check(); err == nil {
+			t.Fatalf("operation %d returned nil", index)
+		}
+	}
 }
 
 func mustRead(t *testing.T, path string) string {

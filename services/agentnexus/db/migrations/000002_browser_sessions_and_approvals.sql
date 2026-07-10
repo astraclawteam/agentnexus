@@ -6,6 +6,12 @@ ALTER TABLE enterprise_users
 ALTER TABLE org_units
     ADD CONSTRAINT uq_org_units_enterprise_id_id UNIQUE (enterprise_id, id);
 
+ALTER TABLE org_memberships
+    ADD CONSTRAINT fk_org_memberships_enterprise_user
+    FOREIGN KEY (enterprise_id, enterprise_user_id) REFERENCES enterprise_users(enterprise_id, id),
+    ADD CONSTRAINT fk_org_memberships_enterprise_unit
+    FOREIGN KEY (enterprise_id, org_unit_id) REFERENCES org_units(enterprise_id, id);
+
 CREATE TABLE browser_sessions (
     id_hash TEXT PRIMARY KEY CHECK (char_length(id_hash) = 64 AND id_hash ~ '^[0-9a-f]{64}$'),
     enterprise_id TEXT NOT NULL,
@@ -38,6 +44,7 @@ CREATE TABLE oauth_authorization_codes (
 
 CREATE TABLE oidc_login_attempts (
     state_hash TEXT PRIMARY KEY CHECK (char_length(state_hash) = 64 AND state_hash ~ '^[0-9a-f]{64}$'),
+    binding_hash TEXT NOT NULL CHECK (char_length(binding_hash) = 64 AND binding_hash ~ '^[0-9a-f]{64}$'),
     enterprise_id TEXT NOT NULL REFERENCES enterprises(id),
     client_id TEXT NOT NULL,
     redirect_uri TEXT NOT NULL,
@@ -73,6 +80,7 @@ CREATE INDEX idx_browser_sessions_user ON browser_sessions(enterprise_id, enterp
 CREATE INDEX idx_browser_sessions_expiry ON browser_sessions(idle_expires_at, absolute_expires_at) WHERE revoked_at IS NULL;
 CREATE INDEX idx_oauth_authorization_codes_expiry ON oauth_authorization_codes(expires_at) WHERE consumed_at IS NULL;
 CREATE INDEX idx_oidc_login_attempts_expiry ON oidc_login_attempts(expires_at);
+CREATE INDEX idx_audit_events_enterprise_chain ON audit_events(enterprise_id, created_at DESC, id DESC);
 CREATE INDEX idx_approval_queue_items_enterprise_status ON approval_queue_items(enterprise_id, status, created_at);
 -- +goose StatementEnd
 
@@ -82,6 +90,9 @@ DROP TABLE IF EXISTS approval_queue_items;
 DROP TABLE IF EXISTS oauth_authorization_codes;
 DROP TABLE IF EXISTS oidc_login_attempts;
 DROP TABLE IF EXISTS browser_sessions;
+DROP INDEX IF EXISTS idx_audit_events_enterprise_chain;
+ALTER TABLE org_memberships DROP CONSTRAINT IF EXISTS fk_org_memberships_enterprise_unit;
+ALTER TABLE org_memberships DROP CONSTRAINT IF EXISTS fk_org_memberships_enterprise_user;
 ALTER TABLE org_units DROP CONSTRAINT IF EXISTS uq_org_units_enterprise_id_id;
 ALTER TABLE enterprise_users DROP CONSTRAINT IF EXISTS uq_enterprise_users_enterprise_id_id;
 -- +goose StatementEnd

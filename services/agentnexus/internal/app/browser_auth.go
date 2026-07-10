@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"io"
 	"mime"
@@ -17,7 +19,29 @@ import (
 )
 
 const browserSessionCookie = "nexus_browser_session"
+const loginBindingCookiePrefix = "nexus_oidc_binding_"
 const maxTokenRequestBytes = 16 << 10
+const maxAuthorizeStateLength = 1024
+const maxAuthorizeNonceLength = 512
+const maxUpstreamCodeLength = 4096
+const mandatoryCleanupTimeout = 5 * time.Second
+const upstreamRequestTimeout = 15 * time.Second
+
+type BrowserSessionService interface {
+	GetSession(context.Context, string) (browserauth.BrowserSession, error)
+	CreateSession(context.Context, browserauth.CreateSessionInput) (string, browserauth.BrowserSession, error)
+	RevokeSession(context.Context, string) error
+	LogoutSession(context.Context, string) (browserauth.BrowserSession, error)
+	IssueCode(context.Context, browserauth.IssueCodeInput) (string, error)
+	ExchangeCode(context.Context, browserauth.ExchangeCodeInput) (browserauth.ExchangeResult, error)
+	CreateLoginAttempt(context.Context, browserauth.CreateLoginAttemptInput) (string, string, browserauth.LoginAttempt, error)
+	ConsumeLoginAttempt(context.Context, string, string) (browserauth.LoginAttempt, error)
+}
+type IDTokenIssuer interface {
+	SignIDToken(browserauth.IDTokenInput) (string, time.Duration, error)
+	JWKS() ([]byte, error)
+	Algorithms() []string
+}
 
 type UpstreamOIDC interface {
 	AuthCodeURL(state, nonce string) string
@@ -54,31 +78,36 @@ type BrowserAuditSink interface {
 }
 
 type BrowserAuthDependencies struct {
-	Config     browserauth.OIDCConfig
-	Sessions   *browserauth.Service
-	Upstream   UpstreamOIDC
-	Identities ExternalIdentityResolver
-	Profiles   BrowserProfileResolver
-	Audit      BrowserAuditSink
+	Config      browserauth.OIDCConfig
+	Sessions    BrowserSessionService
+	Upstream    UpstreamOIDC
+	Identities  ExternalIdentityResolver
+	Profiles    BrowserProfileResolver
+	Audit       BrowserAuditSink
+	TokenIssuer IDTokenIssuer
 }
 
 type browserAuthHandler struct {
 	config     browserauth.OIDCConfig
-	sessions   *browserauth.Service
+	sessions   BrowserSessionService
 	upstream   UpstreamOIDC
 	identities ExternalIdentityResolver
 	profiles   BrowserProfileResolver
 	audit      BrowserAuditSink
-	issuer     *browserauth.TokenIssuer
+	issuer     IDTokenIssuer
 }
 
 func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, error) {
 	if deps.Sessions == nil || deps.Upstream == nil || deps.Identities == nil || deps.Profiles == nil || deps.Audit == nil {
 		return nil, errors.New("browser auth dependencies incomplete")
 	}
-	issuer, err := browserauth.NewTokenIssuer(deps.Config, time.Now)
-	if err != nil {
-		return nil, err
+	issuer := deps.TokenIssuer
+	if issuer == nil {
+		var err error
+		issuer, err = browserauth.NewTokenIssuer(deps.Config, time.Now)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer}, nil
 }
@@ -94,24 +123,25 @@ func (h *browserAuthHandler) register(mux *http.ServeMux) {
 }
 
 func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
 	query := r.URL.Query()
 	clientID, ok := requiredSingle(query, "client_id")
-	if !ok {
+	if !ok || len(clientID) > 256 {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
 	redirectURI, ok := requiredSingle(query, "redirect_uri")
-	if !ok || !h.config.AllowsRedirect(clientID, redirectURI) {
+	if !ok || len(redirectURI) > 2048 || !h.config.AllowsRedirect(clientID, redirectURI) {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
 	state, ok := requiredSingle(query, "state")
-	if !ok {
+	if !ok || len(state) > maxAuthorizeStateLength {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
 	nonce, ok := requiredSingle(query, "nonce")
-	if !ok {
+	if !ok || len(nonce) > maxAuthorizeNonceLength {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
@@ -125,11 +155,11 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
-	if value, valid := optionalSingle(query, "response_type"); !valid || (value != "" && value != "code") {
+	if values, present := query["response_type"]; present && (len(values) != 1 || values[0] != "code") {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
-	if scope, valid := optionalSingle(query, "scope"); !valid || (scope != "" && !slices.Contains(strings.Fields(scope), "openid")) {
+	if values, present := query["scope"]; present && (len(values) != 1 || values[0] == "" || !slices.Contains(strings.Fields(values[0]), "openid")) {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
@@ -139,7 +169,7 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if cookie, err := r.Cookie(browserSessionCookie); err == nil {
-		if session, err := h.sessions.GetSession(r.Context(), cookie.Value); err == nil {
+		if session, err := h.sessions.GetSession(r.Context(), cookie.Value); err == nil && session.EnterpriseID == h.config.EnterpriseID {
 			code, err := h.sessions.IssueCode(r.Context(), browserauth.IssueCodeInput{EnterpriseID: session.EnterpriseID, UserID: session.UserID, ClientID: clientID, RedirectURI: redirectURI, Nonce: nonce, CodeChallenge: challenge})
 			if err != nil {
 				writeOAuthError(w, http.StatusServiceUnavailable)
@@ -150,32 +180,42 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 		}
 		clearSessionCookie(w)
 	}
-	attemptState, attempt, err := h.sessions.CreateLoginAttempt(r.Context(), browserauth.CreateLoginAttemptInput{EnterpriseID: h.config.EnterpriseID, ClientID: clientID, RedirectURI: redirectURI, ConsoleState: state, ConsoleNonce: nonce, CodeChallenge: challenge})
+	attemptState, binding, attempt, err := h.sessions.CreateLoginAttempt(r.Context(), browserauth.CreateLoginAttemptInput{EnterpriseID: h.config.EnterpriseID, ClientID: clientID, RedirectURI: redirectURI, ConsoleState: state, ConsoleNonce: nonce, CodeChallenge: challenge})
 	if err != nil {
 		writeOAuthError(w, http.StatusServiceUnavailable)
 		return
 	}
+	setLoginBindingCookie(w, attemptState, binding, attempt.ExpiresAt)
 	http.Redirect(w, r, h.upstream.AuthCodeURL(attemptState, attempt.UpstreamNonce), http.StatusFound)
 }
 
 func (h *browserAuthHandler) callback(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
 	query := r.URL.Query()
-	code, ok := requiredSingle(query, "code")
-	if !ok {
-		writeOAuthError(w, http.StatusBadRequest)
-		return
-	}
 	state, ok := requiredSingle(query, "state")
-	if !ok {
+	if !ok || !canonicalOpaque(state) {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
-	attempt, err := h.sessions.ConsumeLoginAttempt(r.Context(), state)
+	bindingCookie, cookieErr := r.Cookie(loginBindingCookieName(state))
+	clearLoginBindingCookie(w, state)
+	if cookieErr != nil || !canonicalOpaque(bindingCookie.Value) {
+		writeOAuthError(w, http.StatusUnauthorized)
+		return
+	}
+	code, ok := requiredSingle(query, "code")
+	if !ok || len(code) > maxUpstreamCodeLength {
+		writeOAuthError(w, http.StatusBadRequest)
+		return
+	}
+	attempt, err := h.sessions.ConsumeLoginAttempt(r.Context(), state, bindingCookie.Value)
 	if err != nil {
 		writeOAuthError(w, http.StatusUnauthorized)
 		return
 	}
-	identity, nonce, err := h.upstream.ExchangeAndVerify(r.Context(), code)
+	upstreamCtx, upstreamCancel := context.WithTimeout(r.Context(), upstreamRequestTimeout)
+	defer upstreamCancel()
+	identity, nonce, err := h.upstream.ExchangeAndVerify(upstreamCtx, code)
 	if err != nil || !constantTimeEqual(nonce, attempt.UpstreamNonce) {
 		writeOAuthError(w, http.StatusUnauthorized)
 		return
@@ -191,7 +231,9 @@ func (h *browserAuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fail := func(status int) {
-		_ = h.sessions.RevokeSession(context.WithoutCancel(r.Context()), sessionToken)
+		cleanupCtx, cancel := boundedCleanupContext(r.Context())
+		defer cancel()
+		_ = h.sessions.RevokeSession(cleanupCtx, sessionToken)
 		writeOAuthError(w, status)
 	}
 	downstreamCode, err := h.sessions.IssueCode(r.Context(), browserauth.IssueCodeInput{EnterpriseID: enterpriseID, UserID: userID, ClientID: attempt.ClientID, RedirectURI: attempt.RedirectURI, Nonce: attempt.ConsoleNonce, CodeChallenge: attempt.CodeChallenge})
@@ -199,7 +241,10 @@ func (h *browserAuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable)
 		return
 	}
-	if err := h.audit.AppendBrowserAudit(r.Context(), BrowserAuditEvent{EnterpriseID: enterpriseID, ActorUserID: userID, Action: "browser_session.create", Decision: "allow"}); err != nil {
+	auditCtx, auditCancel := boundedCleanupContext(r.Context())
+	auditErr := h.audit.AppendBrowserAudit(auditCtx, BrowserAuditEvent{EnterpriseID: enterpriseID, ActorUserID: userID, Action: "browser_session.create", Decision: "allow"})
+	auditCancel()
+	if auditErr != nil {
 		fail(http.StatusServiceUnavailable)
 		return
 	}
@@ -208,68 +253,87 @@ func (h *browserAuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *browserAuthHandler) token(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/x-www-form-urlencoded" {
-		writeTokenError(w, http.StatusUnsupportedMediaType)
+		writeTokenError(w, http.StatusUnsupportedMediaType, "invalid_request")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxTokenRequestBytes+1))
 	if err != nil || len(body) > maxTokenRequestBytes {
-		writeTokenError(w, http.StatusRequestEntityTooLarge)
+		writeTokenError(w, http.StatusRequestEntityTooLarge, "invalid_request")
 		return
 	}
 	form, err := url.ParseQuery(string(body))
 	if err != nil {
-		writeTokenError(w, http.StatusBadRequest)
+		writeTokenError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	grant, ok := requiredSingle(form, "grant_type")
-	if !ok || grant != "authorization_code" {
-		writeTokenError(w, http.StatusBadRequest)
+	if !ok {
+		writeTokenError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if grant != "authorization_code" {
+		writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type")
 		return
 	}
 	code, ok := requiredSingle(form, "code")
 	if !ok {
-		writeTokenError(w, http.StatusBadRequest)
+		writeTokenError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	verifier, ok := requiredSingle(form, "code_verifier")
 	if !ok {
-		writeTokenError(w, http.StatusBadRequest)
+		writeTokenError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	clientID, ok := requiredSingle(form, "client_id")
 	if !ok {
-		writeTokenError(w, http.StatusBadRequest)
+		writeTokenError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if len(clientID) > 256 {
+		writeTokenError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	redirectURI, ok := requiredSingle(form, "redirect_uri")
-	if !ok || !h.config.AllowsRedirect(clientID, redirectURI) {
-		writeTokenError(w, http.StatusBadRequest)
+	if !ok {
+		writeTokenError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if len(redirectURI) > 2048 {
+		writeTokenError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !h.config.AllowsRedirect(clientID, redirectURI) {
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
 		return
 	}
 	if len(form) != 5 {
-		writeTokenError(w, http.StatusBadRequest)
+		writeTokenError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	result, err := h.sessions.ExchangeCode(r.Context(), browserauth.ExchangeCodeInput{Code: code, Verifier: verifier, ClientID: clientID, RedirectURI: redirectURI})
 	if err != nil {
-		writeTokenError(w, http.StatusBadRequest)
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+		return
+	}
+	if result.EnterpriseID != h.config.EnterpriseID {
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
 		return
 	}
 	idToken, ttl, err := h.issuer.SignIDToken(browserauth.IDTokenInput{Subject: result.UserID, Audience: clientID, Nonce: result.Nonce, EnterpriseID: result.EnterpriseID, EnterpriseUserID: result.UserID})
 	if err != nil {
-		writeTokenError(w, http.StatusServiceUnavailable)
+		writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable")
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
 	writeJSON(w, http.StatusOK, map[string]any{"id_token": idToken, "token_type": "Bearer", "expires_in": int(ttl.Seconds())})
 }
 
 func (h *browserAuthHandler) discovery(w http.ResponseWriter, _ *http.Request) {
 	issuer := strings.TrimRight(h.config.PublicIssuerURL, "/")
-	writeJSON(w, http.StatusOK, map[string]any{"issuer": h.config.PublicIssuerURL, "authorization_endpoint": issuer + "/oauth2/authorize", "token_endpoint": issuer + "/oauth2/token", "jwks_uri": issuer + "/oauth2/jwks", "response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code"}, "code_challenge_methods_supported": []string{"S256"}, "id_token_signing_alg_values_supported": []string{h.issuer.Algorithm()}})
+	writeJSON(w, http.StatusOK, map[string]any{"issuer": h.config.PublicIssuerURL, "authorization_endpoint": issuer + "/oauth2/authorize", "token_endpoint": issuer + "/oauth2/token", "jwks_uri": issuer + "/oauth2/jwks", "response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code"}, "code_challenge_methods_supported": []string{"S256"}, "id_token_signing_alg_values_supported": h.issuer.Algorithms()})
 }
 
 func (h *browserAuthHandler) jwks(w http.ResponseWriter, _ *http.Request) {
@@ -296,6 +360,11 @@ func (h *browserAuthHandler) me(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusUnauthorized)
 		return
 	}
+	if session.EnterpriseID != h.config.EnterpriseID {
+		clearSessionCookie(w)
+		writeOAuthError(w, http.StatusUnauthorized)
+		return
+	}
 	profile, err := h.profiles.ResolveBrowserProfile(r.Context(), session.EnterpriseID, session.UserID)
 	if err != nil || profile.EnterpriseID != session.EnterpriseID || profile.EnterpriseUserID != session.UserID || profile.OrgVersion < 1 {
 		writeOAuthError(w, http.StatusServiceUnavailable)
@@ -317,20 +386,28 @@ func (h *browserAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	session, err := h.sessions.GetSession(r.Context(), cookie.Value)
-	if err != nil {
+	logoutCtx, cancel := boundedCleanupContext(r.Context())
+	session, err := h.sessions.LogoutSession(logoutCtx, cookie.Value)
+	cancel()
+	if errors.Is(err, browserauth.ErrInvalidSession) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if err := h.sessions.RevokeSession(context.WithoutCancel(r.Context()), cookie.Value); err != nil {
+	if err != nil {
 		writeOAuthError(w, http.StatusServiceUnavailable)
 		return
 	}
-	if err := h.audit.AppendBrowserAudit(r.Context(), BrowserAuditEvent{EnterpriseID: session.EnterpriseID, ActorUserID: session.UserID, Action: "browser_session.logout", Decision: "allow"}); err != nil {
+	auditCtx, auditCancel := boundedCleanupContext(r.Context())
+	defer auditCancel()
+	if err := h.audit.AppendBrowserAudit(auditCtx, BrowserAuditEvent{EnterpriseID: session.EnterpriseID, ActorUserID: session.UserID, Action: "browser_session.logout", Decision: "allow"}); err != nil {
 		writeOAuthError(w, http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func boundedCleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), mandatoryCleanupTimeout)
 }
 
 func requiredSingle(values url.Values, key string) (string, bool) {
@@ -340,16 +417,6 @@ func requiredSingle(values url.Values, key string) (string, bool) {
 		returnValue = items[0]
 	}
 	return returnValue, ok && len(items) == 1 && returnValue != ""
-}
-func optionalSingle(values url.Values, key string) (string, bool) {
-	items, ok := values[key]
-	if !ok {
-		return "", true
-	}
-	if len(items) != 1 {
-		return "", false
-	}
-	return items[0], true
 }
 func constantTimeEqual(left, right string) bool {
 	leftHash := sha256.Sum256([]byte(left))
@@ -377,8 +444,33 @@ func clearSessionCookie(w http.ResponseWriter) {
 func writeOAuthError(w http.ResponseWriter, status int) {
 	writeJSON(w, status, map[string]string{"error": "request_failed"})
 }
-func writeTokenError(w http.ResponseWriter, status int) {
+func writeTokenError(w http.ResponseWriter, status int, code string) {
+	setNoStore(w)
+	writeJSON(w, status, map[string]string{"error": code})
+}
+
+func setNoStore(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
-	writeJSON(w, status, map[string]string{"error": "invalid_request"})
+}
+
+func canonicalOpaque(value string) bool {
+	if len(value) != 43 {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	return err == nil && len(raw) == 32 && base64.RawURLEncoding.EncodeToString(raw) == value
+}
+
+func loginBindingCookieName(state string) string {
+	sum := sha256.Sum256([]byte(state))
+	return loginBindingCookiePrefix + hex.EncodeToString(sum[:])
+}
+
+func setLoginBindingCookie(w http.ResponseWriter, state, binding string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{Name: loginBindingCookieName(state), Value: binding, Path: "/oauth2/idp/callback", Expires: expires, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+}
+
+func clearLoginBindingCookie(w http.ResponseWriter, state string) {
+	http.SetCookie(w, &http.Cookie{Name: loginBindingCookieName(state), Value: "", Path: "/oauth2/idp/callback", Expires: time.Unix(1, 0), MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 }

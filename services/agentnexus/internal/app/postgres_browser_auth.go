@@ -35,7 +35,12 @@ func (d *PostgresBrowserDirectory) ResolveBrowserProfile(ctx context.Context, en
 	if d == nil || d.pool == nil || enterpriseID == "" || userID == "" {
 		return BrowserProfile{}, errors.New("profile directory unavailable")
 	}
-	queries := db.New(d.pool)
+	tx, err := d.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return BrowserProfile{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	queries := db.New(tx)
 	record, err := queries.GetBrowserProfile(ctx, db.GetBrowserProfileParams{EnterpriseID: enterpriseID, ID: userID})
 	if err != nil {
 		return BrowserProfile{}, err
@@ -46,6 +51,9 @@ func (d *PostgresBrowserDirectory) ResolveBrowserProfile(ctx context.Context, en
 	}
 	if units == nil {
 		units = []string{}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return BrowserProfile{}, err
 	}
 	return BrowserProfile{EnterpriseID: enterpriseID, EnterpriseUserID: userID, DisplayName: record.DisplayName, OrgVersion: record.OrgVersion, OrgUnitIDs: units, Permissions: []string{}, AdvancedModeAllowed: false}, nil
 }

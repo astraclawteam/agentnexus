@@ -36,6 +36,11 @@ func (s *MemoryStore) CreateLoginAttempt(ctx context.Context, attempt storedLogi
 	if s.err != nil {
 		return s.err
 	}
+	for key, record := range s.loginAttempts {
+		if !attempt.CreatedAt.Before(record.ExpiresAt) {
+			delete(s.loginAttempts, key)
+		}
+	}
 	if _, ok := s.loginAttempts[attempt.StateHash]; ok {
 		return errDuplicate
 	}
@@ -43,7 +48,7 @@ func (s *MemoryStore) CreateLoginAttempt(ctx context.Context, attempt storedLogi
 	return nil
 }
 
-func (s *MemoryStore) ConsumeLoginAttempt(ctx context.Context, stateHash string, now time.Time) (storedLoginAttempt, error) {
+func (s *MemoryStore) ConsumeLoginAttempt(ctx context.Context, stateHash, bindingHash string, now time.Time) (storedLoginAttempt, error) {
 	if err := ctx.Err(); err != nil {
 		return storedLoginAttempt{}, err
 	}
@@ -56,7 +61,14 @@ func (s *MemoryStore) ConsumeLoginAttempt(ctx context.Context, stateHash string,
 		return storedLoginAttempt{}, s.err
 	}
 	record, ok := s.loginAttempts[stateHash]
-	if !ok || !now.Before(record.ExpiresAt) {
+	if !ok {
+		return storedLoginAttempt{}, errNotFound
+	}
+	if !now.Before(record.ExpiresAt) {
+		delete(s.loginAttempts, stateHash)
+		return storedLoginAttempt{}, errNotFound
+	}
+	if len(record.BindingHash) != len(bindingHash) || subtle.ConstantTimeCompare([]byte(record.BindingHash), []byte(bindingHash)) != 1 {
 		return storedLoginAttempt{}, errNotFound
 	}
 	delete(s.loginAttempts, stateHash)
@@ -161,6 +173,28 @@ func (s *MemoryStore) RevokeSession(ctx context.Context, idHash string, now time
 		s.sessions[idHash] = record
 	}
 	return nil
+}
+
+func (s *MemoryStore) RevokeAndGetSession(ctx context.Context, idHash string, now time.Time) (storedSession, error) {
+	if err := ctx.Err(); err != nil {
+		return storedSession{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return storedSession{}, err
+	}
+	if s.err != nil {
+		return storedSession{}, s.err
+	}
+	record, ok := s.sessions[idHash]
+	if !ok || record.RevokedAt != nil || !now.Before(record.IdleExpiresAt) || !now.Before(record.AbsoluteExpiresAt) {
+		return storedSession{}, errNotFound
+	}
+	revoked := now
+	record.RevokedAt = &revoked
+	s.sessions[idHash] = record
+	return record, nil
 }
 
 func (s *MemoryStore) CreateAuthorizationCode(ctx context.Context, code storedAuthorizationCode) error {

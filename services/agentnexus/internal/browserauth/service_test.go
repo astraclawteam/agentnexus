@@ -442,6 +442,42 @@ func TestConcurrentCorrectExchangeHasExactlyOneSuccess(t *testing.T) {
 	}
 }
 
+func TestLogoutSessionAtomicallyReturnsActorWithoutSlidingIdle(t *testing.T) {
+	svc, store, clock := newTestService(t)
+	raw, created, err := svc.CreateSession(context.Background(), CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := store.sessionSnapshot()
+	clock.now = clock.now.Add(time.Hour)
+	actor, err := svc.LogoutSession(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actor.EnterpriseID != "ent-1" || actor.UserID != "user-1" {
+		t.Fatalf("actor=%+v", actor)
+	}
+	for key, record := range store.sessionSnapshot() {
+		if !record.LastSeenAt.Equal(before[key].LastSeenAt) || record.RevokedAt == nil {
+			t.Fatalf("record=%+v created=%+v", record, created)
+		}
+	}
+	if _, err := svc.GetSession(context.Background(), raw); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("post logout=%v", err)
+	}
+}
+
+func TestLogoutSessionDistinguishesInvalidFromStoreUnavailable(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	if _, err := svc.LogoutSession(context.Background(), secretFixture('x')); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("invalid=%v", err)
+	}
+	store.err = errors.New("database unavailable")
+	if _, err := svc.LogoutSession(context.Background(), secretFixture('x')); !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("store=%v", err)
+	}
+}
+
 type mutableClock struct{ now time.Time }
 
 func (c *mutableClock) Now() time.Time { return c.now }

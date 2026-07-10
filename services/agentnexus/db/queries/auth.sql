@@ -31,6 +31,14 @@ UPDATE browser_sessions
 SET revoked_at = COALESCE(revoked_at, $2)
 WHERE id_hash = $1;
 
+-- name: RevokeAndGetBrowserSession :one
+UPDATE browser_sessions
+SET revoked_at = $2
+WHERE id_hash = $1 AND revoked_at IS NULL
+  AND idle_expires_at > $2 AND absolute_expires_at > $2
+RETURNING id_hash, enterprise_id, enterprise_user_id, created_at, last_seen_at,
+          idle_expires_at, absolute_expires_at, revoked_at, user_agent_hash;
+
 -- name: CreateAuthorizationCode :one
 INSERT INTO oauth_authorization_codes (
     code_hash, client_id, redirect_uri, enterprise_id, enterprise_user_id,
@@ -52,18 +60,25 @@ SET consumed_at = $2
 WHERE code_hash = $1 AND consumed_at IS NULL;
 
 -- name: CreateOIDCLoginAttempt :one
+WITH expired AS (
+    DELETE FROM oidc_login_attempts WHERE expires_at <= $10
+)
 INSERT INTO oidc_login_attempts (
-    state_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+    state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
     code_challenge, upstream_nonce, created_at, expires_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-RETURNING state_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+RETURNING state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
           code_challenge, upstream_nonce, created_at, expires_at;
 
--- name: ConsumeOIDCLoginAttempt :one
-DELETE FROM oidc_login_attempts
-WHERE state_hash = $1 AND expires_at > $2
-RETURNING state_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
-          code_challenge, upstream_nonce, created_at, expires_at;
+-- name: GetOIDCLoginAttemptForUpdate :one
+SELECT state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+       code_challenge, upstream_nonce, created_at, expires_at
+FROM oidc_login_attempts
+WHERE state_hash = $1
+FOR UPDATE;
+
+-- name: DeleteOIDCLoginAttempt :execrows
+DELETE FROM oidc_login_attempts WHERE state_hash = $1;
 
 -- name: ResolveExternalIdentity :one
 SELECT enterprise_id, enterprise_user_id
@@ -77,7 +92,8 @@ FROM enterprise_users AS u
 WHERE u.enterprise_id = $1 AND u.id = $2;
 
 -- name: ListBrowserProfileOrgUnits :many
-SELECT org_unit_id
-FROM org_memberships
-WHERE enterprise_id = $1 AND enterprise_user_id = $2
-ORDER BY org_unit_id;
+SELECT m.org_unit_id
+FROM org_memberships AS m
+JOIN org_units AS u ON u.enterprise_id = m.enterprise_id AND u.id = m.org_unit_id
+WHERE m.enterprise_id = $1 AND m.enterprise_user_id = $2
+ORDER BY m.org_unit_id;

@@ -16,6 +16,10 @@ const (
 	defaultAbsoluteTimeout = 24 * time.Hour
 	defaultCodeTimeout     = 60 * time.Second
 	defaultLoginTimeout    = 5 * time.Minute
+	maxClientIDLength      = 256
+	maxRedirectURILength   = 2048
+	maxConsoleStateLength  = 1024
+	maxNonceLength         = 512
 )
 
 var (
@@ -23,12 +27,14 @@ var (
 	ErrInvalidGrant        = errors.New("invalid authorization grant")
 	ErrInvalidInput        = errors.New("invalid browser authorization input")
 	ErrInvalidLoginAttempt = errors.New("invalid OIDC login attempt")
+	ErrSessionUnavailable  = errors.New("browser session store unavailable")
 )
 
 var (
-	errNotFound       = errors.New("browser authorization record not found")
-	errInvalidBinding = errors.New("enterprise user binding invalid")
-	errDuplicate      = errors.New("browser authorization record already exists")
+	errNotFound         = errors.New("browser authorization record not found")
+	errInvalidBinding   = errors.New("enterprise user binding invalid")
+	errDuplicate        = errors.New("browser authorization record already exists")
+	errStoreUnavailable = errors.New("browser authorization store unavailable")
 )
 
 type Store interface {
@@ -36,44 +42,69 @@ type Store interface {
 	CreateSession(context.Context, storedSession) error
 	UseSession(context.Context, string, time.Time, time.Duration) (storedSession, error)
 	RevokeSession(context.Context, string, time.Time) error
+	RevokeAndGetSession(context.Context, string, time.Time) (storedSession, error)
 	CreateAuthorizationCode(context.Context, storedAuthorizationCode) error
 	ExchangeAuthorizationCode(context.Context, exchangeRequest) (storedAuthorizationCode, error)
 	CreateLoginAttempt(context.Context, storedLoginAttempt) error
-	ConsumeLoginAttempt(context.Context, string, time.Time) (storedLoginAttempt, error)
+	ConsumeLoginAttempt(context.Context, string, string, time.Time) (storedLoginAttempt, error)
 }
 
-func (s *Service) CreateLoginAttempt(ctx context.Context, input CreateLoginAttemptInput) (string, LoginAttempt, error) {
-	if s == nil || s.store == nil || input.EnterpriseID == "" || input.ClientID == "" || input.RedirectURI == "" || input.ConsoleState == "" || input.ConsoleNonce == "" || !validS256Challenge(input.CodeChallenge) {
-		return "", LoginAttempt{}, ErrInvalidInput
+func (s *Service) LogoutSession(ctx context.Context, token string) (BrowserSession, error) {
+	if s == nil || s.store == nil || validateGeneratedSecret(token) != nil {
+		return BrowserSession{}, ErrInvalidSession
+	}
+	record, err := s.store.RevokeAndGetSession(ctx, hashHex(token), s.now().UTC())
+	if err != nil {
+		if errors.Is(err, errNotFound) {
+			return BrowserSession{}, ErrInvalidSession
+		}
+		return BrowserSession{}, ErrSessionUnavailable
+	}
+	return publicSession(record), nil
+}
+
+func (s *Service) CreateLoginAttempt(ctx context.Context, input CreateLoginAttemptInput) (string, string, LoginAttempt, error) {
+	if s == nil || s.store == nil || input.EnterpriseID == "" || !validBounded(input.ClientID, maxClientIDLength) || !validBounded(input.RedirectURI, maxRedirectURILength) || !validBounded(input.ConsoleState, maxConsoleStateLength) || !validBounded(input.ConsoleNonce, maxNonceLength) || !validS256Challenge(input.CodeChallenge) {
+		return "", "", LoginAttempt{}, ErrInvalidInput
 	}
 	state, err := s.generateSecret()
 	if err != nil {
-		return "", LoginAttempt{}, err
+		return "", "", LoginAttempt{}, err
 	}
 	nonce, err := s.generateSecret()
 	if err != nil {
-		return "", LoginAttempt{}, err
+		return "", "", LoginAttempt{}, err
 	}
-	if validateGeneratedSecret(state) != nil || validateGeneratedSecret(nonce) != nil {
-		return "", LoginAttempt{}, ErrInvalidInput
+	binding, err := s.generateSecret()
+	if err != nil {
+		return "", "", LoginAttempt{}, err
+	}
+	if !validOpaqueSecret(state) || !validOpaqueSecret(nonce) || !validOpaqueSecret(binding) {
+		return "", "", LoginAttempt{}, ErrInvalidInput
 	}
 	now := s.now().UTC()
 	attempt := LoginAttempt{EnterpriseID: input.EnterpriseID, ClientID: input.ClientID, RedirectURI: input.RedirectURI, ConsoleState: input.ConsoleState, ConsoleNonce: input.ConsoleNonce, CodeChallenge: input.CodeChallenge, UpstreamNonce: nonce, CreatedAt: now, ExpiresAt: now.Add(defaultLoginTimeout)}
-	if err := s.store.CreateLoginAttempt(ctx, storedLoginAttempt{StateHash: hashHex(state), LoginAttempt: attempt}); err != nil {
-		return "", LoginAttempt{}, err
+	if err := s.store.CreateLoginAttempt(ctx, storedLoginAttempt{StateHash: hashHex(state), BindingHash: hashHex(binding), LoginAttempt: attempt}); err != nil {
+		return "", "", LoginAttempt{}, err
 	}
-	return state, attempt, nil
+	return state, binding, attempt, nil
 }
 
-func (s *Service) ConsumeLoginAttempt(ctx context.Context, state string) (LoginAttempt, error) {
-	if s == nil || s.store == nil || state == "" {
+func (s *Service) ConsumeLoginAttempt(ctx context.Context, state, binding string) (LoginAttempt, error) {
+	if s == nil || s.store == nil || !validOpaqueSecret(state) || !validOpaqueSecret(binding) {
 		return LoginAttempt{}, ErrInvalidLoginAttempt
 	}
-	record, err := s.store.ConsumeLoginAttempt(ctx, hashHex(state), s.now().UTC())
+	record, err := s.store.ConsumeLoginAttempt(ctx, hashHex(state), hashHex(binding), s.now().UTC())
 	if err != nil {
 		return LoginAttempt{}, ErrInvalidLoginAttempt
 	}
 	return record.LoginAttempt, nil
+}
+
+func validBounded(value string, max int) bool { return value != "" && len(value) <= max }
+func validOpaqueSecret(value string) bool {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	return err == nil && len(decoded) == 32 && len(value) == 43 && base64.RawURLEncoding.EncodeToString(decoded) == value
 }
 
 type Service struct {
@@ -151,7 +182,7 @@ func (s *Service) RevokeSession(ctx context.Context, token string) error {
 }
 
 func (s *Service) IssueCode(ctx context.Context, input IssueCodeInput) (string, error) {
-	if s == nil || s.store == nil || input.EnterpriseID == "" || input.UserID == "" || input.ClientID == "" || input.RedirectURI == "" || input.Nonce == "" || !validS256Challenge(input.CodeChallenge) {
+	if s == nil || s.store == nil || input.EnterpriseID == "" || input.UserID == "" || !validBounded(input.ClientID, maxClientIDLength) || !validBounded(input.RedirectURI, maxRedirectURILength) || !validBounded(input.Nonce, maxNonceLength) || !validS256Challenge(input.CodeChallenge) {
 		return "", ErrInvalidInput
 	}
 	ok, err := s.store.EnterpriseUserBindingExists(ctx, input.EnterpriseID, input.UserID)
@@ -162,8 +193,8 @@ func (s *Service) IssueCode(ctx context.Context, input IssueCodeInput) (string, 
 	if err != nil {
 		return "", err
 	}
-	if err := validateGeneratedSecret(code); err != nil {
-		return "", err
+	if !validOpaqueSecret(code) {
+		return "", ErrInvalidInput
 	}
 	now := s.now().UTC()
 	record := storedAuthorizationCode{
@@ -178,7 +209,7 @@ func (s *Service) IssueCode(ctx context.Context, input IssueCodeInput) (string, 
 }
 
 func (s *Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (ExchangeResult, error) {
-	if s == nil || s.store == nil || input.Code == "" || !validPKCEVerifier(input.Verifier) || input.ClientID == "" || input.RedirectURI == "" {
+	if s == nil || s.store == nil || !validOpaqueSecret(input.Code) || !validPKCEVerifier(input.Verifier) || !validBounded(input.ClientID, maxClientIDLength) || !validBounded(input.RedirectURI, maxRedirectURILength) {
 		return ExchangeResult{}, ErrInvalidGrant
 	}
 	digest := sha256.Sum256([]byte(input.Verifier))

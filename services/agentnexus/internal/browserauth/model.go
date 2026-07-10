@@ -61,7 +61,8 @@ type LoginAttempt struct {
 }
 
 type storedLoginAttempt struct {
-	StateHash string
+	StateHash   string
+	BindingHash string
 	LoginAttempt
 }
 

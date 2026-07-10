@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,9 @@ func TestBrowserAuthAuthorizeUsesEnterpriseIdPOrSilentSession(t *testing.T) {
 	h := newBrowserHarness(t)
 	query := h.authorizeQuery("console-state", "console-nonce")
 	rr := perform(h.router, http.MethodGet, "/oauth2/authorize?"+query.Encode(), "", nil)
+	if rr.Header().Get("Cache-Control") != "no-store" || rr.Header().Get("Pragma") != "no-cache" {
+		t.Fatalf("authorize cache=%v", rr.Header())
+	}
 	if rr.Code != http.StatusFound {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
@@ -57,6 +61,55 @@ func TestBrowserAuthAuthorizeUsesEnterpriseIdPOrSilentSession(t *testing.T) {
 	}
 }
 
+func TestBrowserAuthCallbackRequiresSameBrowserBindingAndClearsTemporaryCookie(t *testing.T) {
+	h := newBrowserHarness(t)
+	start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
+	location, _ := url.Parse(start.Header().Get("Location"))
+	state := location.Query().Get("state")
+	h.idp.setNonce(location.Query().Get("nonce"))
+	binding := loginBindingCookie(t, start)
+	if binding.Path != "/oauth2/idp/callback" || !binding.HttpOnly || !binding.Secure || binding.SameSite != http.SameSiteLaxMode || binding.Expires.IsZero() {
+		t.Fatalf("binding=%+v", binding)
+	}
+	fresh := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(state), "", nil)
+	if fresh.Code != http.StatusUnauthorized {
+		t.Fatalf("fresh browser=%d", fresh.Code)
+	}
+	cleared := loginBindingCookie(t, fresh)
+	if cleared.MaxAge >= 0 || cleared.Path != "/oauth2/idp/callback" {
+		t.Fatalf("fresh clear=%+v", cleared)
+	}
+	valid := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(state), "", binding)
+	if valid.Code != http.StatusFound {
+		t.Fatalf("valid=%d body=%s", valid.Code, valid.Body.String())
+	}
+	if clear := loginBindingCookie(t, valid); clear.MaxAge >= 0 {
+		t.Fatalf("success did not clear: %+v", clear)
+	}
+}
+
+func TestBrowserAuthLoginBindingCookiesSupportMultipleTabs(t *testing.T) {
+	h := newBrowserHarness(t)
+	first := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s1", "n1").Encode(), "", nil)
+	second := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s2", "n2").Encode(), "", nil)
+	firstLocation, _ := url.Parse(first.Header().Get("Location"))
+	firstCookie := loginBindingCookie(t, first)
+	secondCookie := loginBindingCookie(t, second)
+	if firstCookie.Name == secondCookie.Name {
+		t.Fatalf("tabs share cookie %q", firstCookie.Name)
+	}
+	h.idp.setNonce(firstLocation.Query().Get("nonce"))
+	wrong := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(firstLocation.Query().Get("state")), "", secondCookie)
+	if wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("cross-tab=%d", wrong.Code)
+	}
+	h.idp.setNonce(firstLocation.Query().Get("nonce"))
+	correct := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(firstLocation.Query().Get("state")), "", firstCookie)
+	if correct.Code != http.StatusFound {
+		t.Fatalf("first tab=%d", correct.Code)
+	}
+}
+
 func TestBrowserAuthAuthorizeRejectsAmbiguousOrUnsafeInputs(t *testing.T) {
 	h := newBrowserHarness(t)
 	base := h.authorizeQuery("s", "n")
@@ -67,6 +120,10 @@ func TestBrowserAuthAuthorizeRejectsAmbiguousOrUnsafeInputs(t *testing.T) {
 		"missing nonce":   func(v url.Values) { v.Del("nonce") },
 		"wrong response":  func(v url.Values) { v.Set("response_type", "token") },
 		"missing openid":  func(v url.Values) { v.Set("scope", "profile") },
+		"empty response":  func(v url.Values) { v.Set("response_type", "") },
+		"empty scope":     func(v url.Values) { v.Set("scope", "") },
+		"oversized state": func(v url.Values) { v.Set("state", strings.Repeat("s", maxAuthorizeStateLength+1)) },
+		"oversized nonce": func(v url.Values) { v.Set("nonce", strings.Repeat("n", maxAuthorizeNonceLength+1)) },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -85,7 +142,7 @@ func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 	idpRedirect := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("state-1", "nonce-1").Encode(), "", nil)
 	upstream, _ := url.Parse(idpRedirect.Header().Get("Location"))
 	h.idp.setNonce(upstream.Query().Get("nonce"))
-	callback := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(upstream.Query().Get("state")), "", nil)
+	callback := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(upstream.Query().Get("state")), "", loginBindingCookie(t, idpRedirect))
 	if callback.Code != http.StatusFound {
 		t.Fatalf("callback=%d body=%s", callback.Code, callback.Body.String())
 	}
@@ -94,10 +151,18 @@ func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 		t.Fatalf("location=%s", location)
 	}
 	cookies := callback.Result().Cookies()
-	if len(cookies) != 1 {
+	if len(cookies) != 2 {
 		t.Fatalf("cookies=%v", cookies)
 	}
-	cookie := cookies[0]
+	var cookie *http.Cookie
+	for _, candidate := range cookies {
+		if candidate.Name == browserSessionCookie {
+			cookie = candidate
+		}
+	}
+	if cookie == nil {
+		t.Fatalf("session cookie missing: %v", cookies)
+	}
 	if cookie.Name != browserSessionCookie || !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/" || cookie.Value == "" {
 		t.Fatalf("cookie=%+v", cookie)
 	}
@@ -156,17 +221,43 @@ func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 }
 
 func TestBrowserAuthCallbackFailuresNeverSetSessionCookie(t *testing.T) {
-	for _, code := range []string{"exchange-fail", "bad-signature", "bad-audience", "expired", "bad-issuer", "bad-nonce", "unknown"} {
+	for _, code := range []string{"exchange-fail", "bad-signature", "bad-audience", "expired", "bad-issuer", "bad-nonce", "unknown", "multi-no-azp", "multi-bad-azp"} {
 		t.Run(code, func(t *testing.T) {
 			h := newBrowserHarness(t)
 			start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
 			location, _ := url.Parse(start.Header().Get("Location"))
 			h.idp.setNonce(location.Query().Get("nonce"))
-			rr := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code="+code+"&state="+url.QueryEscape(location.Query().Get("state")), "", nil)
-			if rr.Code == http.StatusFound || len(rr.Result().Cookies()) != 0 {
+			rr := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code="+code+"&state="+url.QueryEscape(location.Query().Get("state")), "", loginBindingCookie(t, start))
+			if rr.Code == http.StatusFound || hasSessionCookie(rr) || loginBindingCookie(t, rr).MaxAge >= 0 {
 				t.Fatalf("status=%d cookies=%v", rr.Code, rr.Result().Cookies())
 			}
 		})
+	}
+}
+
+func TestBrowserAuthCallbackAcceptsMultipleAudiencesWithMatchingAuthorizedParty(t *testing.T) {
+	h := newBrowserHarness(t)
+	start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
+	location, _ := url.Parse(start.Header().Get("Location"))
+	h.idp.setNonce(location.Query().Get("nonce"))
+	rr := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=multi-good&state="+url.QueryEscape(location.Query().Get("state")), "", loginBindingCookie(t, start))
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestBrowserAuthCallbackBoundsUpstreamExchangeAndJWKSContext(t *testing.T) {
+	var checking *deadlineOIDC
+	h := newBrowserHarnessRuntime(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService { return service }, nil, func(upstream UpstreamOIDC) UpstreamOIDC {
+		checking = &deadlineOIDC{UpstreamOIDC: upstream}
+		return checking
+	})
+	start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
+	location, _ := url.Parse(start.Header().Get("Location"))
+	h.idp.setNonce(location.Query().Get("nonce"))
+	rr := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(location.Query().Get("state")), "", loginBindingCookie(t, start))
+	if rr.Code != http.StatusFound || !checking.sawDeadline {
+		t.Fatalf("status=%d deadline=%v", rr.Code, checking.sawDeadline)
 	}
 }
 
@@ -195,6 +286,58 @@ func TestBrowserAuthDiscoveryIgnoresHostAndLogoutAuditFailureFailsClosed(t *test
 	}
 }
 
+func TestBrowserAuthDiscoveryAdvertisesAllRotatedAlgorithms(t *testing.T) {
+	h := newBrowserHarnessConfigured(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService { return service }, staticTokenIssuer{algorithms: []string{"RS256", "ES384", "EdDSA"}})
+	rr := perform(h.router, http.MethodGet, "/.well-known/openid-configuration", "", nil)
+	for _, alg := range []string{"RS256", "ES384", "EdDSA"} {
+		if !strings.Contains(rr.Body.String(), alg) {
+			t.Fatalf("discovery missing %s: %s", alg, rr.Body.String())
+		}
+	}
+}
+
+func TestBrowserAuthTokenSigningFailureIsTemporarilyUnavailable(t *testing.T) {
+	h := newBrowserHarnessConfigured(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService { return service }, staticTokenIssuer{signErr: errors.New("signer unavailable"), algorithms: []string{"RS256"}})
+	code := issueSilentCode(t, h)
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+	rr := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
+	if rr.Code != http.StatusServiceUnavailable || responseError(t, rr) != "temporarily_unavailable" {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestBrowserAuthLogoutStoreUnavailableClearsCookieAndReturns503(t *testing.T) {
+	var failing *failingSessionService
+	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+		failing = &failingSessionService{Service: service, logoutErr: browserauth.ErrSessionUnavailable}
+		return failing
+	})
+	raw, _, err := h.sessions.CreateSession(context.Background(), browserauth.CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", &http.Cookie{Name: browserSessionCookie, Value: raw})
+	if rr.Code != http.StatusServiceUnavailable || !hasClearedCookie(rr, browserSessionCookie) || !failing.logoutDeadline {
+		t.Fatalf("status=%d cookies=%v deadline=%v", rr.Code, rr.Result().Cookies(), failing.logoutDeadline)
+	}
+}
+
+func TestBrowserAuthCallbackCleanupIsBoundedAndLeaksNoCookieOrCodeWhenRevokeFails(t *testing.T) {
+	var failing *failingSessionService
+	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+		failing = &failingSessionService{Service: service, revokeErr: errors.New("revoke unavailable")}
+		return failing
+	})
+	start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
+	location, _ := url.Parse(start.Header().Get("Location"))
+	h.idp.setNonce(location.Query().Get("nonce"))
+	h.audit.err = errors.New("audit unavailable")
+	rr := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(location.Query().Get("state")), "", loginBindingCookie(t, start))
+	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Location") != "" || hasSessionCookie(rr) || !failing.revokeDeadline {
+		t.Fatalf("status=%d headers=%v cookies=%v deadline=%v", rr.Code, rr.Header(), rr.Result().Cookies(), failing.revokeDeadline)
+	}
+}
+
 func TestBrowserAuthTokenRejectsWrongBindingReuseAmbiguityAndOversize(t *testing.T) {
 	cases := map[string]func(*browserHarness, url.Values) (string, string){
 		"wrong verifier": func(_ *browserHarness, v url.Values) (string, string) {
@@ -207,6 +350,14 @@ func TestBrowserAuthTokenRejectsWrongBindingReuseAmbiguityAndOversize(t *testing
 		},
 		"wrong redirect": func(_ *browserHarness, v url.Values) (string, string) {
 			v.Set("redirect_uri", "https://evil.example/cb")
+			return "application/x-www-form-urlencoded", v.Encode()
+		},
+		"oversized client": func(_ *browserHarness, v url.Values) (string, string) {
+			v.Set("client_id", strings.Repeat("c", 257))
+			return "application/x-www-form-urlencoded", v.Encode()
+		},
+		"oversized redirect": func(_ *browserHarness, v url.Values) (string, string) {
+			v.Set("redirect_uri", strings.Repeat("r", 2049))
 			return "application/x-www-form-urlencoded", v.Encode()
 		},
 		"duplicate code": func(_ *browserHarness, v url.Values) (string, string) {
@@ -225,7 +376,11 @@ func TestBrowserAuthTokenRejectsWrongBindingReuseAmbiguityAndOversize(t *testing
 			form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
 			contentType, body := mutate(h, form)
 			rr := perform(h.router, http.MethodPost, "/oauth2/token", body, nil, "Content-Type", contentType)
-			if rr.Code < 400 || rr.Header().Get("Cache-Control") != "no-store" {
+			wantError := "invalid_grant"
+			if name == "duplicate code" || name == "wrong content type" || name == "oversize" || strings.HasPrefix(name, "oversized ") {
+				wantError = "invalid_request"
+			}
+			if rr.Code < 400 || rr.Header().Get("Cache-Control") != "no-store" || responseError(t, rr) != wantError {
 				t.Fatalf("status=%d headers=%v", rr.Code, rr.Header())
 			}
 		})
@@ -236,11 +391,62 @@ func TestBrowserAuthTokenRejectsWrongBindingReuseAmbiguityAndOversize(t *testing
 	if got := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded").Code; got != http.StatusOK {
 		t.Fatalf("first=%d", got)
 	}
-	if got := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded").Code; got != http.StatusBadRequest {
-		t.Fatalf("reuse=%d", got)
+	if rr := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded"); rr.Code != http.StatusBadRequest || responseError(t, rr) != "invalid_grant" {
+		t.Fatalf("reuse=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if got := perform(h.router, http.MethodGet, "/oauth2/token", "", nil).Code; got != http.StatusMethodNotAllowed {
-		t.Fatalf("method=%d", got)
+	badGrant := cloneValues(form)
+	badGrant.Set("grant_type", "client_credentials")
+	if rr := perform(h.router, http.MethodPost, "/oauth2/token", badGrant.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded"); responseError(t, rr) != "unsupported_grant_type" {
+		t.Fatalf("grant=%s", rr.Body.String())
+	}
+	if rr := perform(h.router, http.MethodGet, "/oauth2/token", "", nil); rr.Code != http.StatusMethodNotAllowed || rr.Header().Get("Cache-Control") != "no-store" || rr.Header().Get("Pragma") != "no-cache" {
+		t.Fatalf("method=%d headers=%v", rr.Code, rr.Header())
+	}
+}
+
+func TestBrowserAuthRejectsCrossEnterpriseSessionsAndCodes(t *testing.T) {
+	h := newBrowserHarness(t)
+	raw, _, err := h.sessions.CreateSession(context.Background(), browserauth.CreateSessionInput{EnterpriseID: "ent-2", UserID: "user-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := &http.Cookie{Name: browserSessionCookie, Value: raw}
+	authorize := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", cookie)
+	location, _ := url.Parse(authorize.Header().Get("Location"))
+	if location.Host == "atlas.example.com" || location.Path != "/authorize" {
+		t.Fatalf("cross tenant silent=%s", location)
+	}
+	if !hasClearedCookie(authorize, browserSessionCookie) {
+		t.Fatalf("session not cleared: %v", authorize.Result().Cookies())
+	}
+	me := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", cookie)
+	if me.Code != http.StatusUnauthorized || !hasClearedCookie(me, browserSessionCookie) {
+		t.Fatalf("me=%d cookies=%v", me.Code, me.Result().Cookies())
+	}
+	code, err := h.sessions.IssueCode(context.Background(), browserauth.IssueCodeInput{EnterpriseID: "ent-2", UserID: "user-2", ClientID: "agentatlas", RedirectURI: "https://atlas.example.com/auth/callback", Nonce: "n", CodeChallenge: testS256(testVerifier)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+	token := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
+	if token.Code != http.StatusBadRequest || responseError(t, token) != "invalid_grant" {
+		t.Fatalf("token=%d %s", token.Code, token.Body.String())
+	}
+}
+
+func TestBrowserAuthCallbackBoundsCodeAndAlwaysClearsBindingCookie(t *testing.T) {
+	h := newBrowserHarness(t)
+	start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
+	location, _ := url.Parse(start.Header().Get("Location"))
+	binding := loginBindingCookie(t, start)
+	tooLong := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code="+strings.Repeat("c", maxUpstreamCodeLength+1)+"&state="+url.QueryEscape(location.Query().Get("state")), "", binding)
+	if tooLong.Code != http.StatusBadRequest || loginBindingCookie(t, tooLong).MaxAge >= 0 {
+		t.Fatalf("long code=%d cookies=%v", tooLong.Code, tooLong.Result().Cookies())
+	}
+	h.idp.setNonce(location.Query().Get("nonce"))
+	valid := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(location.Query().Get("state")), "", binding)
+	if valid.Code != http.StatusFound {
+		t.Fatalf("attempt consumed by invalid code: %d", valid.Code)
 	}
 }
 
@@ -251,13 +457,16 @@ func TestBrowserAuthCallbackConsumesStateBeforeAuditAndNeverSetsCookieOnAuditFai
 	h.idp.setNonce(location.Query().Get("nonce"))
 	h.audit.err = fmt.Errorf("audit unavailable")
 	target := "/oauth2/idp/callback?code=good&state=" + url.QueryEscape(location.Query().Get("state"))
-	first := perform(h.router, http.MethodGet, target, "", nil)
-	if first.Code != http.StatusServiceUnavailable || len(first.Result().Cookies()) != 0 {
+	first := perform(h.router, http.MethodGet, target, "", loginBindingCookie(t, start))
+	if first.Code != http.StatusServiceUnavailable || hasSessionCookie(first) || loginBindingCookie(t, first).MaxAge >= 0 {
 		t.Fatalf("first=%d cookies=%v", first.Code, first.Result().Cookies())
 	}
+	if !h.audit.sawDeadline {
+		t.Fatal("callback audit context is unbounded")
+	}
 	h.audit.err = nil
-	second := perform(h.router, http.MethodGet, target, "", nil)
-	if second.Code != http.StatusUnauthorized || len(second.Result().Cookies()) != 0 {
+	second := perform(h.router, http.MethodGet, target, "", loginBindingCookie(t, start))
+	if second.Code != http.StatusUnauthorized || hasSessionCookie(second) || loginBindingCookie(t, second).MaxAge >= 0 {
 		t.Fatalf("replay=%d cookies=%v", second.Code, second.Result().Cookies())
 	}
 }
@@ -287,6 +496,18 @@ func newBrowserHarness(t *testing.T) *browserHarness {
 }
 
 func newBrowserHarnessWithProfiles(t *testing.T, profiles BrowserProfileResolver) *browserHarness {
+	return newBrowserHarnessWithOptions(t, profiles, func(service *browserauth.Service) BrowserSessionService { return service })
+}
+
+func newBrowserHarnessWithOptions(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService) *browserHarness {
+	return newBrowserHarnessConfigured(t, profiles, wrap, nil)
+}
+
+func newBrowserHarnessConfigured(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService, issuer IDTokenIssuer) *browserHarness {
+	return newBrowserHarnessRuntime(t, profiles, wrap, issuer, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream })
+}
+
+func newBrowserHarnessRuntime(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService, issuer IDTokenIssuer, upstreamWrap func(UpstreamOIDC) UpstreamOIDC) *browserHarness {
 	t.Helper()
 	idp := newFakeIDP(t)
 	downstreamKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -301,9 +522,10 @@ func newBrowserHarnessWithProfiles(t *testing.T, profiles BrowserProfileResolver
 	}
 	store := browserauth.NewMemoryStore()
 	store.AddEnterpriseUser("ent-1", "user-1")
+	store.AddEnterpriseUser("ent-2", "user-2")
 	sessions := browserauth.NewService(store)
 	audit := &memoryAudit{}
-	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: sessions, Upstream: upstream, Identities: testIdentities{}, Profiles: profiles, Audit: audit})
+	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrap(sessions), Upstream: upstreamWrap(upstream), Identities: testIdentities{}, Profiles: profiles, Audit: audit, TokenIssuer: issuer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,12 +561,57 @@ func (failingProfiles) ResolveBrowserProfile(context.Context, string, string) (B
 }
 
 type memoryAudit struct {
-	mu     sync.Mutex
-	events []BrowserAuditEvent
-	err    error
+	mu          sync.Mutex
+	events      []BrowserAuditEvent
+	err         error
+	sawDeadline bool
 }
 
-func (a *memoryAudit) AppendBrowserAudit(_ context.Context, event BrowserAuditEvent) error {
+type failingSessionService struct {
+	*browserauth.Service
+	logoutErr, revokeErr           error
+	logoutDeadline, revokeDeadline bool
+}
+type staticTokenIssuer struct {
+	signErr    error
+	algorithms []string
+}
+type deadlineOIDC struct {
+	UpstreamOIDC
+	sawDeadline bool
+}
+
+func (d *deadlineOIDC) ExchangeAndVerify(ctx context.Context, code string) (browserauth.VerifiedIdentity, string, error) {
+	_, d.sawDeadline = ctx.Deadline()
+	return d.UpstreamOIDC.ExchangeAndVerify(ctx, code)
+}
+
+func (s staticTokenIssuer) SignIDToken(browserauth.IDTokenInput) (string, time.Duration, error) {
+	if s.signErr != nil {
+		return "", 0, s.signErr
+	}
+	return "token", 5 * time.Minute, nil
+}
+func (s staticTokenIssuer) JWKS() ([]byte, error) { return []byte(`{"keys":[]}`), nil }
+func (s staticTokenIssuer) Algorithms() []string  { return append([]string(nil), s.algorithms...) }
+
+func (s *failingSessionService) LogoutSession(ctx context.Context, token string) (browserauth.BrowserSession, error) {
+	_, s.logoutDeadline = ctx.Deadline()
+	if s.logoutErr != nil {
+		return browserauth.BrowserSession{}, s.logoutErr
+	}
+	return s.Service.LogoutSession(ctx, token)
+}
+func (s *failingSessionService) RevokeSession(ctx context.Context, token string) error {
+	_, s.revokeDeadline = ctx.Deadline()
+	if s.revokeErr != nil {
+		return s.revokeErr
+	}
+	return s.Service.RevokeSession(ctx, token)
+}
+
+func (a *memoryAudit) AppendBrowserAudit(ctx context.Context, event BrowserAuditEvent) error {
+	_, a.sawDeadline = ctx.Deadline()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.err != nil {
@@ -388,12 +655,13 @@ func (f *fakeIDP) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		nonce := f.nonce
 		f.mu.Unlock()
-		issuer, audience, subject, expiry, signingKey := f.server.URL, "nexus-client", "external-user", time.Now().Add(5*time.Minute), f.key
+		issuer, audience, subject, expiry, signingKey := f.server.URL, jwt.Audience{"nexus-client"}, "external-user", time.Now().Add(5*time.Minute), f.key
+		azp := ""
 		switch code {
 		case "bad-signature":
 			signingKey = f.badKey
 		case "bad-audience":
-			audience = "other"
+			audience = jwt.Audience{"other"}
 		case "expired":
 			expiry = time.Now().Add(-time.Minute)
 		case "bad-issuer":
@@ -402,12 +670,21 @@ func (f *fakeIDP) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			nonce = "wrong"
 		case "unknown":
 			subject = "missing-user"
+		case "multi-no-azp":
+			audience = jwt.Audience{"nexus-client", "other"}
+		case "multi-bad-azp":
+			audience = jwt.Audience{"nexus-client", "other"}
+			azp = "other"
+		case "multi-good":
+			audience = jwt.Audience{"nexus-client", "other"}
+			azp = "nexus-client"
 		}
 		signer, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: signingKey}, (&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", "idp"))
 		claims := struct {
 			jwt.Claims
-			Nonce string `json:"nonce"`
-		}{Claims: jwt.Claims{Issuer: issuer, Subject: subject, Audience: jwt.Audience{audience}, IssuedAt: jwt.NewNumericDate(time.Now()), Expiry: jwt.NewNumericDate(expiry)}, Nonce: nonce}
+			Nonce           string `json:"nonce"`
+			AuthorizedParty string `json:"azp,omitempty"`
+		}{Claims: jwt.Claims{Issuer: issuer, Subject: subject, Audience: audience, IssuedAt: jwt.NewNumericDate(time.Now()), Expiry: jwt.NewNumericDate(expiry)}, Nonce: nonce, AuthorizedParty: azp}
 		raw, _ := jwt.Signed(signer).Claims(claims).Serialize()
 		writeJSON(w, http.StatusOK, map[string]any{"access_token": "upstream-only", "token_type": "Bearer", "expires_in": 300, "id_token": raw})
 	default:
@@ -450,4 +727,39 @@ func issueSilentCode(t *testing.T, h *browserHarness) string {
 func testS256(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+func loginBindingCookie(t *testing.T, rr *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, cookie := range rr.Result().Cookies() {
+		if strings.HasPrefix(cookie.Name, "nexus_oidc_binding_") {
+			return cookie
+		}
+	}
+	t.Fatalf("binding cookie missing: %v", rr.Header())
+	return nil
+}
+func hasSessionCookie(rr *httptest.ResponseRecorder) bool {
+	for _, cookie := range rr.Result().Cookies() {
+		if cookie.Name == browserSessionCookie && cookie.Value != "" {
+			return true
+		}
+	}
+	return false
+}
+func hasClearedCookie(rr *httptest.ResponseRecorder, name string) bool {
+	for _, cookie := range rr.Result().Cookies() {
+		if cookie.Name == name && cookie.Value == "" && cookie.MaxAge < 0 {
+			return true
+		}
+	}
+	return false
+}
+func responseError(t *testing.T, rr *httptest.ResponseRecorder) string {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	value, _ := payload["error"].(string)
+	return value
 }

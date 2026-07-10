@@ -25,9 +25,13 @@ func LoadBrowserAuth() (BrowserAuthConfig, error) {
 	if enabledValue != "true" {
 		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_BROWSER_AUTH_ENABLED must be true or false")
 	}
-	config := BrowserAuthConfig{Enabled: true, DatabaseURL: os.Getenv("AGENTNEXUS_DATABASE_URL")}
+	dsn := os.Getenv("AGENTNEXUS_POSTGRES_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("AGENTNEXUS_DATABASE_URL")
+	}
+	config := BrowserAuthConfig{Enabled: true, DatabaseURL: dsn}
 	if config.DatabaseURL == "" {
-		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_DATABASE_URL is required when browser auth is enabled")
+		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_POSTGRES_DSN is required when browser auth is enabled")
 	}
 	privateKey, err := browserauth.LoadSigningPrivateKey(os.Getenv("AGENTNEXUS_OIDC_SIGNING_KEY_PATH"))
 	if err != nil {
