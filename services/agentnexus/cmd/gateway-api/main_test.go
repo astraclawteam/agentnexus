@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 )
 
 func TestBuildRouterDisabledOmitsBrowserAuthRoutes(t *testing.T) {
@@ -68,21 +71,12 @@ func TestBuildRouterWiresAuthorizeRateLimiterAndTrustedSourceResolver(t *testing
 }
 
 func TestBuildRouterWiresAuthorizationPolicyAndFailClosedTicketActor(t *testing.T) {
-	_, file, _, _ := runtime.Caller(0)
-	source, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
-	if err != nil {
-		t.Fatal(err)
+	source, tickets := productionAuthorizationDependencies(nil)
+	if _, err := source.LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1"); !errors.Is(err, policy.ErrAtlasPolicyUnavailable) {
+		t.Fatalf("nil Postgres source error = %v", err)
 	}
-	text := string(source)
-	for _, required := range []string{
-		"AuthorizationPolicy:",
-		"app.NewPostgresAtlasPolicySource(pool)",
-		"TicketActors:",
-		"app.RejectTicketActorAuthenticator{}",
-	} {
-		if !strings.Contains(text, required) {
-			t.Errorf("buildRouter missing %q", required)
-		}
+	if _, err := tickets.AuthenticateTicketActor(context.Background(), "opaque-ticket"); !errors.Is(err, app.ErrInvalidTicketActor) {
+		t.Fatalf("production ticket adapter error = %v", err)
 	}
 }
 

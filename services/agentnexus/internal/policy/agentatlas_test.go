@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -286,6 +287,154 @@ func TestMemoryAtlasPolicySourceIsConcurrentAndReturnsCopies(t *testing.T) {
 	}
 	if _, err := source.LoadAccessSnapshot(context.Background(), "enterprise-2", "user-1"); !errors.Is(err, ErrAtlasPolicyUnavailable) {
 		t.Fatalf("missing enterprise lookup error = %v", err)
+	}
+}
+
+func TestMemoryAtlasPolicySourceCopiesPublishedInput(t *testing.T) {
+	t.Parallel()
+	source := NewMemoryAtlasPolicySource()
+	units := []AtlasOrgUnit{{ID: "dept"}}
+	memberships := []AtlasMembership{{OrgUnitID: "dept", Role: "suggest"}}
+	source.StoreSnapshot("enterprise-1", "user-1", AtlasAccessSnapshot{EnterpriseID: "enterprise-1", OrgVersion: 4, OrgUnits: units, Memberships: memberships})
+	units[0].ID = "mutated"
+	memberships[0].Role = "edit"
+
+	got, err := source.LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OrgUnits[0].ID != "dept" || got.Memberships[0].Role != "suggest" {
+		t.Fatalf("published input was aliased: %#v", got)
+	}
+}
+
+func TestAtlasSnapshotAnalysisIsLinear(t *testing.T) {
+	t.Parallel()
+	const units = 200
+	snapshot := AtlasAccessSnapshot{EnterpriseID: "enterprise-1", OrgVersion: 1}
+	for i := 0; i < units; i++ {
+		id := fmt.Sprintf("unit-%03d", i)
+		parent := ""
+		if i > 0 {
+			parent = "unit-000"
+		}
+		snapshot.OrgUnits = append(snapshot.OrgUnits, AtlasOrgUnit{ID: id, ParentID: parent})
+		snapshot.Memberships = append(snapshot.Memberships, AtlasMembership{OrgUnitID: id, Role: string(PermissionEdit)})
+	}
+	work := map[atlasGraphWork]int{}
+	analysis, valid, err := analyzeAtlasSnapshot(context.Background(), snapshot, "unit-199", PermissionEdit, func(item atlasGraphWork) { work[item]++ })
+	if err != nil || !valid {
+		t.Fatalf("analysis valid=%t err=%v", valid, err)
+	}
+	if len(analysis.requiredScopes) != 2 {
+		t.Fatalf("required scopes = %#v", analysis.requiredScopes)
+	}
+	if work[atlasGraphWorkUnit] != units || work[atlasGraphWorkMembership] != units || work[atlasGraphWorkAncestor] != 2 {
+		t.Fatalf("non-linear work = %#v", work)
+	}
+}
+
+func TestAtlasSnapshotAnalysisLimits(t *testing.T) {
+	t.Parallel()
+	makeUnits := func(count int) []AtlasOrgUnit {
+		units := make([]AtlasOrgUnit, count)
+		for i := range units {
+			units[i] = AtlasOrgUnit{ID: fmt.Sprintf("unit-%d", i)}
+		}
+		return units
+	}
+	tests := []struct {
+		name     string
+		snapshot AtlasAccessSnapshot
+		target   string
+	}{
+		{name: "too many units", snapshot: AtlasAccessSnapshot{OrgUnits: makeUnits(MaxAtlasOrgUnits + 1)}, target: "unit-0"},
+		{name: "too many memberships", snapshot: AtlasAccessSnapshot{OrgUnits: []AtlasOrgUnit{{ID: "unit"}}, Memberships: make([]AtlasMembership, MaxAtlasMemberships+1)}, target: "unit"},
+	}
+	deep := AtlasAccessSnapshot{}
+	for i := 0; i <= MaxAtlasOrgDepth; i++ {
+		parent := ""
+		if i > 0 {
+			parent = fmt.Sprintf("unit-%d", i-1)
+		}
+		deep.OrgUnits = append(deep.OrgUnits, AtlasOrgUnit{ID: fmt.Sprintf("unit-%d", i), ParentID: parent})
+	}
+	tests = append(tests, struct {
+		name     string
+		snapshot AtlasAccessSnapshot
+		target   string
+	}{name: "too deep", snapshot: deep, target: fmt.Sprintf("unit-%d", MaxAtlasOrgDepth)})
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, valid, err := analyzeAtlasSnapshot(context.Background(), test.snapshot, test.target, PermissionSuggest, nil)
+			if err != nil {
+				t.Fatalf("unexpected error = %v", err)
+			}
+			if valid {
+				t.Fatal("oversized snapshot was accepted")
+			}
+		})
+	}
+}
+
+func TestAtlasSnapshotAnalysisObservesCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	snapshot := AtlasAccessSnapshot{}
+	for i := 0; i < 1000; i++ {
+		snapshot.OrgUnits = append(snapshot.OrgUnits, AtlasOrgUnit{ID: fmt.Sprintf("unit-%d", i)})
+	}
+	visited := 0
+	_, _, err := analyzeAtlasSnapshot(ctx, snapshot, "unit-999", PermissionSuggest, func(work atlasGraphWork) {
+		if work == atlasGraphWorkUnit {
+			visited++
+			if visited == 5 {
+				cancel()
+			}
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
+	}
+	if visited > 6 {
+		t.Fatalf("cancellation observed too late after %d visits", visited)
+	}
+}
+
+func TestAtlasSnapshotAnalysisRejectsDuplicateMembership(t *testing.T) {
+	t.Parallel()
+	snapshot := AtlasAccessSnapshot{OrgUnits: []AtlasOrgUnit{{ID: "dept"}}, Memberships: []AtlasMembership{{OrgUnitID: "dept", Role: "suggest"}, {OrgUnitID: "dept", Role: "suggest"}}}
+	analysis, valid, err := analyzeAtlasSnapshot(context.Background(), snapshot, "dept", PermissionSuggest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if valid || len(analysis.requiredScopes) != 0 || len(analysis.suggestScopes) != 0 {
+		t.Fatalf("duplicate membership leaked scopes: valid=%t analysis=%#v", valid, analysis)
+	}
+}
+
+func TestAtlasSnapshotAnalysisRejectsMalformedOrNonCanonicalData(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name     string
+		snapshot AtlasAccessSnapshot
+	}{
+		{name: "duplicate unit", snapshot: AtlasAccessSnapshot{OrgUnits: []AtlasOrgUnit{{ID: "dept"}, {ID: "dept"}}}},
+		{name: "dangling parent", snapshot: AtlasAccessSnapshot{OrgUnits: []AtlasOrgUnit{{ID: "dept", ParentID: "missing"}}}},
+		{name: "dangling membership", snapshot: AtlasAccessSnapshot{OrgUnits: []AtlasOrgUnit{{ID: "dept"}}, Memberships: []AtlasMembership{{OrgUnitID: "missing", Role: "suggest"}}}},
+		{name: "cycle", snapshot: AtlasAccessSnapshot{OrgUnits: []AtlasOrgUnit{{ID: "a", ParentID: "b"}, {ID: "b", ParentID: "a"}}}},
+		{name: "role case mismatch", snapshot: AtlasAccessSnapshot{OrgUnits: []AtlasOrgUnit{{ID: "dept"}}, Memberships: []AtlasMembership{{OrgUnitID: "dept", Role: "Edit"}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analysis, valid, err := analyzeAtlasSnapshot(context.Background(), test.snapshot, "dept", PermissionEdit, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if valid || len(analysis.requiredScopes) != 0 || len(analysis.suggestScopes) != 0 {
+				t.Fatalf("invalid snapshot leaked grants: valid=%t analysis=%#v", valid, analysis)
+			}
+		})
 	}
 }
 

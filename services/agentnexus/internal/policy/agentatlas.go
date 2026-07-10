@@ -4,7 +4,14 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
+)
+
+const (
+	MaxAtlasOrgUnits    = 10_000
+	MaxAtlasMemberships = 100_000
+	MaxAtlasOrgDepth    = 256
 )
 
 type AtlasPermission string
@@ -129,7 +136,7 @@ func (e *AgentAtlasEvaluator) Evaluate(ctx context.Context, req ScopedRequest) (
 	if !known {
 		baselineRisk = AtlasRiskHigh
 	}
-	if e == nil || e.source == nil || req.EnterpriseID == "" || req.ActorUserID == "" {
+	if e == nil || e.source == nil || !atlasCanonicalNonEmpty(req.EnterpriseID) || !atlasCanonicalNonEmpty(req.ActorUserID) {
 		return PermissionDecision{}, ErrAtlasPolicyUnavailable
 	}
 
@@ -142,33 +149,29 @@ func (e *AgentAtlasEvaluator) Evaluate(ctx context.Context, req ScopedRequest) (
 	}
 
 	decision := deniedAtlasDecision(snapshot.OrgVersion, baselineRisk)
-	if req.OrgVersion != snapshot.OrgVersion || req.OrgUnitID == "" || req.ResourceID == "" || !known {
+	if req.OrgVersion != snapshot.OrgVersion || !atlasCanonicalNonEmpty(req.OrgUnitID) || !atlasCanonicalNonEmpty(string(req.ResourceType)) || !atlasCanonicalNonEmpty(req.ResourceID) || !atlasCanonicalNonEmpty(string(req.Action)) || !known {
 		return decision, nil
 	}
 
-	parents, valid := validatedAtlasGraph(snapshot)
+	analysis, valid, err := analyzeAtlasSnapshot(ctx, snapshot, req.OrgUnitID, requiredPermission, nil)
+	if err != nil {
+		return PermissionDecision{}, errors.Join(ErrAtlasPolicyUnavailable, err)
+	}
 	if !valid {
 		return decision, nil
 	}
-	if _, ok := parents[req.OrgUnitID]; !ok {
-		return decision, nil
-	}
 
-	grantedScopes := atlasGrantedScopes(snapshot.Memberships, parents, req.OrgUnitID, requiredPermission)
-	if len(grantedScopes) > 0 {
+	if len(analysis.requiredScopes) > 0 {
 		decision.Decision = DecisionAllow
 		decision.Permissions = []AtlasPermission{requiredPermission}
-		decision.OrgUnitIDs = grantedScopes
+		decision.OrgUnitIDs = analysis.requiredScopes
 		return decision, nil
 	}
 
-	if req.Action == ActionKnowledgeUpdate {
-		fallbackScopes := atlasGrantedScopes(snapshot.Memberships, parents, req.OrgUnitID, PermissionSuggest)
-		if len(fallbackScopes) > 0 {
-			decision.Permissions = []AtlasPermission{PermissionSuggest}
-			decision.OrgUnitIDs = fallbackScopes
-			decision.FallbackAction = ActionKnowledgeSuggest
-		}
+	if req.Action == ActionKnowledgeUpdate && len(analysis.suggestScopes) > 0 {
+		decision.Permissions = []AtlasPermission{PermissionSuggest}
+		decision.OrgUnitIDs = analysis.suggestScopes
+		decision.FallbackAction = ActionKnowledgeSuggest
 	}
 	return decision, nil
 }
@@ -184,62 +187,157 @@ func deniedAtlasDecision(orgVersion int64, risk AtlasRiskLevel) PermissionDecisi
 	}
 }
 
-func validatedAtlasGraph(snapshot AtlasAccessSnapshot) (map[string]string, bool) {
-	parents := make(map[string]string, len(snapshot.OrgUnits))
-	for _, unit := range snapshot.OrgUnits {
-		if unit.ID == "" {
-			return nil, false
-		}
-		if _, exists := parents[unit.ID]; exists {
-			return nil, false
-		}
-		parents[unit.ID] = unit.ParentID
-	}
-	for id, parentID := range parents {
-		if parentID != "" {
-			if _, exists := parents[parentID]; !exists {
-				return nil, false
-			}
-		}
-		seen := map[string]struct{}{id: {}}
-		for cursor := parentID; cursor != ""; cursor = parents[cursor] {
-			if _, exists := seen[cursor]; exists {
-				return nil, false
-			}
-			seen[cursor] = struct{}{}
-		}
-	}
-	for _, membership := range snapshot.Memberships {
-		if _, exists := parents[membership.OrgUnitID]; !exists {
-			return nil, false
-		}
-	}
-	return parents, true
+type atlasGraphWork string
+
+const (
+	atlasGraphWorkUnit       atlasGraphWork = "unit"
+	atlasGraphWorkMembership atlasGraphWork = "membership"
+	atlasGraphWorkAncestor   atlasGraphWork = "ancestor"
+)
+
+type atlasScopeAnalysis struct {
+	requiredScopes []string
+	suggestScopes  []string
 }
 
-func atlasGrantedScopes(memberships []AtlasMembership, parents map[string]string, targetOrgUnitID string, permission AtlasPermission) []string {
-	covered := map[string]struct{}{}
-	for _, membership := range memberships {
-		if atlasPermissionForRole(membership.Role) != permission || !atlasScopeCovers(parents, membership.OrgUnitID, targetOrgUnitID) {
+func analyzeAtlasSnapshot(ctx context.Context, snapshot AtlasAccessSnapshot, targetOrgUnitID string, requiredPermission AtlasPermission, observe func(atlasGraphWork)) (atlasScopeAnalysis, bool, error) {
+	empty := atlasScopeAnalysis{requiredScopes: []string{}, suggestScopes: []string{}}
+	if len(snapshot.OrgUnits) > MaxAtlasOrgUnits || len(snapshot.Memberships) > MaxAtlasMemberships {
+		return empty, false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return empty, false, err
+	}
+
+	parents := make(map[string]string, len(snapshot.OrgUnits))
+	for _, unit := range snapshot.OrgUnits {
+		if err := ctx.Err(); err != nil {
+			return empty, false, err
+		}
+		if !atlasCanonicalNonEmpty(unit.ID) || (unit.ParentID != "" && !atlasCanonicalNonEmpty(unit.ParentID)) {
+			return empty, false, nil
+		}
+		if _, exists := parents[unit.ID]; exists {
+			return empty, false, nil
+		}
+		parents[unit.ID] = unit.ParentID
+		if observe != nil {
+			observe(atlasGraphWorkUnit)
+		}
+	}
+
+	colors := make(map[string]uint8, len(parents))
+	depths := make(map[string]int, len(parents))
+	for id := range parents {
+		if colors[id] == 2 {
 			continue
 		}
-		covered[membership.OrgUnitID] = struct{}{}
+		path := make([]string, 0)
+		cursor := id
+		baseDepth := 0
+		for cursor != "" {
+			if err := ctx.Err(); err != nil {
+				return empty, false, err
+			}
+			parentID, exists := parents[cursor]
+			if !exists {
+				return empty, false, nil
+			}
+			switch colors[cursor] {
+			case 1:
+				return empty, false, nil
+			case 2:
+				baseDepth = depths[cursor]
+				cursor = ""
+				continue
+			}
+			colors[cursor] = 1
+			path = append(path, cursor)
+			if len(path) > MaxAtlasOrgDepth {
+				return empty, false, nil
+			}
+			cursor = parentID
+		}
+		for i := len(path) - 1; i >= 0; i-- {
+			baseDepth++
+			if baseDepth > MaxAtlasOrgDepth {
+				return empty, false, nil
+			}
+			depths[path[i]] = baseDepth
+			colors[path[i]] = 2
+		}
 	}
-	result := make([]string, 0, len(covered))
-	for orgUnitID := range covered {
+
+	if _, exists := parents[targetOrgUnitID]; !exists {
+		return empty, false, nil
+	}
+	ancestors := make(map[string]struct{}, depths[targetOrgUnitID])
+	for cursor := targetOrgUnitID; cursor != ""; cursor = parents[cursor] {
+		if err := ctx.Err(); err != nil {
+			return empty, false, err
+		}
+		ancestors[cursor] = struct{}{}
+		if observe != nil {
+			observe(atlasGraphWorkAncestor)
+		}
+	}
+
+	requiredScopes := map[string]struct{}{}
+	suggestScopes := map[string]struct{}{}
+	seenMemberships := make(map[string]struct{}, len(snapshot.Memberships))
+	for _, membership := range snapshot.Memberships {
+		if err := ctx.Err(); err != nil {
+			return empty, false, err
+		}
+		if !atlasCanonicalNonEmpty(membership.OrgUnitID) || !atlasKnownRole(membership.Role) {
+			return empty, false, nil
+		}
+		if _, exists := parents[membership.OrgUnitID]; !exists {
+			return empty, false, nil
+		}
+		membershipKey := membership.OrgUnitID + "\x00" + membership.Role
+		if _, exists := seenMemberships[membershipKey]; exists {
+			return empty, false, nil
+		}
+		seenMemberships[membershipKey] = struct{}{}
+		if observe != nil {
+			observe(atlasGraphWorkMembership)
+		}
+		if _, coversTarget := ancestors[membership.OrgUnitID]; !coversTarget {
+			continue
+		}
+		permission := atlasPermissionForRole(membership.Role)
+		if permission == requiredPermission {
+			requiredScopes[membership.OrgUnitID] = struct{}{}
+		}
+		if permission == PermissionSuggest {
+			suggestScopes[membership.OrgUnitID] = struct{}{}
+		}
+	}
+	return atlasScopeAnalysis{requiredScopes: atlasSortedScopes(requiredScopes), suggestScopes: atlasSortedScopes(suggestScopes)}, true, nil
+}
+
+func atlasSortedScopes(scopes map[string]struct{}) []string {
+	result := make([]string, 0, len(scopes))
+	for orgUnitID := range scopes {
 		result = append(result, orgUnitID)
 	}
 	sort.Strings(result)
 	return result
 }
 
-func atlasScopeCovers(parents map[string]string, grantedOrgUnitID, targetOrgUnitID string) bool {
-	for cursor := targetOrgUnitID; cursor != ""; cursor = parents[cursor] {
-		if cursor == grantedOrgUnitID {
-			return true
-		}
+func atlasCanonicalNonEmpty(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value
+}
+
+func atlasKnownRole(role string) bool {
+	if !atlasCanonicalNonEmpty(role) {
+		return false
 	}
-	return false
+	if role == "member" || role == "manager" || role == "admin" {
+		return true
+	}
+	return atlasPermissionForRole(role) != ""
 }
 
 func atlasPermissionForRole(role string) AtlasPermission {

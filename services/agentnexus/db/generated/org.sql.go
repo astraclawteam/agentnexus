@@ -11,6 +11,42 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const captureOrgPolicySnapshotMemberships = `-- name: CaptureOrgPolicySnapshotMemberships :exec
+INSERT INTO org_policy_snapshot_memberships (
+    enterprise_id, version_number, enterprise_user_id, org_unit_id, role
+)
+SELECT m.enterprise_id, $2, m.enterprise_user_id, m.org_unit_id, m.role
+FROM org_memberships AS m
+WHERE m.enterprise_id = $1
+`
+
+type CaptureOrgPolicySnapshotMembershipsParams struct {
+	EnterpriseID  string
+	VersionNumber int64
+}
+
+func (q *Queries) CaptureOrgPolicySnapshotMemberships(ctx context.Context, arg CaptureOrgPolicySnapshotMembershipsParams) error {
+	_, err := q.db.Exec(ctx, captureOrgPolicySnapshotMemberships, arg.EnterpriseID, arg.VersionNumber)
+	return err
+}
+
+const captureOrgPolicySnapshotUnits = `-- name: CaptureOrgPolicySnapshotUnits :exec
+INSERT INTO org_policy_snapshot_units (enterprise_id, version_number, org_unit_id, parent_id)
+SELECT u.enterprise_id, $2, u.id, u.parent_id
+FROM org_units AS u
+WHERE u.enterprise_id = $1
+`
+
+type CaptureOrgPolicySnapshotUnitsParams struct {
+	EnterpriseID  string
+	VersionNumber int64
+}
+
+func (q *Queries) CaptureOrgPolicySnapshotUnits(ctx context.Context, arg CaptureOrgPolicySnapshotUnitsParams) error {
+	_, err := q.db.Exec(ctx, captureOrgPolicySnapshotUnits, arg.EnterpriseID, arg.VersionNumber)
+	return err
+}
+
 const createEnterpriseUser = `-- name: CreateEnterpriseUser :one
 INSERT INTO enterprise_users (id, enterprise_id, display_name, email, phone)
 VALUES ($1, $2, $3, $4, $5)
@@ -182,37 +218,36 @@ func (q *Queries) GetLatestAuthorizationOrgVersion(ctx context.Context, enterpri
 }
 
 const listAuthorizationMemberships = `-- name: ListAuthorizationMemberships :many
-SELECT m.enterprise_id, m.enterprise_user_id, m.org_unit_id, m.role, m.created_at
-FROM org_memberships AS m
-JOIN org_units AS u
-  ON u.enterprise_id = m.enterprise_id
- AND u.id = m.org_unit_id
-WHERE m.enterprise_id = $1
-  AND m.enterprise_user_id = $2
-  AND u.enterprise_id = $1
-ORDER BY m.org_unit_id, m.role
+SELECT enterprise_id, version_number, enterprise_user_id, org_unit_id, role
+FROM org_policy_snapshot_memberships
+WHERE enterprise_id = $1
+  AND version_number = $2
+  AND enterprise_user_id = $3
+ORDER BY org_unit_id, role
+LIMIT 100001
 `
 
 type ListAuthorizationMembershipsParams struct {
 	EnterpriseID     string
+	VersionNumber    int64
 	EnterpriseUserID string
 }
 
-func (q *Queries) ListAuthorizationMemberships(ctx context.Context, arg ListAuthorizationMembershipsParams) ([]OrgMembership, error) {
-	rows, err := q.db.Query(ctx, listAuthorizationMemberships, arg.EnterpriseID, arg.EnterpriseUserID)
+func (q *Queries) ListAuthorizationMemberships(ctx context.Context, arg ListAuthorizationMembershipsParams) ([]OrgPolicySnapshotMembership, error) {
+	rows, err := q.db.Query(ctx, listAuthorizationMemberships, arg.EnterpriseID, arg.VersionNumber, arg.EnterpriseUserID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []OrgMembership
+	var items []OrgPolicySnapshotMembership
 	for rows.Next() {
-		var i OrgMembership
+		var i OrgPolicySnapshotMembership
 		if err := rows.Scan(
 			&i.EnterpriseID,
+			&i.VersionNumber,
 			&i.EnterpriseUserID,
 			&i.OrgUnitID,
 			&i.Role,
-			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -225,28 +260,33 @@ func (q *Queries) ListAuthorizationMemberships(ctx context.Context, arg ListAuth
 }
 
 const listAuthorizationOrgUnits = `-- name: ListAuthorizationOrgUnits :many
-SELECT id, enterprise_id, parent_id, name, unit_type, created_at
-FROM org_units
+SELECT enterprise_id, version_number, org_unit_id, parent_id
+FROM org_policy_snapshot_units
 WHERE enterprise_id = $1
-ORDER BY id
+  AND version_number = $2
+ORDER BY org_unit_id
+LIMIT 10001
 `
 
-func (q *Queries) ListAuthorizationOrgUnits(ctx context.Context, enterpriseID string) ([]OrgUnit, error) {
-	rows, err := q.db.Query(ctx, listAuthorizationOrgUnits, enterpriseID)
+type ListAuthorizationOrgUnitsParams struct {
+	EnterpriseID  string
+	VersionNumber int64
+}
+
+func (q *Queries) ListAuthorizationOrgUnits(ctx context.Context, arg ListAuthorizationOrgUnitsParams) ([]OrgPolicySnapshotUnit, error) {
+	rows, err := q.db.Query(ctx, listAuthorizationOrgUnits, arg.EnterpriseID, arg.VersionNumber)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []OrgUnit
+	var items []OrgPolicySnapshotUnit
 	for rows.Next() {
-		var i OrgUnit
+		var i OrgPolicySnapshotUnit
 		if err := rows.Scan(
-			&i.ID,
 			&i.EnterpriseID,
+			&i.VersionNumber,
+			&i.OrgUnitID,
 			&i.ParentID,
-			&i.Name,
-			&i.UnitType,
-			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -133,11 +134,20 @@ func (s *MemoryStore) CreateOrgVersion(_ context.Context, version OrgVersion) (O
 }
 
 type PostgresStore struct {
-	pool *pgxpool.Pool
+	pool postgresStoreDB
+}
+
+type postgresStoreDB interface {
+	db.DBTX
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
 }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
-	return &PostgresStore{pool: pool}
+	return newPostgresStoreWithDB(pool)
+}
+
+func newPostgresStoreWithDB(database postgresStoreDB) *PostgresStore {
+	return &PostgresStore{pool: database}
 }
 
 func (s *PostgresStore) CreateEnterprise(ctx context.Context, enterprise Enterprise) (Enterprise, error) {
@@ -203,12 +213,30 @@ RETURNING id, enterprise_id, event_type, source_hash, created_at`,
 }
 
 func (s *PostgresStore) CreateOrgVersion(ctx context.Context, version OrgVersion) (OrgVersion, error) {
-	row := s.pool.QueryRow(ctx, `
-INSERT INTO org_versions (id, enterprise_id, version_number, source_event_id)
-VALUES ($1, $2, $3, $4)
-RETURNING id, enterprise_id, version_number, source_event_id, created_at`,
-		version.ID, version.EnterpriseID, version.VersionNumber, nullText(version.SourceEventID))
-	return scanOrgVersion(row)
+	if s == nil || s.pool == nil {
+		return OrgVersion{}, errors.New("iam store unavailable")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadWrite})
+	if err != nil {
+		return OrgVersion{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	queries := db.New(tx)
+	record, err := queries.CreateOrgVersion(ctx, db.CreateOrgVersionParams{ID: version.ID, EnterpriseID: version.EnterpriseID, VersionNumber: version.VersionNumber, SourceEventID: pgtype.Text{String: version.SourceEventID, Valid: version.SourceEventID != ""}})
+	if err != nil {
+		return OrgVersion{}, err
+	}
+	params := db.CaptureOrgPolicySnapshotUnitsParams{EnterpriseID: version.EnterpriseID, VersionNumber: version.VersionNumber}
+	if err := queries.CaptureOrgPolicySnapshotUnits(ctx, params); err != nil {
+		return OrgVersion{}, err
+	}
+	if err := queries.CaptureOrgPolicySnapshotMemberships(ctx, db.CaptureOrgPolicySnapshotMembershipsParams(params)); err != nil {
+		return OrgVersion{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return OrgVersion{}, err
+	}
+	return OrgVersion{ID: record.ID, EnterpriseID: record.EnterpriseID, VersionNumber: record.VersionNumber, SourceEventID: textValue(record.SourceEventID), CreatedAt: record.CreatedAt.Time}, nil
 }
 
 type rowScanner interface {

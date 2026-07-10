@@ -105,7 +105,12 @@ func (h *authorizationHandler) decide(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *authorizationHandler) authenticateActor(r *http.Request) (AuthorizationActor, int) {
-	if cookie, err := r.Cookie(browserSessionCookie); err == nil {
+	cookie, cookieErr := r.Cookie(browserSessionCookie)
+	authorizationValues := r.Header.Values("Authorization")
+	if cookieErr == nil && len(authorizationValues) > 0 {
+		return AuthorizationActor{}, http.StatusUnauthorized
+	}
+	if cookieErr == nil {
 		session, sessionErr := h.sessions.GetSession(r.Context(), cookie.Value)
 		if errors.Is(sessionErr, browserauth.ErrSessionUnavailable) {
 			return AuthorizationActor{}, http.StatusServiceUnavailable
@@ -116,11 +121,10 @@ func (h *authorizationHandler) authenticateActor(r *http.Request) (Authorization
 		return AuthorizationActor{EnterpriseID: session.EnterpriseID, UserID: session.UserID}, 0
 	}
 
-	values := r.Header.Values("Authorization")
-	if len(values) != 1 || h.ticketActors == nil {
+	if len(authorizationValues) != 1 || h.ticketActors == nil {
 		return AuthorizationActor{}, http.StatusUnauthorized
 	}
-	parts := strings.Fields(values[0])
+	parts := strings.Fields(authorizationValues[0])
 	if len(parts) != 2 || parts[0] != "CaseTicket" || parts[1] == "" || len(parts[1]) > 4096 {
 		return AuthorizationActor{}, http.StatusUnauthorized
 	}
@@ -142,9 +146,51 @@ func decodeAuthorizationRequest(w http.ResponseWriter, r *http.Request, target *
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAuthorizationRequestBytes)
 	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	var decoded *authorizationDecisionRequest
-	if err := decoder.Decode(&decoded); err != nil || decoded == nil {
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		writeAuthorizationError(w, http.StatusBadRequest)
+		return false
+	}
+	seen := make(map[string]struct{}, 5)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		key, ok := keyToken.(string)
+		if err != nil || !ok {
+			writeAuthorizationError(w, http.StatusBadRequest)
+			return false
+		}
+		if _, duplicate := seen[key]; duplicate {
+			writeAuthorizationError(w, http.StatusBadRequest)
+			return false
+		}
+		seen[key] = struct{}{}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil || string(raw) == "null" {
+			writeAuthorizationError(w, http.StatusBadRequest)
+			return false
+		}
+		switch key {
+		case "org_unit_id":
+			err = json.Unmarshal(raw, &target.OrgUnitID)
+		case "org_version":
+			err = json.Unmarshal(raw, &target.OrgVersion)
+		case "resource_type":
+			err = json.Unmarshal(raw, &target.ResourceType)
+		case "resource_id":
+			err = json.Unmarshal(raw, &target.ResourceID)
+		case "action":
+			err = json.Unmarshal(raw, &target.Action)
+		default:
+			writeAuthorizationError(w, http.StatusBadRequest)
+			return false
+		}
+		if err != nil {
+			writeAuthorizationError(w, http.StatusBadRequest)
+			return false
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
 		writeAuthorizationError(w, http.StatusBadRequest)
 		return false
 	}
@@ -152,8 +198,15 @@ func decodeAuthorizationRequest(w http.ResponseWriter, r *http.Request, target *
 		writeAuthorizationError(w, http.StatusBadRequest)
 		return false
 	}
-	*target = *decoded
+	if len(seen) != 5 || target.OrgVersion < 1 || !canonicalAuthorizationValue(target.OrgUnitID) || !canonicalAuthorizationValue(string(target.ResourceType)) || !canonicalAuthorizationValue(target.ResourceID) || !canonicalAuthorizationValue(string(target.Action)) {
+		writeAuthorizationError(w, http.StatusBadRequest)
+		return false
+	}
 	return true
+}
+
+func canonicalAuthorizationValue(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value
 }
 
 func writeAuthorizationError(w http.ResponseWriter, status int) {

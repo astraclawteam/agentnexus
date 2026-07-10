@@ -8,51 +8,187 @@ import (
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+	"github.com/jackc/pgx/v5"
 )
 
-type stubAtlasQueries struct {
-	versionEnterprise    string
-	unitsEnterprise      string
-	membershipEnterprise string
-	membershipUser       string
-	units                []db.OrgUnit
-	memberships          []db.OrgMembership
+type fakeAtlasPolicyPool struct {
+	tx       *fakeAtlasPolicyTx
+	options  []pgx.TxOptions
+	beginErr error
 }
 
-func (s *stubAtlasQueries) GetLatestAuthorizationOrgVersion(_ context.Context, enterpriseID string) (int64, error) {
-	s.versionEnterprise = enterpriseID
-	return 17, nil
-}
-
-func (s *stubAtlasQueries) ListAuthorizationOrgUnits(_ context.Context, enterpriseID string) ([]db.OrgUnit, error) {
-	s.unitsEnterprise = enterpriseID
-	if s.units != nil {
-		return s.units, nil
+func (f *fakeAtlasPolicyPool) BeginAtlasPolicyTx(_ context.Context, options pgx.TxOptions) (atlasPolicyTx, error) {
+	f.options = append(f.options, options)
+	if f.beginErr != nil {
+		return nil, f.beginErr
 	}
-	return []db.OrgUnit{{ID: "child", EnterpriseID: enterpriseID}, {ID: "parent", EnterpriseID: enterpriseID}}, nil
+	f.tx.calls = append(f.tx.calls, "begin")
+	return f.tx, nil
 }
 
-func (s *stubAtlasQueries) ListAuthorizationMemberships(_ context.Context, arg db.ListAuthorizationMembershipsParams) ([]db.OrgMembership, error) {
-	s.membershipEnterprise = arg.EnterpriseID
-	s.membershipUser = arg.EnterpriseUserID
-	if s.memberships != nil {
-		return s.memberships, nil
+type fakeAtlasPolicyTx struct {
+	calls                []string
+	latest               int64
+	units                []db.OrgPolicySnapshotUnit
+	memberships          []db.OrgPolicySnapshotMembership
+	unitArgs             db.ListAuthorizationOrgUnitsParams
+	memberArgs           db.ListAuthorizationMembershipsParams
+	unitsByVersion       map[int64][]db.OrgPolicySnapshotUnit
+	membershipsByVersion map[int64][]db.OrgPolicySnapshotMembership
+	afterVersion         func()
+	afterUnits           func()
+	failAt               string
+	committed            bool
+	rolledBack           bool
+}
+
+func (f *fakeAtlasPolicyTx) GetLatestAuthorizationOrgVersion(context.Context, string) (int64, error) {
+	f.calls = append(f.calls, "version")
+	if f.failAt == "version" {
+		return 0, errors.New("version query failed")
 	}
-	return []db.OrgMembership{{EnterpriseID: arg.EnterpriseID, EnterpriseUserID: arg.EnterpriseUserID, OrgUnitID: "parent", Role: "edit"}}, nil
+	version := f.latest
+	if f.afterVersion != nil {
+		f.afterVersion()
+	}
+	return version, nil
 }
 
-func TestPostgresAtlasPolicySourceRejectsCrossTenantRows(t *testing.T) {
+func (f *fakeAtlasPolicyTx) ListAuthorizationOrgUnits(_ context.Context, arg db.ListAuthorizationOrgUnitsParams) ([]db.OrgPolicySnapshotUnit, error) {
+	f.calls = append(f.calls, "units")
+	f.unitArgs = arg
+	if f.failAt == "units" {
+		return nil, errors.New("units query failed")
+	}
+	if f.unitsByVersion != nil {
+		units := f.unitsByVersion[arg.VersionNumber]
+		if f.afterUnits != nil {
+			f.afterUnits()
+		}
+		return units, nil
+	}
+	if f.afterUnits != nil {
+		f.afterUnits()
+	}
+	return f.units, nil
+}
+
+func (f *fakeAtlasPolicyTx) ListAuthorizationMemberships(_ context.Context, arg db.ListAuthorizationMembershipsParams) ([]db.OrgPolicySnapshotMembership, error) {
+	f.calls = append(f.calls, "memberships")
+	f.memberArgs = arg
+	if f.failAt == "memberships" {
+		return nil, errors.New("memberships query failed")
+	}
+	if f.membershipsByVersion != nil {
+		return f.membershipsByVersion[arg.VersionNumber], nil
+	}
+	return f.memberships, nil
+}
+
+func (f *fakeAtlasPolicyTx) Commit(context.Context) error {
+	f.calls = append(f.calls, "commit")
+	if f.failAt == "commit" {
+		return errors.New("commit failed")
+	}
+	f.committed = true
+	return nil
+}
+
+func (f *fakeAtlasPolicyTx) Rollback(context.Context) error {
+	if f.committed || f.rolledBack {
+		return pgx.ErrTxClosed
+	}
+	f.calls = append(f.calls, "rollback")
+	f.rolledBack = true
+	return nil
+}
+
+func TestPostgresAtlasPolicySourceReadsOneExactImmutableVersion(t *testing.T) {
+	t.Parallel()
+	tx := &fakeAtlasPolicyTx{
+		latest:      17,
+		units:       []db.OrgPolicySnapshotUnit{{EnterpriseID: "enterprise-1", VersionNumber: 17, OrgUnitID: "child"}, {EnterpriseID: "enterprise-1", VersionNumber: 17, OrgUnitID: "parent"}},
+		memberships: []db.OrgPolicySnapshotMembership{{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "parent", Role: "edit"}},
+	}
+	pool := &fakeAtlasPolicyPool{tx: tx}
+	source := newPostgresAtlasPolicySourceWithPool(pool)
+
+	snapshot, err := source.LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pool.options) != 1 || pool.options[0].IsoLevel != pgx.RepeatableRead || pool.options[0].AccessMode != pgx.ReadOnly {
+		t.Fatalf("transaction options = %#v", pool.options)
+	}
+	if !reflect.DeepEqual(tx.calls, []string{"begin", "version", "units", "memberships", "commit"}) {
+		t.Fatalf("calls = %#v", tx.calls)
+	}
+	if tx.unitArgs.EnterpriseID != "enterprise-1" || tx.unitArgs.VersionNumber != 17 || tx.memberArgs.EnterpriseID != "enterprise-1" || tx.memberArgs.VersionNumber != 17 || tx.memberArgs.EnterpriseUserID != "user-1" {
+		t.Fatalf("exact version was not propagated: units=%#v memberships=%#v", tx.unitArgs, tx.memberArgs)
+	}
+	if snapshot.EnterpriseID != "enterprise-1" || snapshot.OrgVersion != 17 || !reflect.DeepEqual(snapshot.Memberships, []policy.AtlasMembership{{OrgUnitID: "parent", Role: "edit"}}) {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+func TestPostgresAtlasPolicySourceOldSnapshotCannotSeeLaterLiveGrant(t *testing.T) {
+	t.Parallel()
+	tx := &fakeAtlasPolicyTx{latest: 17}
+	tx.unitsByVersion = map[int64][]db.OrgPolicySnapshotUnit{17: {{EnterpriseID: "enterprise-1", VersionNumber: 17, OrgUnitID: "dept"}}}
+	tx.membershipsByVersion = map[int64][]db.OrgPolicySnapshotMembership{17: {{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "dept", Role: "suggest"}}}
+	tx.afterVersion = func() {
+		tx.latest = 18
+		tx.unitsByVersion[18] = []db.OrgPolicySnapshotUnit{{EnterpriseID: "enterprise-1", VersionNumber: 18, OrgUnitID: "dept"}}
+		tx.membershipsByVersion[18] = []db.OrgPolicySnapshotMembership{{EnterpriseID: "enterprise-1", VersionNumber: 18, EnterpriseUserID: "user-1", OrgUnitID: "dept", Role: "edit"}}
+	}
+	source := newPostgresAtlasPolicySourceWithPool(&fakeAtlasPolicyPool{tx: tx})
+	snapshot, err := source.LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.Memberships, []policy.AtlasMembership{{OrgUnitID: "dept", Role: "suggest"}}) {
+		t.Fatalf("old snapshot changed after later grant: %#v", snapshot.Memberships)
+	}
+}
+
+func TestPostgresAtlasPolicySourceRollsBackEveryFailure(t *testing.T) {
+	t.Parallel()
+	for _, failAt := range []string{"version", "units", "memberships", "commit"} {
+		t.Run(failAt, func(t *testing.T) {
+			tx := &fakeAtlasPolicyTx{latest: 17, failAt: failAt}
+			_, err := newPostgresAtlasPolicySourceWithPool(&fakeAtlasPolicyPool{tx: tx}).LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
+			if !errors.Is(err, policy.ErrAtlasPolicyUnavailable) {
+				t.Fatalf("error = %v", err)
+			}
+			if tx.committed || !tx.rolledBack || tx.calls[len(tx.calls)-1] != "rollback" {
+				t.Fatalf("calls=%#v committed=%t rolledBack=%t", tx.calls, tx.committed, tx.rolledBack)
+			}
+		})
+	}
+
+	beginErr := errors.New("begin failed")
+	_, err := newPostgresAtlasPolicySourceWithPool(&fakeAtlasPolicyPool{beginErr: beginErr}).LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
+	if !errors.Is(err, policy.ErrAtlasPolicyUnavailable) || !errors.Is(err, beginErr) {
+		t.Fatalf("begin error = %v", err)
+	}
+}
+
+func TestPostgresAtlasPolicySourceRejectsCrossTenantOrVersionRows(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
-		name    string
-		queries *stubAtlasQueries
+		name        string
+		units       []db.OrgPolicySnapshotUnit
+		memberships []db.OrgPolicySnapshotMembership
 	}{
-		{name: "foreign org unit", queries: &stubAtlasQueries{units: []db.OrgUnit{{ID: "dept", EnterpriseID: "enterprise-2"}}, memberships: []db.OrgMembership{}}},
-		{name: "foreign membership", queries: &stubAtlasQueries{units: []db.OrgUnit{{ID: "dept", EnterpriseID: "enterprise-1"}}, memberships: []db.OrgMembership{{EnterpriseID: "enterprise-2", EnterpriseUserID: "user-1", OrgUnitID: "dept", Role: "suggest"}}}},
-		{name: "foreign user membership", queries: &stubAtlasQueries{units: []db.OrgUnit{{ID: "dept", EnterpriseID: "enterprise-1"}}, memberships: []db.OrgMembership{{EnterpriseID: "enterprise-1", EnterpriseUserID: "user-2", OrgUnitID: "dept", Role: "suggest"}}}},
+		{name: "foreign org unit", units: []db.OrgPolicySnapshotUnit{{EnterpriseID: "enterprise-2", VersionNumber: 17, OrgUnitID: "dept"}}},
+		{name: "stale org unit", units: []db.OrgPolicySnapshotUnit{{EnterpriseID: "enterprise-1", VersionNumber: 16, OrgUnitID: "dept"}}},
+		{name: "foreign membership", units: []db.OrgPolicySnapshotUnit{{EnterpriseID: "enterprise-1", VersionNumber: 17, OrgUnitID: "dept"}}, memberships: []db.OrgPolicySnapshotMembership{{EnterpriseID: "enterprise-2", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "dept", Role: "suggest"}}},
+		{name: "foreign user membership", units: []db.OrgPolicySnapshotUnit{{EnterpriseID: "enterprise-1", VersionNumber: 17, OrgUnitID: "dept"}}, memberships: []db.OrgPolicySnapshotMembership{{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-2", OrgUnitID: "dept", Role: "suggest"}}},
+		{name: "stale membership", units: []db.OrgPolicySnapshotUnit{{EnterpriseID: "enterprise-1", VersionNumber: 17, OrgUnitID: "dept"}}, memberships: []db.OrgPolicySnapshotMembership{{EnterpriseID: "enterprise-1", VersionNumber: 16, EnterpriseUserID: "user-1", OrgUnitID: "dept", Role: "suggest"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := newPostgresAtlasPolicySourceWithQueries(test.queries).LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
+			tx := &fakeAtlasPolicyTx{latest: 17, units: test.units, memberships: test.memberships}
+			_, err := newPostgresAtlasPolicySourceWithPool(&fakeAtlasPolicyPool{tx: tx}).LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
 			if !errors.Is(err, policy.ErrAtlasPolicyUnavailable) {
 				t.Fatalf("error = %v", err)
 			}
@@ -60,25 +196,36 @@ func TestPostgresAtlasPolicySourceRejectsCrossTenantRows(t *testing.T) {
 	}
 }
 
-func TestPostgresAtlasPolicySourceUsesCompositeEnterpriseScope(t *testing.T) {
+func TestPostgresAtlasPolicySourceRejectsOversizedSnapshotsBeforeConversion(t *testing.T) {
 	t.Parallel()
-	queries := &stubAtlasQueries{}
-	source := newPostgresAtlasPolicySourceWithQueries(queries)
+	for _, test := range []struct {
+		name        string
+		units       []db.OrgPolicySnapshotUnit
+		memberships []db.OrgPolicySnapshotMembership
+	}{
+		{name: "units", units: make([]db.OrgPolicySnapshotUnit, policy.MaxAtlasOrgUnits+1)},
+		{name: "memberships", units: []db.OrgPolicySnapshotUnit{}, memberships: make([]db.OrgPolicySnapshotMembership, policy.MaxAtlasMemberships+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tx := &fakeAtlasPolicyTx{latest: 17, units: test.units, memberships: test.memberships}
+			_, err := newPostgresAtlasPolicySourceWithPool(&fakeAtlasPolicyPool{tx: tx}).LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
+			if !errors.Is(err, policy.ErrAtlasPolicyUnavailable) || tx.committed {
+				t.Fatalf("error=%v calls=%#v", err, tx.calls)
+			}
+		})
+	}
+}
 
-	snapshot, err := source.LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1")
-	if err != nil {
-		t.Fatal(err)
+func TestPostgresAtlasPolicySourceStopsWhenContextCanceledBetweenQueries(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	tx := &fakeAtlasPolicyTx{latest: 17, units: []db.OrgPolicySnapshotUnit{}}
+	tx.afterUnits = cancel
+	_, err := newPostgresAtlasPolicySourceWithPool(&fakeAtlasPolicyPool{tx: tx}).LoadAccessSnapshot(ctx, "enterprise-1", "user-1")
+	if !errors.Is(err, policy.ErrAtlasPolicyUnavailable) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
 	}
-	if queries.versionEnterprise != "enterprise-1" || queries.unitsEnterprise != "enterprise-1" || queries.membershipEnterprise != "enterprise-1" || queries.membershipUser != "user-1" {
-		t.Fatalf("queries were not composite scoped: %#v", queries)
-	}
-	if snapshot.EnterpriseID != "enterprise-1" || snapshot.OrgVersion != 17 {
-		t.Fatalf("snapshot identity/version = %#v", snapshot)
-	}
-	if !reflect.DeepEqual(snapshot.Memberships, []policy.AtlasMembership{{OrgUnitID: "parent", Role: "edit"}}) {
-		t.Fatalf("memberships = %#v", snapshot.Memberships)
-	}
-	if got := []string{snapshot.OrgUnits[0].ID, snapshot.OrgUnits[1].ID}; !reflect.DeepEqual(got, []string{"child", "parent"}) {
-		t.Fatalf("org units = %#v", snapshot.OrgUnits)
+	if tx.committed || !tx.rolledBack || reflect.DeepEqual(tx.calls, []string{"begin", "version", "units", "memberships"}) {
+		t.Fatalf("cancellation did not stop before memberships: %#v", tx.calls)
 	}
 }

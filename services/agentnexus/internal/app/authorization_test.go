@@ -15,9 +15,13 @@ import (
 type stubAuthorizationSessions struct {
 	session browserauth.BrowserSession
 	err     error
+	calls   *int
 }
 
 func (s stubAuthorizationSessions) GetSession(context.Context, string) (browserauth.BrowserSession, error) {
+	if s.calls != nil {
+		*s.calls++
+	}
 	return s.session, s.err
 }
 
@@ -120,6 +124,49 @@ func TestAuthorizationRejectsUnauthenticatedInvalidAndCrossEnterpriseActors(t *t
 	}
 }
 
+func TestAuthorizationRejectsDualCredentialsBeforeResolvingEither(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name     string
+		sessions stubAuthorizationSessions
+		tickets  *stubTicketActors
+	}{
+		{name: "valid session and valid ticket", sessions: stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, tickets: &stubTicketActors{actor: AuthorizationActor{EnterpriseID: "ent-1", UserID: "user-1"}}},
+		{name: "invalid session and unavailable ticket", sessions: stubAuthorizationSessions{err: browserauth.ErrInvalidSession}, tickets: &stubTicketActors{err: ErrTicketActorUnavailable}},
+		{name: "unavailable session and invalid ticket", sessions: stubAuthorizationSessions{err: browserauth.ErrSessionUnavailable}, tickets: &stubTicketActors{err: ErrInvalidTicketActor}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sessionCalls := 0
+			test.sessions.calls = &sessionCalls
+			router := newAuthorizationTestRouter(t, test.sessions, test.tickets, authorizationPolicySource())
+			req := httptest.NewRequest(http.MethodPost, "/v1/authorization/decisions", strings.NewReader(`{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`))
+			req.Header.Set("Content-Type", "application/json")
+			addAuthorizationSession(req)
+			addAuthorizationTicket(req)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized || test.tickets.token != "" || sessionCalls != 0 {
+				t.Fatalf("status=%d session calls=%d ticket token=%q body=%s", rr.Code, sessionCalls, test.tickets.token, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestAuthorizationRejectsRepeatedAuthorizationHeader(t *testing.T) {
+	t.Parallel()
+	tickets := &stubTicketActors{actor: AuthorizationActor{EnterpriseID: "ent-1", UserID: "user-1"}}
+	router := newAuthorizationTestRouter(t, stubAuthorizationSessions{}, tickets, authorizationPolicySource())
+	req := httptest.NewRequest(http.MethodPost, "/v1/authorization/decisions", strings.NewReader(`{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Add("Authorization", "CaseTicket first")
+	req.Header.Add("Authorization", "CaseTicket second")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized || tickets.token != "" {
+		t.Fatalf("status=%d token=%q", rr.Code, tickets.token)
+	}
+}
+
 func TestAuthorizationStrictJSONAndContentType(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -133,6 +180,13 @@ func TestAuthorizationStrictJSONAndContentType(t *testing.T) {
 		{name: "null is not object", contentType: "application/json", body: `null`, want: http.StatusBadRequest},
 		{name: "array not object", contentType: "application/json", body: `[]`, want: http.StatusBadRequest},
 		{name: "unknown field", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest","enterprise_id":"attacker"}`, want: http.StatusBadRequest},
+		{name: "duplicate org version", contentType: "application/json", body: `{"org_unit_id":"child","org_version":11,"org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`, want: http.StatusBadRequest},
+		{name: "duplicate resource", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","resource_id":"article-2","action":"knowledge.suggest"}`, want: http.StatusBadRequest},
+		{name: "duplicate action", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest","action":"knowledge.update"}`, want: http.StatusBadRequest},
+		{name: "whitespace org", contentType: "application/json", body: `{"org_unit_id":" child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}`, want: http.StatusBadRequest},
+		{name: "whitespace resource type", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge ","resource_id":"article-1","action":"knowledge.suggest"}`, want: http.StatusBadRequest},
+		{name: "whitespace resource id", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":" ","action":"knowledge.suggest"}`, want: http.StatusBadRequest},
+		{name: "whitespace action", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest "}`, want: http.StatusBadRequest},
 		{name: "trailing json", contentType: "application/json", body: `{"org_unit_id":"child","org_version":12,"resource_type":"knowledge","resource_id":"article-1","action":"knowledge.suggest"}{}`, want: http.StatusBadRequest},
 		{name: "oversized", contentType: "application/json", body: `{"unknown":"` + strings.Repeat("x", maxAuthorizationRequestBytes) + `"}`, want: http.StatusBadRequest},
 	}

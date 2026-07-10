@@ -37,18 +37,32 @@ ORDER BY version_number DESC
 LIMIT 1;
 
 -- name: ListAuthorizationOrgUnits :many
-SELECT id, enterprise_id, parent_id, name, unit_type, created_at
-FROM org_units
+SELECT enterprise_id, version_number, org_unit_id, parent_id
+FROM org_policy_snapshot_units
 WHERE enterprise_id = $1
-ORDER BY id;
+  AND version_number = $2
+ORDER BY org_unit_id
+LIMIT 10001;
 
 -- name: ListAuthorizationMemberships :many
-SELECT m.enterprise_id, m.enterprise_user_id, m.org_unit_id, m.role, m.created_at
+SELECT enterprise_id, version_number, enterprise_user_id, org_unit_id, role
+FROM org_policy_snapshot_memberships
+WHERE enterprise_id = $1
+  AND version_number = $2
+  AND enterprise_user_id = $3
+ORDER BY org_unit_id, role
+LIMIT 100001;
+
+-- name: CaptureOrgPolicySnapshotUnits :exec
+INSERT INTO org_policy_snapshot_units (enterprise_id, version_number, org_unit_id, parent_id)
+SELECT u.enterprise_id, $2, u.id, u.parent_id
+FROM org_units AS u
+WHERE u.enterprise_id = $1;
+
+-- name: CaptureOrgPolicySnapshotMemberships :exec
+INSERT INTO org_policy_snapshot_memberships (
+    enterprise_id, version_number, enterprise_user_id, org_unit_id, role
+)
+SELECT m.enterprise_id, $2, m.enterprise_user_id, m.org_unit_id, m.role
 FROM org_memberships AS m
-JOIN org_units AS u
-  ON u.enterprise_id = m.enterprise_id
- AND u.id = m.org_unit_id
-WHERE m.enterprise_id = $1
-  AND m.enterprise_user_id = $2
-  AND u.enterprise_id = $1
-ORDER BY m.org_unit_id, m.role;
+WHERE m.enterprise_id = $1;

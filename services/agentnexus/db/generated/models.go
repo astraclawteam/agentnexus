@@ -231,6 +231,21 @@ type OrgMembership struct {
 	CreatedAt        pgtype.Timestamptz
 }
 
+type OrgPolicySnapshotMembership struct {
+	EnterpriseID     string
+	VersionNumber    int64
+	EnterpriseUserID string
+	OrgUnitID        string
+	Role             string
+}
+
+type OrgPolicySnapshotUnit struct {
+	EnterpriseID  string
+	VersionNumber int64
+	OrgUnitID     string
+	ParentID      pgtype.Text
+}
+
 type OrgUnit struct {
 	ID           string
 	EnterpriseID string
