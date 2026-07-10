@@ -222,3 +222,124 @@ components:
         - deny
         - need_external_receipt
         - allow_with_masking
+    BrowserSession:
+      type: object
+      required:
+        - authenticated
+        - enterprise_id
+        - enterprise_user_id
+        - display_name
+        - org_version
+        - org_unit_ids
+        - permissions
+        - advanced_mode_allowed
+        - idle_expires_at
+        - absolute_expires_at
+      properties:
+        authenticated:
+          type: boolean
+        enterprise_id:
+          type: string
+        enterprise_user_id:
+          type: string
+        display_name:
+          type: string
+        org_version:
+          type: integer
+          minimum: 1
+        org_unit_ids:
+          type: array
+          items:
+            type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        advanced_mode_allowed:
+          type: boolean
+        idle_expires_at:
+          type: string
+          format: date-time
+        absolute_expires_at:
+          type: string
+          format: date-time
+    PermissionDecision:
+      type: object
+      required:
+        - decision
+        - permissions
+        - org_unit_ids
+        - mask_fields
+        - risk_level
+        - org_version
+      properties:
+        decision:
+          type: string
+          enum:
+            - allow
+            - deny
+        permissions:
+          type: array
+          items:
+            type: string
+        org_unit_ids:
+          type: array
+          items:
+            type: string
+        mask_fields:
+          type: array
+          items:
+            type: string
+        risk_level:
+          type: string
+          enum:
+            - low
+            - medium
+            - high
+        fallback_action:
+          type: string
+        org_version:
+          type: integer
+          minimum: 1
+    ApprovalRoute:
+      type: object
+      required:
+        - mode
+        - risk_level
+        - risk_reasons
+        - requester_user_id
+        - org_path
+        - auto_publish
+      properties:
+        mode:
+          type: string
+          enum:
+            - single_confirmation
+            - upward_review
+            - enterprise_knowledge_admin_queue
+        risk_level:
+          type: string
+          enum:
+            - low
+            - medium
+            - high
+        risk_reasons:
+          type: array
+          items:
+            type: string
+        requester_user_id:
+          type: string
+        reviewer_user_id:
+          type: string
+        reviewer_display_name:
+          type: string
+        org_path:
+          type: array
+          items:
+            type: string
+        queue:
+          type: string
+        auto_publish:
+          type: boolean
+          enum:
+            - false
