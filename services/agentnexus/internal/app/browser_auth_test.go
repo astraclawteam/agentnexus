@@ -221,7 +221,7 @@ func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 }
 
 func TestBrowserAuthCallbackFailuresNeverSetSessionCookie(t *testing.T) {
-	for _, code := range []string{"exchange-fail", "bad-signature", "bad-audience", "expired", "bad-issuer", "bad-nonce", "unknown", "multi-no-azp", "multi-bad-azp"} {
+	for _, code := range []string{"exchange-fail", "bad-signature", "bad-audience", "expired", "bad-issuer", "bad-nonce", "unknown", "single-bad-azp", "multi-no-azp", "multi-bad-azp"} {
 		t.Run(code, func(t *testing.T) {
 			h := newBrowserHarness(t)
 			start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
@@ -251,7 +251,7 @@ func TestBrowserAuthCallbackBoundsUpstreamExchangeAndJWKSContext(t *testing.T) {
 	h := newBrowserHarnessRuntime(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService { return service }, nil, func(upstream UpstreamOIDC) UpstreamOIDC {
 		checking = &deadlineOIDC{UpstreamOIDC: upstream}
 		return checking
-	})
+	}, 0)
 	start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
 	location, _ := url.Parse(start.Header().Get("Location"))
 	h.idp.setNonce(location.Query().Get("nonce"))
@@ -309,7 +309,7 @@ func TestBrowserAuthTokenSigningFailureIsTemporarilyUnavailable(t *testing.T) {
 func TestBrowserAuthLogoutStoreUnavailableClearsCookieAndReturns503(t *testing.T) {
 	var failing *failingSessionService
 	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
-		failing = &failingSessionService{Service: service, logoutErr: browserauth.ErrSessionUnavailable}
+		failing = &failingSessionService{Service: service, logoutErrs: []error{browserauth.ErrSessionUnavailable}}
 		return failing
 	})
 	raw, _, err := h.sessions.CreateSession(context.Background(), browserauth.CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
@@ -317,24 +317,151 @@ func TestBrowserAuthLogoutStoreUnavailableClearsCookieAndReturns503(t *testing.T
 		t.Fatal(err)
 	}
 	rr := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", &http.Cookie{Name: browserSessionCookie, Value: raw})
-	if rr.Code != http.StatusServiceUnavailable || !hasClearedCookie(rr, browserSessionCookie) || !failing.logoutDeadline {
-		t.Fatalf("status=%d cookies=%v deadline=%v", rr.Code, rr.Result().Cookies(), failing.logoutDeadline)
+	if rr.Code != http.StatusServiceUnavailable || !hasClearedCookie(rr, browserSessionCookie) || len(failing.logoutDeadlines) != 1 || !failing.logoutDeadlines[0] {
+		t.Fatalf("status=%d cookies=%v deadlines=%v", rr.Code, rr.Result().Cookies(), failing.logoutDeadlines)
 	}
 }
 
-func TestBrowserAuthCallbackCleanupIsBoundedAndLeaksNoCookieOrCodeWhenRevokeFails(t *testing.T) {
-	var failing *failingSessionService
-	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
-		failing = &failingSessionService{Service: service, revokeErr: errors.New("revoke unavailable")}
-		return failing
+func TestBrowserAuthRoutesDistinguishStoreUnavailableFromInvalidCredentials(t *testing.T) {
+	t.Run("authorize", func(t *testing.T) {
+		h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+			return &failingSessionService{Service: service, getErr: browserauth.ErrSessionUnavailable}
+		})
+		raw, _, _ := h.sessions.CreateSession(context.Background(), browserauth.CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
+		rr := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", &http.Cookie{Name: browserSessionCookie, Value: raw})
+		if rr.Code != http.StatusServiceUnavailable || hasClearedCookie(rr, browserSessionCookie) {
+			t.Fatalf("status=%d cookies=%v", rr.Code, rr.Result().Cookies())
+		}
 	})
-	start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
-	location, _ := url.Parse(start.Header().Get("Location"))
-	h.idp.setNonce(location.Query().Get("nonce"))
-	h.audit.err = errors.New("audit unavailable")
-	rr := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(location.Query().Get("state")), "", loginBindingCookie(t, start))
-	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Location") != "" || hasSessionCookie(rr) || !failing.revokeDeadline {
-		t.Fatalf("status=%d headers=%v cookies=%v deadline=%v", rr.Code, rr.Header(), rr.Result().Cookies(), failing.revokeDeadline)
+	t.Run("me", func(t *testing.T) {
+		h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+			return &failingSessionService{Service: service, getErr: browserauth.ErrSessionUnavailable}
+		})
+		rr := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", &http.Cookie{Name: browserSessionCookie, Value: secretValueForTest()})
+		if rr.Code != http.StatusServiceUnavailable || hasClearedCookie(rr, browserSessionCookie) {
+			t.Fatalf("status=%d cookies=%v", rr.Code, rr.Result().Cookies())
+		}
+	})
+	t.Run("token", func(t *testing.T) {
+		h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+			return &failingSessionService{Service: service, exchangeErr: browserauth.ErrGrantUnavailable}
+		})
+		form := url.Values{"grant_type": {"authorization_code"}, "code": {secretValueForTest()}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+		rr := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
+		if rr.Code != http.StatusServiceUnavailable || responseError(t, rr) != "temporarily_unavailable" {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	})
+	t.Run("callback", func(t *testing.T) {
+		h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+			return &failingSessionService{Service: service, consumeErr: browserauth.ErrLoginAttemptUnavailable}
+		})
+		start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
+		location, _ := url.Parse(start.Header().Get("Location"))
+		rr := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(location.Query().Get("state")), "", loginBindingCookie(t, start))
+		if rr.Code != http.StatusServiceUnavailable || hasSessionCookie(rr) {
+			t.Fatalf("status=%d cookies=%v", rr.Code, rr.Result().Cookies())
+		}
+	})
+}
+
+func TestBrowserAuthAuthorizeReturns429ForLoginAttemptLimit(t *testing.T) {
+	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+		return &failingSessionService{Service: service, createAttemptErr: browserauth.ErrLoginAttemptLimited}
+	})
+	rr := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Fatal("Retry-After header missing")
+	}
+	if rr.Header().Get("Location") != "" {
+		t.Fatalf("unexpected IdP redirect: %q", rr.Header().Get("Location"))
+	}
+	for _, cookie := range rr.Result().Cookies() {
+		if strings.HasPrefix(cookie.Name, "nexus_oidc_binding_") && cookie.Value != "" {
+			t.Fatalf("binding cookie set: %+v", cookie)
+		}
+	}
+}
+
+func TestBrowserAuthRequestDeadlineReachesBlockingDependencies(t *testing.T) {
+	const timeout = 30 * time.Millisecond
+	t.Run("authorize", func(t *testing.T) {
+		var blocking *blockingSessionService
+		h := newBrowserHarnessRuntime(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+			blocking = &blockingSessionService{Service: service, blockGet: true, done: make(chan struct{})}
+			return blocking
+		}, nil, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream }, timeout)
+		started := time.Now()
+		rr := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", &http.Cookie{Name: browserSessionCookie, Value: secretValueForTest()})
+		assertDeadlineResponse(t, rr, started, blocking.done)
+	})
+	t.Run("token", func(t *testing.T) {
+		var blocking *blockingSessionService
+		h := newBrowserHarnessRuntime(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+			blocking = &blockingSessionService{Service: service, blockExchange: true, done: make(chan struct{})}
+			return blocking
+		}, nil, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream }, timeout)
+		form := url.Values{"grant_type": {"authorization_code"}, "code": {secretValueForTest()}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+		started := time.Now()
+		rr := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
+		assertDeadlineResponse(t, rr, started, blocking.done)
+		if responseError(t, rr) != "temporarily_unavailable" {
+			t.Fatalf("body=%s", rr.Body.String())
+		}
+	})
+	t.Run("callback", func(t *testing.T) {
+		var blocking *blockingSessionService
+		h := newBrowserHarnessRuntime(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+			blocking = &blockingSessionService{Service: service, done: make(chan struct{})}
+			return blocking
+		}, nil, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream }, timeout)
+		start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
+		location, _ := url.Parse(start.Header().Get("Location"))
+		blocking.blockConsume = true
+		started := time.Now()
+		rr := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(location.Query().Get("state")), "", loginBindingCookie(t, start))
+		assertDeadlineResponse(t, rr, started, blocking.done)
+	})
+	t.Run("me-profile", func(t *testing.T) {
+		profile := &blockingProfile{done: make(chan struct{})}
+		h := newBrowserHarnessRuntime(t, profile, func(service *browserauth.Service) BrowserSessionService { return service }, nil, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream }, timeout)
+		raw, _, _ := h.sessions.CreateSession(context.Background(), browserauth.CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
+		started := time.Now()
+		rr := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", &http.Cookie{Name: browserSessionCookie, Value: raw})
+		assertDeadlineResponse(t, rr, started, profile.done)
+	})
+}
+
+func TestBrowserAuthCallbackAuditFailureRetriesAtomicSessionCleanupWithoutLeaks(t *testing.T) {
+	tests := map[string][]error{
+		"transient unavailable then success": {browserauth.ErrSessionUnavailable, nil},
+		"persistent unavailable":             {browserauth.ErrSessionUnavailable, browserauth.ErrSessionUnavailable},
+	}
+	for name, logoutErrs := range tests {
+		t.Run(name, func(t *testing.T) {
+			var failing *failingSessionService
+			h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+				failing = &failingSessionService{Service: service, logoutErrs: logoutErrs}
+				return failing
+			})
+			start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("s", "n").Encode(), "", nil)
+			location, _ := url.Parse(start.Header().Get("Location"))
+			h.idp.setNonce(location.Query().Get("nonce"))
+			h.audit.err = errors.New("audit unavailable")
+			rr := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(location.Query().Get("state")), "", loginBindingCookie(t, start))
+			if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Location") != "" || hasSessionCookie(rr) || strings.Contains(rr.Body.String(), "code") {
+				t.Fatalf("status=%d headers=%v cookies=%v body=%q", rr.Code, rr.Header(), rr.Result().Cookies(), rr.Body.String())
+			}
+			if failing.logoutCalls != 2 || len(failing.logoutDeadlines) != 2 || !failing.logoutDeadlines[0] || !failing.logoutDeadlines[1] {
+				t.Fatalf("logout calls=%d deadlines=%v", failing.logoutCalls, failing.logoutDeadlines)
+			}
+			if failing.revokeCalls != 0 {
+				t.Fatalf("RevokeSession calls=%d", failing.revokeCalls)
+			}
+		})
 	}
 }
 
@@ -504,10 +631,10 @@ func newBrowserHarnessWithOptions(t *testing.T, profiles BrowserProfileResolver,
 }
 
 func newBrowserHarnessConfigured(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService, issuer IDTokenIssuer) *browserHarness {
-	return newBrowserHarnessRuntime(t, profiles, wrap, issuer, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream })
+	return newBrowserHarnessRuntime(t, profiles, wrap, issuer, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream }, 0)
 }
 
-func newBrowserHarnessRuntime(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService, issuer IDTokenIssuer, upstreamWrap func(UpstreamOIDC) UpstreamOIDC) *browserHarness {
+func newBrowserHarnessRuntime(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService, issuer IDTokenIssuer, upstreamWrap func(UpstreamOIDC) UpstreamOIDC, requestTimeout time.Duration) *browserHarness {
 	t.Helper()
 	idp := newFakeIDP(t)
 	downstreamKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -525,7 +652,7 @@ func newBrowserHarnessRuntime(t *testing.T, profiles BrowserProfileResolver, wra
 	store.AddEnterpriseUser("ent-2", "user-2")
 	sessions := browserauth.NewService(store)
 	audit := &memoryAudit{}
-	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrap(sessions), Upstream: upstreamWrap(upstream), Identities: testIdentities{}, Profiles: profiles, Audit: audit, TokenIssuer: issuer})
+	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrap(sessions), Upstream: upstreamWrap(upstream), Identities: testIdentities{}, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,9 +696,57 @@ type memoryAudit struct {
 
 type failingSessionService struct {
 	*browserauth.Service
-	logoutErr, revokeErr           error
-	logoutDeadline, revokeDeadline bool
+	logoutErrs                                        []error
+	logoutCalls, revokeCalls                          int
+	logoutDeadlines                                   []bool
+	revokeErr                                         error
+	revokeDeadline                                    bool
+	getErr, exchangeErr, consumeErr, createAttemptErr error
 }
+type blockingSessionService struct {
+	*browserauth.Service
+	blockGet, blockExchange, blockConsume bool
+	done                                  chan struct{}
+	once                                  sync.Once
+}
+
+func (s *blockingSessionService) finish() { s.once.Do(func() { close(s.done) }) }
+func (s *blockingSessionService) GetSession(ctx context.Context, token string) (browserauth.BrowserSession, error) {
+	if s.blockGet {
+		<-ctx.Done()
+		s.finish()
+		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+	}
+	return s.Service.GetSession(ctx, token)
+}
+func (s *blockingSessionService) ExchangeCode(ctx context.Context, input browserauth.ExchangeCodeInput) (browserauth.ExchangeResult, error) {
+	if s.blockExchange {
+		<-ctx.Done()
+		s.finish()
+		return browserauth.ExchangeResult{}, browserauth.ErrGrantUnavailable
+	}
+	return s.Service.ExchangeCode(ctx, input)
+}
+func (s *blockingSessionService) ConsumeLoginAttempt(ctx context.Context, state, binding string) (browserauth.LoginAttempt, error) {
+	if s.blockConsume {
+		<-ctx.Done()
+		s.finish()
+		return browserauth.LoginAttempt{}, browserauth.ErrLoginAttemptUnavailable
+	}
+	return s.Service.ConsumeLoginAttempt(ctx, state, binding)
+}
+
+type blockingProfile struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func (p *blockingProfile) ResolveBrowserProfile(ctx context.Context, _, _ string) (BrowserProfile, error) {
+	<-ctx.Done()
+	p.once.Do(func() { close(p.done) })
+	return BrowserProfile{}, ctx.Err()
+}
+
 type staticTokenIssuer struct {
 	signErr    error
 	algorithms []string
@@ -596,13 +771,41 @@ func (s staticTokenIssuer) JWKS() ([]byte, error) { return []byte(`{"keys":[]}`)
 func (s staticTokenIssuer) Algorithms() []string  { return append([]string(nil), s.algorithms...) }
 
 func (s *failingSessionService) LogoutSession(ctx context.Context, token string) (browserauth.BrowserSession, error) {
-	_, s.logoutDeadline = ctx.Deadline()
-	if s.logoutErr != nil {
-		return browserauth.BrowserSession{}, s.logoutErr
+	_, hasDeadline := ctx.Deadline()
+	s.logoutDeadlines = append(s.logoutDeadlines, hasDeadline)
+	call := s.logoutCalls
+	s.logoutCalls++
+	if call < len(s.logoutErrs) && s.logoutErrs[call] != nil {
+		return browserauth.BrowserSession{}, s.logoutErrs[call]
 	}
 	return s.Service.LogoutSession(ctx, token)
 }
+func (s *failingSessionService) GetSession(ctx context.Context, token string) (browserauth.BrowserSession, error) {
+	if s.getErr != nil {
+		return browserauth.BrowserSession{}, s.getErr
+	}
+	return s.Service.GetSession(ctx, token)
+}
+func (s *failingSessionService) ExchangeCode(ctx context.Context, input browserauth.ExchangeCodeInput) (browserauth.ExchangeResult, error) {
+	if s.exchangeErr != nil {
+		return browserauth.ExchangeResult{}, s.exchangeErr
+	}
+	return s.Service.ExchangeCode(ctx, input)
+}
+func (s *failingSessionService) ConsumeLoginAttempt(ctx context.Context, state, binding string) (browserauth.LoginAttempt, error) {
+	if s.consumeErr != nil {
+		return browserauth.LoginAttempt{}, s.consumeErr
+	}
+	return s.Service.ConsumeLoginAttempt(ctx, state, binding)
+}
+func (s *failingSessionService) CreateLoginAttempt(ctx context.Context, input browserauth.CreateLoginAttemptInput) (string, string, browserauth.LoginAttempt, error) {
+	if s.createAttemptErr != nil {
+		return "", "", browserauth.LoginAttempt{}, s.createAttemptErr
+	}
+	return s.Service.CreateLoginAttempt(ctx, input)
+}
 func (s *failingSessionService) RevokeSession(ctx context.Context, token string) error {
+	s.revokeCalls++
 	_, s.revokeDeadline = ctx.Deadline()
 	if s.revokeErr != nil {
 		return s.revokeErr
@@ -670,6 +873,8 @@ func (f *fakeIDP) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			nonce = "wrong"
 		case "unknown":
 			subject = "missing-user"
+		case "single-bad-azp":
+			azp = "other"
 		case "multi-no-azp":
 			audience = jwt.Audience{"nexus-client", "other"}
 		case "multi-bad-azp":
@@ -762,4 +967,21 @@ func responseError(t *testing.T, rr *httptest.ResponseRecorder) string {
 	}
 	value, _ := payload["error"].(string)
 	return value
+}
+func secretValueForTest() string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("x", 32)))
+}
+func assertDeadlineResponse(t *testing.T, rr *httptest.ResponseRecorder, started time.Time, done <-chan struct{}) {
+	t.Helper()
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("deadline response took %s", time.Since(started))
+	}
+	select {
+	case <-done:
+	default:
+		t.Fatal("dependency goroutine still blocked")
+	}
 }

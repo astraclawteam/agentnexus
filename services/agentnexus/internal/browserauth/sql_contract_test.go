@@ -43,8 +43,34 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 		t.Error("login attempt consume must lock its state row")
 	}
 	createAttempt := strings.ToLower(namedQuery(t, queries, "CreateOIDCLoginAttempt"))
-	if !strings.Contains(createAttempt, "delete from oidc_login_attempts where expires_at <=") {
-		t.Error("login attempt creation must clean expired attempts")
+	if strings.Contains(createAttempt, "delete from") || strings.Contains(createAttempt, "count(") || !strings.Contains(createAttempt, "insert into oidc_login_attempts") {
+		t.Error("login attempt insertion must be separate from lock, cleanup, and count queries")
+	}
+	lockAttempt := strings.ToLower(namedQuery(t, queries, "LockOIDCLoginAttemptScope"))
+	deleteExpired := strings.ToLower(namedQuery(t, queries, "DeleteExpiredOIDCLoginAttempts"))
+	countAttempts := strings.ToLower(namedQuery(t, queries, "CountOIDCLoginAttempts"))
+	if !strings.Contains(lockAttempt, "pg_advisory_xact_lock") || !strings.Contains(lockAttempt, "enterprise") || !strings.Contains(lockAttempt, "client") {
+		t.Error("login attempt scope must use a transaction advisory lock keyed by enterprise and client")
+	}
+	if !strings.Contains(deleteExpired, "expires_at <=") || strings.Contains(deleteExpired, "enterprise_id") || strings.Contains(deleteExpired, "client_id") {
+		t.Error("login attempt cleanup must delete all expired rows")
+	}
+	if !strings.Contains(countAttempts, "count(") || !strings.Contains(countAttempts, "enterprise_id") || !strings.Contains(countAttempts, "client_id") || !strings.Contains(countAttempts, "expires_at >") {
+		t.Error("login attempt count must be scoped to unexpired enterprise/client rows")
+	}
+	postgresStore := strings.ToLower(mustRead(t, filepath.Join(root, "internal", "browserauth", "postgres_store.go")))
+	createStart := strings.Index(postgresStore, "func (s *postgresstore) createloginattempt")
+	consumeStart := strings.Index(postgresStore, "func (s *postgresstore) consumeloginattempt")
+	if createStart >= 0 && consumeStart > createStart {
+		postgresStore = postgresStore[createStart:consumeStart]
+	}
+	lockIndex := strings.Index(postgresStore, ".lockoidcloginattemptscope")
+	deleteIndex := strings.Index(postgresStore, ".deleteexpiredoidcloginattempts")
+	countIndex := strings.Index(postgresStore, ".countoidcloginattempts")
+	insertIndex := strings.Index(postgresStore, ".createoidcloginattempt")
+	commitIndex := strings.Index(postgresStore, ".commit(ctx)")
+	if lockIndex < 0 || deleteIndex <= lockIndex || countIndex <= deleteIndex || insertIndex <= countIndex || commitIndex <= insertIndex {
+		t.Errorf("postgres login-attempt transaction order is lock=%d delete=%d count=%d insert=%d commit=%d", lockIndex, deleteIndex, countIndex, insertIndex, commitIndex)
 	}
 	for _, required := range []string{
 		"add constraint uq_org_units_enterprise_id_id unique (enterprise_id, id)",

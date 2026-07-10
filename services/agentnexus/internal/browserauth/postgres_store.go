@@ -105,13 +105,34 @@ func (s *PostgresStore) CreateLoginAttempt(ctx context.Context, attempt storedLo
 	if s == nil || s.pool == nil {
 		return errStoreUnavailable
 	}
-	_, err := db.New(s.pool).CreateOIDCLoginAttempt(ctx, db.CreateOIDCLoginAttemptParams{
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	queries := db.New(tx)
+	if _, err := queries.LockOIDCLoginAttemptScope(ctx, db.LockOIDCLoginAttemptScopeParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID}); err != nil {
+		return err
+	}
+	if err := queries.DeleteExpiredOIDCLoginAttempts(ctx, timestamp(attempt.CreatedAt)); err != nil {
+		return err
+	}
+	count, err := queries.CountOIDCLoginAttempts(ctx, db.CountOIDCLoginAttemptsParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, ExpiresAt: timestamp(attempt.CreatedAt)})
+	if err != nil {
+		return err
+	}
+	if count >= maxLoginAttempts {
+		return errLoginAttemptLimited
+	}
+	if _, err := queries.CreateOIDCLoginAttempt(ctx, db.CreateOIDCLoginAttemptParams{
 		StateHash: attempt.StateHash, BindingHash: attempt.BindingHash, EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID,
 		RedirectUri: attempt.RedirectURI, ConsoleState: attempt.ConsoleState, ConsoleNonce: attempt.ConsoleNonce,
 		CodeChallenge: attempt.CodeChallenge, UpstreamNonce: attempt.UpstreamNonce,
 		CreatedAt: timestamp(attempt.CreatedAt), ExpiresAt: timestamp(attempt.ExpiresAt),
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *PostgresStore) ConsumeLoginAttempt(ctx context.Context, stateHash, bindingHash string, now time.Time) (storedLoginAttempt, error) {

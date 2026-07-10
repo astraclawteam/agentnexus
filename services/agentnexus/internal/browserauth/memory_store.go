@@ -41,6 +41,15 @@ func (s *MemoryStore) CreateLoginAttempt(ctx context.Context, attempt storedLogi
 			delete(s.loginAttempts, key)
 		}
 	}
+	count := 0
+	for _, record := range s.loginAttempts {
+		if record.EnterpriseID == attempt.EnterpriseID && record.ClientID == attempt.ClientID {
+			count++
+		}
+	}
+	if count >= maxLoginAttempts {
+		return errLoginAttemptLimited
+	}
 	if _, ok := s.loginAttempts[attempt.StateHash]; ok {
 		return errDuplicate
 	}

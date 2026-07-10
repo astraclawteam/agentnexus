@@ -26,6 +26,8 @@ const maxAuthorizeNonceLength = 512
 const maxUpstreamCodeLength = 4096
 const mandatoryCleanupTimeout = 5 * time.Second
 const upstreamRequestTimeout = 15 * time.Second
+const defaultBrowserRequestTimeout = 20 * time.Second
+const loginAttemptRetryAfterSeconds = "60"
 
 type BrowserSessionService interface {
 	GetSession(context.Context, string) (browserauth.BrowserSession, error)
@@ -78,13 +80,14 @@ type BrowserAuditSink interface {
 }
 
 type BrowserAuthDependencies struct {
-	Config      browserauth.OIDCConfig
-	Sessions    BrowserSessionService
-	Upstream    UpstreamOIDC
-	Identities  ExternalIdentityResolver
-	Profiles    BrowserProfileResolver
-	Audit       BrowserAuditSink
-	TokenIssuer IDTokenIssuer
+	Config         browserauth.OIDCConfig
+	Sessions       BrowserSessionService
+	Upstream       UpstreamOIDC
+	Identities     ExternalIdentityResolver
+	Profiles       BrowserProfileResolver
+	Audit          BrowserAuditSink
+	TokenIssuer    IDTokenIssuer
+	RequestTimeout time.Duration
 }
 
 type browserAuthHandler struct {
@@ -110,6 +113,16 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 		}
 	}
 	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer}, nil
+}
+
+func browserRequestTimeout(value time.Duration) (time.Duration, error) {
+	if value == 0 {
+		return defaultBrowserRequestTimeout, nil
+	}
+	if value < 0 || value > 2*time.Minute {
+		return 0, errors.New("browser request timeout is out of range")
+	}
+	return value, nil
 }
 
 func (h *browserAuthHandler) register(mux *http.ServeMux) {
@@ -169,7 +182,8 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if cookie, err := r.Cookie(browserSessionCookie); err == nil {
-		if session, err := h.sessions.GetSession(r.Context(), cookie.Value); err == nil && session.EnterpriseID == h.config.EnterpriseID {
+		session, sessionErr := h.sessions.GetSession(r.Context(), cookie.Value)
+		if sessionErr == nil && session.EnterpriseID == h.config.EnterpriseID {
 			code, err := h.sessions.IssueCode(r.Context(), browserauth.IssueCodeInput{EnterpriseID: session.EnterpriseID, UserID: session.UserID, ClientID: clientID, RedirectURI: redirectURI, Nonce: nonce, CodeChallenge: challenge})
 			if err != nil {
 				writeOAuthError(w, http.StatusServiceUnavailable)
@@ -178,10 +192,19 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 			redirectWithCode(w, r, redirectURI, code, state)
 			return
 		}
+		if errors.Is(sessionErr, browserauth.ErrSessionUnavailable) {
+			writeOAuthError(w, http.StatusServiceUnavailable)
+			return
+		}
 		clearSessionCookie(w)
 	}
 	attemptState, binding, attempt, err := h.sessions.CreateLoginAttempt(r.Context(), browserauth.CreateLoginAttemptInput{EnterpriseID: h.config.EnterpriseID, ClientID: clientID, RedirectURI: redirectURI, ConsoleState: state, ConsoleNonce: nonce, CodeChallenge: challenge})
 	if err != nil {
+		if errors.Is(err, browserauth.ErrLoginAttemptLimited) {
+			w.Header().Set("Retry-After", loginAttemptRetryAfterSeconds)
+			writeOAuthError(w, http.StatusTooManyRequests)
+			return
+		}
 		writeOAuthError(w, http.StatusServiceUnavailable)
 		return
 	}
@@ -210,6 +233,10 @@ func (h *browserAuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	attempt, err := h.sessions.ConsumeLoginAttempt(r.Context(), state, bindingCookie.Value)
 	if err != nil {
+		if errors.Is(err, browserauth.ErrLoginAttemptUnavailable) {
+			writeOAuthError(w, http.StatusServiceUnavailable)
+			return
+		}
 		writeOAuthError(w, http.StatusUnauthorized)
 		return
 	}
@@ -231,9 +258,14 @@ func (h *browserAuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fail := func(status int) {
-		cleanupCtx, cancel := boundedCleanupContext(r.Context())
-		defer cancel()
-		_ = h.sessions.RevokeSession(cleanupCtx, sessionToken)
+		for attempt := 0; attempt < 2; attempt++ {
+			cleanupCtx, cancel := boundedCleanupContext(r.Context())
+			_, cleanupErr := h.sessions.LogoutSession(cleanupCtx, sessionToken)
+			cancel()
+			if !errors.Is(cleanupErr, browserauth.ErrSessionUnavailable) {
+				break
+			}
+		}
 		writeOAuthError(w, status)
 	}
 	downstreamCode, err := h.sessions.IssueCode(r.Context(), browserauth.IssueCodeInput{EnterpriseID: enterpriseID, UserID: userID, ClientID: attempt.ClientID, RedirectURI: attempt.RedirectURI, Nonce: attempt.ConsoleNonce, CodeChallenge: attempt.CodeChallenge})
@@ -316,6 +348,10 @@ func (h *browserAuthHandler) token(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.sessions.ExchangeCode(r.Context(), browserauth.ExchangeCodeInput{Code: code, Verifier: verifier, ClientID: clientID, RedirectURI: redirectURI})
 	if err != nil {
+		if errors.Is(err, browserauth.ErrGrantUnavailable) {
+			writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable")
+			return
+		}
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
 		return
 	}
@@ -356,6 +392,10 @@ func (h *browserAuthHandler) me(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := h.sessions.GetSession(r.Context(), cookie.Value)
 	if err != nil {
+		if errors.Is(err, browserauth.ErrSessionUnavailable) {
+			writeOAuthError(w, http.StatusServiceUnavailable)
+			return
+		}
 		clearSessionCookie(w)
 		writeOAuthError(w, http.StatusUnauthorized)
 		return

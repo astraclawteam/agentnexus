@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -40,11 +42,27 @@ type OIDCConfig struct {
 	SigningKeyID        string
 	SigningPrivateKey   crypto.Signer
 	PreviousSigningKeys map[string]crypto.PublicKey
+	HTTPTimeout         time.Duration
+}
+
+const defaultOIDCHTTPTimeout = 15 * time.Second
+
+func (c OIDCConfig) effectiveHTTPTimeout() (time.Duration, error) {
+	if c.HTTPTimeout == 0 {
+		return defaultOIDCHTTPTimeout, nil
+	}
+	if c.HTTPTimeout < time.Millisecond || c.HTTPTimeout > 2*time.Minute {
+		return 0, errors.New("OIDC HTTP timeout is out of range")
+	}
+	return c.HTTPTimeout, nil
 }
 
 func (c OIDCConfig) Validate() error {
 	if c.EnterpriseID == "" || c.EnterpriseIssuerURL == "" || c.PublicIssuerURL == "" || c.ClientID == "" || c.ClientSecret == "" || c.CallbackURL == "" || c.SigningKeyID == "" || c.SigningPrivateKey == nil || len(c.ConsoleClients) == 0 {
 		return errors.New("browser OIDC configuration incomplete")
+	}
+	if _, err := c.effectiveHTTPTimeout(); err != nil {
+		return err
 	}
 	if err := validateIssuerURL(c.EnterpriseIssuerURL, false); err != nil {
 		return err
@@ -401,12 +419,68 @@ func NewEnterpriseOIDC(ctx context.Context, config OIDCConfig) (*EnterpriseOIDC,
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+	timeout, _ := config.effectiveHTTPTimeout()
+	baseClient, _ := ctx.Value(oauth2.HTTPClient).(*http.Client)
+	if baseClient == nil {
+		baseClient = http.DefaultClient
+	}
+	clientCopy := *baseClient
+	baseTransport := clientCopy.Transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
+	}
+	clientCopy.Transport = &oidcTimeoutTransport{base: baseTransport, timeout: timeout}
+	if clientCopy.Timeout == 0 || clientCopy.Timeout > timeout {
+		clientCopy.Timeout = timeout
+	}
+	client := &clientCopy
+	ctx = oidc.ClientContext(ctx, client)
 	provider, err := oidc.NewProvider(ctx, config.EnterpriseIssuerURL)
 	if err != nil {
 		return nil, err
 	}
-	client, _ := ctx.Value(oauth2.HTTPClient).(*http.Client)
 	return &EnterpriseOIDC{oauth2: oauth2.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, Endpoint: provider.Endpoint(), RedirectURL: config.CallbackURL, Scopes: []string{oidc.ScopeOpenID}}, verifier: provider.Verifier(&oidc.Config{ClientID: config.ClientID}), client: client, clientID: config.ClientID}, nil
+}
+
+type oidcTimeoutTransport struct {
+	base    http.RoundTripper
+	timeout time.Duration
+}
+
+func (t *oidcTimeoutTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	ctx, cancel := context.WithTimeout(req.Context(), t.timeout)
+	resp, err := t.base.RoundTrip(req.Clone(ctx))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	body := &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+	context.AfterFunc(ctx, func() { _ = body.Close() })
+	resp.Body = body
+	return resp, nil
+}
+
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+	err    error
+}
+
+func (b *cancelOnCloseBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		_ = b.Close()
+	}
+	return n, err
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	b.once.Do(func() {
+		b.cancel()
+		b.err = b.ReadCloser.Close()
+	})
+	return b.err
 }
 
 func (o *EnterpriseOIDC) AuthCodeURL(state, nonce string) string {
@@ -415,7 +489,7 @@ func (o *EnterpriseOIDC) AuthCodeURL(state, nonce string) string {
 
 func (o *EnterpriseOIDC) ExchangeAndVerify(ctx context.Context, code string) (VerifiedIdentity, string, error) {
 	if o.client != nil {
-		ctx = context.WithValue(ctx, oauth2.HTTPClient, o.client)
+		ctx = oidc.ClientContext(ctx, o.client)
 	}
 	token, err := o.oauth2.Exchange(ctx, code)
 	if err != nil {
@@ -436,7 +510,7 @@ func (o *EnterpriseOIDC) ExchangeAndVerify(ctx context.Context, code string) (Ve
 	if err := idToken.Claims(&claims); err != nil {
 		return VerifiedIdentity{}, "", err
 	}
-	if len(idToken.Audience) > 1 && claims.AuthorizedParty != o.clientID {
+	if (claims.AuthorizedParty != "" || len(idToken.Audience) > 1) && claims.AuthorizedParty != o.clientID {
 		return VerifiedIdentity{}, "", errors.New("upstream ID token authorized party mismatch")
 	}
 	return VerifiedIdentity{Issuer: idToken.Issuer, Subject: idToken.Subject}, claims.Nonce, nil

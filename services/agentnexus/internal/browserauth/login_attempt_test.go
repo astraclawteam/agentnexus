@@ -79,7 +79,7 @@ func TestLoginAttemptCanceledContextDoesNotMutateStore(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := svc.ConsumeLoginAttempt(ctx, state, binding); !errors.Is(err, ErrInvalidLoginAttempt) {
+	if _, err := svc.ConsumeLoginAttempt(ctx, state, binding); !errors.Is(err, ErrLoginAttemptUnavailable) {
 		t.Fatalf("err=%v", err)
 	}
 	if _, err := svc.ConsumeLoginAttempt(context.Background(), state, binding); err != nil {
@@ -122,6 +122,76 @@ func TestLoginAttemptCleanupRemovesAllExpiredRows(t *testing.T) {
 	}
 	if got := len(store.loginAttemptSnapshot()); got != 1 {
 		t.Fatalf("attempts=%d", got)
+	}
+}
+
+func TestLoginAttemptLimitIsAtomicPerEnterpriseClient(t *testing.T) {
+	store := NewMemoryStore()
+	svc := NewService(store, WithClock(func() time.Time { return fixedNow }))
+	input := CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}
+
+	var success, limited atomic.Int32
+	var wg sync.WaitGroup
+	for range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, _, err := svc.CreateLoginAttempt(context.Background(), input)
+			switch {
+			case err == nil:
+				success.Add(1)
+			case errors.Is(err, ErrLoginAttemptLimited):
+				limited.Add(1)
+			default:
+				t.Errorf("unexpected error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if success.Load() != 32 || limited.Load() != 32 {
+		t.Fatalf("success=%d limited=%d", success.Load(), limited.Load())
+	}
+}
+
+func TestLoginAttemptLimitIsIndependentAndReopensAfterExpiry(t *testing.T) {
+	clock := &mutableClock{now: fixedNow}
+	svc := NewService(NewMemoryStore(), WithClock(clock.Now))
+	create := func(enterpriseID, clientID string) error {
+		_, _, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: enterpriseID, ClientID: clientID, RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
+		return err
+	}
+	for range 32 {
+		if err := create("ent-1", "atlas"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := create("ent-1", "atlas"); !errors.Is(err, ErrLoginAttemptLimited) {
+		t.Fatalf("same key error=%v", err)
+	}
+	if err := create("ent-2", "atlas"); err != nil {
+		t.Fatalf("different enterprise error=%v", err)
+	}
+	if err := create("ent-1", "other"); err != nil {
+		t.Fatalf("different client error=%v", err)
+	}
+	clock.now = fixedNow.Add(defaultLoginTimeout)
+	if err := create("ent-1", "atlas"); err != nil {
+		t.Fatalf("after expiry error=%v", err)
+	}
+}
+
+func TestCreateLoginAttemptMapsStoreErrors(t *testing.T) {
+	store := NewMemoryStore()
+	svc := NewService(store, WithClock(func() time.Time { return fixedNow }))
+	input := CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}
+	store.err = errors.New("database unavailable")
+	if _, _, _, err := svc.CreateLoginAttempt(context.Background(), input); !errors.Is(err, ErrLoginAttemptUnavailable) {
+		t.Fatalf("store error=%v", err)
+	}
+
+	store.err = errLoginAttemptLimited
+	if _, _, _, err := svc.CreateLoginAttempt(context.Background(), input); !errors.Is(err, ErrLoginAttemptLimited) {
+		t.Fatalf("limit error=%v", err)
 	}
 }
 

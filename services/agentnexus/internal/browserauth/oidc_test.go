@@ -1,6 +1,7 @@
 package browserauth
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -10,17 +11,111 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
 	"math/big"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
+
+func TestEnterpriseOIDCHardHTTPTimeoutCancelsJWKSAndAllowsRetry(t *testing.T) {
+	key := mustRSAKey(t)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, (&jose.SignerOptions{}).WithHeader("kid", "idp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerURL := "https://idp.example.com"
+	claims := struct {
+		jwt.Claims
+		Nonce string `json:"nonce"`
+	}{Claims: jwt.Claims{Issuer: issuerURL, Subject: "subject", Audience: jwt.Audience{"nexus"}, IssuedAt: jwt.NewNumericDate(time.Now()), Expiry: jwt.NewNumericDate(time.Now().Add(time.Minute))}, Nonce: "nonce"}
+	rawIDToken, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var jwksCalls atomic.Int32
+	jwksCanceled := make(chan error, 1)
+	transport := &oidcRoundTripFixture{roundTrip: func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			return oidcJSONResponse(r, map[string]any{"issuer": issuerURL, "authorization_endpoint": issuerURL + "/authorize", "token_endpoint": issuerURL + "/token", "jwks_uri": issuerURL + "/jwks", "id_token_signing_alg_values_supported": []string{"RS256"}})
+		case "/token":
+			return oidcJSONResponse(r, map[string]any{"access_token": "upstream", "token_type": "Bearer", "id_token": rawIDToken})
+		case "/jwks":
+			if jwksCalls.Add(1) == 1 {
+				<-r.Context().Done()
+				jwksCanceled <- r.Context().Err()
+				return nil, r.Context().Err()
+			}
+			return oidcJSONResponse(r, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "idp", Algorithm: "RS256", Use: "sig"}}})
+		default:
+			return nil, fmt.Errorf("unexpected OIDC request: %s %s", r.Method, r.URL)
+		}
+	}}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	originalTimeout := client.Timeout
+	originalTransport := client.Transport
+	ctx := oidc.ClientContext(context.Background(), client)
+	downstream := mustRSAKey(t)
+	hardTimeout := 50 * time.Millisecond
+	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: issuerURL, PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, SigningKeyID: "current", SigningPrivateKey: downstream, HTTPTimeout: hardTimeout}
+	upstream, err := NewEnterpriseOIDC(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upstream.client == client || upstream.client.Timeout != hardTimeout {
+		t.Fatalf("OIDC client was not cloned with hard timeout: caller=%p internal=%p timeout=%s", client, upstream.client, upstream.client.Timeout)
+	}
+	if _, _, err := upstream.ExchangeAndVerify(context.Background(), "first"); err == nil {
+		t.Fatal("black-hole JWKS unexpectedly succeeded")
+	}
+	select {
+	case err := <-jwksCanceled:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("JWKS request canceled with %v", err)
+		}
+	default:
+		t.Fatal("JWKS RoundTrip did not observe its hard deadline")
+	}
+	if client.Timeout != originalTimeout || client.Transport != originalTransport {
+		t.Fatalf("caller client mutated: timeout=%s transport=%T", client.Timeout, client.Transport)
+	}
+	identity, nonce, err := upstream.ExchangeAndVerify(context.Background(), "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Subject != "subject" || nonce != "nonce" || jwksCalls.Load() < 2 {
+		t.Fatalf("identity=%+v nonce=%s calls=%d", identity, nonce, jwksCalls.Load())
+	}
+}
+
+type oidcRoundTripFixture struct {
+	roundTrip func(*http.Request) (*http.Response, error)
+}
+
+func (f *oidcRoundTripFixture) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f.roundTrip(r)
+}
+
+func oidcJSONResponse(r *http.Request, payload any) (*http.Response, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(body))), ContentLength: int64(len(body)), Request: r}, nil
+}
 
 func TestOIDCConfigRejectsUnsafeOrAmbiguousRedirectsAndKeys(t *testing.T) {
 	key := mustRSAKey(t)

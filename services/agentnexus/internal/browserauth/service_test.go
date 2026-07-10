@@ -148,7 +148,7 @@ func TestGetSessionMissingRevokedAndStoreErrorFailClosed(t *testing.T) {
 		t.Fatalf("revoked err=%v", err)
 	}
 	store.err = errors.New("database unavailable")
-	if _, err := svc.GetSession(context.Background(), token); !errors.Is(err, ErrInvalidSession) {
+	if _, err := svc.GetSession(context.Background(), token); !errors.Is(err, ErrSessionUnavailable) || errors.Is(err, ErrInvalidSession) {
 		t.Fatalf("store err=%v", err)
 	}
 }
@@ -365,13 +365,13 @@ func TestCanceledContextCannotMutateMemoryStore(t *testing.T) {
 	codesBefore := store.codeSnapshot()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := svc.GetSession(ctx, token); !errors.Is(err, ErrInvalidSession) {
+	if _, err := svc.GetSession(ctx, token); !errors.Is(err, ErrSessionUnavailable) || errors.Is(err, ErrInvalidSession) {
 		t.Fatalf("get err=%v", err)
 	}
-	if err := svc.RevokeSession(ctx, token); !errors.Is(err, ErrInvalidSession) {
+	if err := svc.RevokeSession(ctx, token); !errors.Is(err, ErrSessionUnavailable) || errors.Is(err, ErrInvalidSession) {
 		t.Fatalf("revoke err=%v", err)
 	}
-	if _, err := svc.ExchangeCode(ctx, ExchangeCodeInput{Code: code, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"}); !errors.Is(err, ErrInvalidGrant) {
+	if _, err := svc.ExchangeCode(ctx, ExchangeCodeInput{Code: code, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"}); !errors.Is(err, ErrGrantUnavailable) || errors.Is(err, ErrInvalidGrant) {
 		t.Fatalf("exchange err=%v", err)
 	}
 	if _, _, err := svc.CreateSession(ctx, CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"}); err == nil {
@@ -407,7 +407,7 @@ func TestContextCanceledWhileWaitingForMemoryLockCannotSlideSession(t *testing.T
 	<-started
 	cancel()
 	store.mu.Unlock()
-	if err := <-done; !errors.Is(err, ErrInvalidSession) {
+	if err := <-done; !errors.Is(err, ErrSessionUnavailable) || errors.Is(err, ErrInvalidSession) {
 		t.Fatalf("err=%v", err)
 	}
 	if !reflect.DeepEqual(before, store.sessionSnapshot()) {
@@ -475,6 +475,38 @@ func TestLogoutSessionDistinguishesInvalidFromStoreUnavailable(t *testing.T) {
 	store.err = errors.New("database unavailable")
 	if _, err := svc.LogoutSession(context.Background(), secretFixture('x')); !errors.Is(err, ErrSessionUnavailable) {
 		t.Fatalf("store=%v", err)
+	}
+}
+
+func TestServiceDistinguishesMissingRecordsFromUnavailableStores(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	session, _, err := svc.CreateSession(context.Background(), CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := svc.IssueCode(context.Background(), validIssueInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.err = errors.New("database unavailable")
+	if _, err := svc.GetSession(context.Background(), session); !errors.Is(err, ErrSessionUnavailable) || errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("get=%v", err)
+	}
+	if err := svc.RevokeSession(context.Background(), session); !errors.Is(err, ErrSessionUnavailable) || errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("revoke=%v", err)
+	}
+	if _, err := svc.ExchangeCode(context.Background(), ExchangeCodeInput{Code: code, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"}); !errors.Is(err, ErrGrantUnavailable) || errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("exchange=%v", err)
+	}
+	store.err = nil
+	attemptSvc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
+	state, binding, _, err := attemptSvc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "agentatlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.err = errors.New("database unavailable")
+	if _, err := attemptSvc.ConsumeLoginAttempt(context.Background(), state, binding); !errors.Is(err, ErrLoginAttemptUnavailable) || errors.Is(err, ErrInvalidLoginAttempt) {
+		t.Fatalf("consume=%v", err)
 	}
 }
 

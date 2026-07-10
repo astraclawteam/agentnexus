@@ -59,10 +59,21 @@ UPDATE oauth_authorization_codes
 SET consumed_at = $2
 WHERE code_hash = $1 AND consumed_at IS NULL;
 
+-- name: LockOIDCLoginAttemptScope :one
+SELECT pg_advisory_xact_lock(
+    hashtext(sqlc.arg(enterprise_id)),
+    hashtext(sqlc.arg(client_id))
+);
+
+-- name: DeleteExpiredOIDCLoginAttempts :exec
+DELETE FROM oidc_login_attempts WHERE expires_at <= $1;
+
+-- name: CountOIDCLoginAttempts :one
+SELECT COUNT(*)
+FROM oidc_login_attempts
+WHERE enterprise_id = $1 AND client_id = $2 AND expires_at > $3;
+
 -- name: CreateOIDCLoginAttempt :one
-WITH expired AS (
-    DELETE FROM oidc_login_attempts WHERE expires_at <= $10
-)
 INSERT INTO oidc_login_attempts (
     state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
     code_challenge, upstream_nonce, created_at, expires_at

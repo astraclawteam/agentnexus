@@ -16,6 +16,7 @@ const (
 	defaultAbsoluteTimeout = 24 * time.Hour
 	defaultCodeTimeout     = 60 * time.Second
 	defaultLoginTimeout    = 5 * time.Minute
+	maxLoginAttempts       = 32
 	maxClientIDLength      = 256
 	maxRedirectURILength   = 2048
 	maxConsoleStateLength  = 1024
@@ -23,18 +24,22 @@ const (
 )
 
 var (
-	ErrInvalidSession      = errors.New("invalid browser session")
-	ErrInvalidGrant        = errors.New("invalid authorization grant")
-	ErrInvalidInput        = errors.New("invalid browser authorization input")
-	ErrInvalidLoginAttempt = errors.New("invalid OIDC login attempt")
-	ErrSessionUnavailable  = errors.New("browser session store unavailable")
+	ErrInvalidSession          = errors.New("invalid browser session")
+	ErrInvalidGrant            = errors.New("invalid authorization grant")
+	ErrInvalidInput            = errors.New("invalid browser authorization input")
+	ErrInvalidLoginAttempt     = errors.New("invalid OIDC login attempt")
+	ErrSessionUnavailable      = errors.New("browser session store unavailable")
+	ErrGrantUnavailable        = errors.New("authorization grant store unavailable")
+	ErrLoginAttemptUnavailable = errors.New("OIDC login attempt store unavailable")
+	ErrLoginAttemptLimited     = errors.New("too many outstanding OIDC login attempts")
 )
 
 var (
-	errNotFound         = errors.New("browser authorization record not found")
-	errInvalidBinding   = errors.New("enterprise user binding invalid")
-	errDuplicate        = errors.New("browser authorization record already exists")
-	errStoreUnavailable = errors.New("browser authorization store unavailable")
+	errNotFound            = errors.New("browser authorization record not found")
+	errInvalidBinding      = errors.New("enterprise user binding invalid")
+	errDuplicate           = errors.New("browser authorization record already exists")
+	errStoreUnavailable    = errors.New("browser authorization store unavailable")
+	errLoginAttemptLimited = errors.New("outstanding OIDC login attempt limit reached")
 )
 
 type Store interface {
@@ -85,7 +90,10 @@ func (s *Service) CreateLoginAttempt(ctx context.Context, input CreateLoginAttem
 	now := s.now().UTC()
 	attempt := LoginAttempt{EnterpriseID: input.EnterpriseID, ClientID: input.ClientID, RedirectURI: input.RedirectURI, ConsoleState: input.ConsoleState, ConsoleNonce: input.ConsoleNonce, CodeChallenge: input.CodeChallenge, UpstreamNonce: nonce, CreatedAt: now, ExpiresAt: now.Add(defaultLoginTimeout)}
 	if err := s.store.CreateLoginAttempt(ctx, storedLoginAttempt{StateHash: hashHex(state), BindingHash: hashHex(binding), LoginAttempt: attempt}); err != nil {
-		return "", "", LoginAttempt{}, err
+		if errors.Is(err, errLoginAttemptLimited) {
+			return "", "", LoginAttempt{}, ErrLoginAttemptLimited
+		}
+		return "", "", LoginAttempt{}, ErrLoginAttemptUnavailable
 	}
 	return state, binding, attempt, nil
 }
@@ -96,7 +104,10 @@ func (s *Service) ConsumeLoginAttempt(ctx context.Context, state, binding string
 	}
 	record, err := s.store.ConsumeLoginAttempt(ctx, hashHex(state), hashHex(binding), s.now().UTC())
 	if err != nil {
-		return LoginAttempt{}, ErrInvalidLoginAttempt
+		if errors.Is(err, errNotFound) {
+			return LoginAttempt{}, ErrInvalidLoginAttempt
+		}
+		return LoginAttempt{}, ErrLoginAttemptUnavailable
 	}
 	return record.LoginAttempt, nil
 }
@@ -166,7 +177,10 @@ func (s *Service) GetSession(ctx context.Context, token string) (BrowserSession,
 	}
 	record, err := s.store.UseSession(ctx, hashHex(token), s.now().UTC(), defaultIdleTimeout)
 	if err != nil {
-		return BrowserSession{}, ErrInvalidSession
+		if errors.Is(err, errNotFound) {
+			return BrowserSession{}, ErrInvalidSession
+		}
+		return BrowserSession{}, ErrSessionUnavailable
 	}
 	return publicSession(record), nil
 }
@@ -176,7 +190,10 @@ func (s *Service) RevokeSession(ctx context.Context, token string) error {
 		return ErrInvalidSession
 	}
 	if err := s.store.RevokeSession(ctx, hashHex(token), s.now().UTC()); err != nil {
-		return ErrInvalidSession
+		if errors.Is(err, errNotFound) {
+			return ErrInvalidSession
+		}
+		return ErrSessionUnavailable
 	}
 	return nil
 }
@@ -218,7 +235,10 @@ func (s *Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (Ex
 		RedirectURI: input.RedirectURI, Now: s.now().UTC(),
 	})
 	if err != nil {
-		return ExchangeResult{}, ErrInvalidGrant
+		if errors.Is(err, errNotFound) {
+			return ExchangeResult{}, ErrInvalidGrant
+		}
+		return ExchangeResult{}, ErrGrantUnavailable
 	}
 	return ExchangeResult{EnterpriseID: record.EnterpriseID, UserID: record.UserID, Nonce: record.Nonce}, nil
 }

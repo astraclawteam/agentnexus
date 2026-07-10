@@ -30,6 +30,25 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAutho
 	return result.RowsAffected(), nil
 }
 
+const countOIDCLoginAttempts = `-- name: CountOIDCLoginAttempts :one
+SELECT COUNT(*)
+FROM oidc_login_attempts
+WHERE enterprise_id = $1 AND client_id = $2 AND expires_at > $3
+`
+
+type CountOIDCLoginAttemptsParams struct {
+	EnterpriseID string
+	ClientID     string
+	ExpiresAt    pgtype.Timestamptz
+}
+
+func (q *Queries) CountOIDCLoginAttempts(ctx context.Context, arg CountOIDCLoginAttemptsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOIDCLoginAttempts, arg.EnterpriseID, arg.ClientID, arg.ExpiresAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAuthorizationCode = `-- name: CreateAuthorizationCode :one
 INSERT INTO oauth_authorization_codes (
     code_hash, client_id, redirect_uri, enterprise_id, enterprise_user_id,
@@ -126,9 +145,6 @@ func (q *Queries) CreateBrowserSession(ctx context.Context, arg CreateBrowserSes
 }
 
 const createOIDCLoginAttempt = `-- name: CreateOIDCLoginAttempt :one
-WITH expired AS (
-    DELETE FROM oidc_login_attempts WHERE expires_at <= $10
-)
 INSERT INTO oidc_login_attempts (
     state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
     code_challenge, upstream_nonce, created_at, expires_at
@@ -180,6 +196,15 @@ func (q *Queries) CreateOIDCLoginAttempt(ctx context.Context, arg CreateOIDCLogi
 		&i.ExpiresAt,
 	)
 	return i, err
+}
+
+const deleteExpiredOIDCLoginAttempts = `-- name: DeleteExpiredOIDCLoginAttempts :exec
+DELETE FROM oidc_login_attempts WHERE expires_at <= $1
+`
+
+func (q *Queries) DeleteExpiredOIDCLoginAttempts(ctx context.Context, expiresAt pgtype.Timestamptz) error {
+	_, err := q.db.Exec(ctx, deleteExpiredOIDCLoginAttempts, expiresAt)
+	return err
 }
 
 const deleteOIDCLoginAttempt = `-- name: DeleteOIDCLoginAttempt :execrows
@@ -346,6 +371,25 @@ func (q *Queries) ListBrowserProfileOrgUnits(ctx context.Context, arg ListBrowse
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockOIDCLoginAttemptScope = `-- name: LockOIDCLoginAttemptScope :one
+SELECT pg_advisory_xact_lock(
+    hashtext($1),
+    hashtext($2)
+)
+`
+
+type LockOIDCLoginAttemptScopeParams struct {
+	EnterpriseID string
+	ClientID     string
+}
+
+func (q *Queries) LockOIDCLoginAttemptScope(ctx context.Context, arg LockOIDCLoginAttemptScopeParams) (interface{}, error) {
+	row := q.db.QueryRow(ctx, lockOIDCLoginAttemptScope, arg.EnterpriseID, arg.ClientID)
+	var pg_advisory_xact_lock interface{}
+	err := row.Scan(&pg_advisory_xact_lock)
+	return pg_advisory_xact_lock, err
 }
 
 const resolveExternalIdentity = `-- name: ResolveExternalIdentity :one

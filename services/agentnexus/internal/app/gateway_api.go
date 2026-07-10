@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 )
 
 func NewGatewayAPIRouter(serviceName, version string) http.Handler {
@@ -17,7 +19,25 @@ func NewGatewayAPIRouterWithDependencies(serviceName, version string, deps Brows
 		return nil, err
 	}
 	handler.register(mux)
-	return browserResponseHeaders(mux), nil
+	timeout, err := browserRequestTimeout(deps.RequestTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return browserRequestDeadline(browserResponseHeaders(mux), timeout), nil
+}
+
+func browserRequestDeadline(next http.Handler, timeout time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isBrowserAuthPath(r.URL.Path) {
+			ctx, cancel := context.WithTimeout(r.Context(), timeout)
+			defer cancel()
+			r = r.WithContext(ctx)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+func isBrowserAuthPath(path string) bool {
+	return path == "/.well-known/openid-configuration" || strings.HasPrefix(path, "/oauth2/") || strings.HasPrefix(path, "/v1/browser-sessions/")
 }
 
 func browserResponseHeaders(next http.Handler) http.Handler {
