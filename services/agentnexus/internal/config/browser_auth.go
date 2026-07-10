@@ -1,0 +1,63 @@
+package config
+
+import (
+	"crypto"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
+)
+
+type BrowserAuthConfig struct {
+	Enabled     bool
+	DatabaseURL string
+	OIDC        browserauth.OIDCConfig
+}
+
+func LoadBrowserAuth() (BrowserAuthConfig, error) {
+	enabledValue := strings.TrimSpace(os.Getenv("AGENTNEXUS_BROWSER_AUTH_ENABLED"))
+	if enabledValue == "" || enabledValue == "false" {
+		return BrowserAuthConfig{}, nil
+	}
+	if enabledValue != "true" {
+		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_BROWSER_AUTH_ENABLED must be true or false")
+	}
+	config := BrowserAuthConfig{Enabled: true, DatabaseURL: os.Getenv("AGENTNEXUS_DATABASE_URL")}
+	if config.DatabaseURL == "" {
+		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_DATABASE_URL is required when browser auth is enabled")
+	}
+	privateKey, err := browserauth.LoadSigningPrivateKey(os.Getenv("AGENTNEXUS_OIDC_SIGNING_KEY_PATH"))
+	if err != nil {
+		return BrowserAuthConfig{}, fmt.Errorf("load browser OIDC signing key: %w", err)
+	}
+	clients := map[string][]string{}
+	if err := json.Unmarshal([]byte(os.Getenv("AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON")), &clients); err != nil {
+		return BrowserAuthConfig{}, fmt.Errorf("parse console clients: %w", err)
+	}
+	previous := map[string]crypto.PublicKey{}
+	previousPaths := map[string]string{}
+	if raw := strings.TrimSpace(os.Getenv("AGENTNEXUS_OIDC_PREVIOUS_SIGNING_KEYS_JSON")); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &previousPaths); err != nil {
+			return BrowserAuthConfig{}, fmt.Errorf("parse previous signing keys: %w", err)
+		}
+		for kid, path := range previousPaths {
+			key, err := browserauth.LoadSigningPublicKey(path)
+			if err != nil {
+				return BrowserAuthConfig{}, fmt.Errorf("load previous signing key %q: %w", kid, err)
+			}
+			previous[kid] = key
+		}
+	}
+	config.OIDC = browserauth.OIDCConfig{
+		EnterpriseID: os.Getenv("AGENTNEXUS_OIDC_ENTERPRISE_ID"), EnterpriseIssuerURL: os.Getenv("AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL"),
+		PublicIssuerURL: os.Getenv("AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL"), ClientID: os.Getenv("AGENTNEXUS_OIDC_CLIENT_ID"), ClientSecret: os.Getenv("AGENTNEXUS_OIDC_CLIENT_SECRET"),
+		CallbackURL: os.Getenv("AGENTNEXUS_OIDC_CALLBACK_URL"), ConsoleClients: clients, SigningKeyID: os.Getenv("AGENTNEXUS_OIDC_SIGNING_KEY_ID"), SigningPrivateKey: privateKey, PreviousSigningKeys: previous,
+	}
+	if err := config.OIDC.Validate(); err != nil {
+		return BrowserAuthConfig{}, err
+	}
+	return config, nil
+}

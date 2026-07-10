@@ -13,7 +13,7 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 	root := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
 	migration := mustRead(t, filepath.Join(root, "db", "migrations", "000002_browser_sessions_and_approvals.sql"))
 	queries := mustRead(t, filepath.Join(root, "db", "queries", "auth.sql"))
-	for _, required := range []string{"browser_sessions", "oauth_authorization_codes", "approval_queue_items", "id_hash", "code_hash", "user_agent_hash", "foreign key (enterprise_id, enterprise_user_id)", "check (char_length(id_hash) = 64", "check (char_length(code_hash) = 64", "create index"} {
+	for _, required := range []string{"browser_sessions", "oauth_authorization_codes", "oidc_login_attempts", "approval_queue_items", "id_hash", "code_hash", "state_hash", "user_agent_hash", "foreign key (enterprise_id, enterprise_user_id)", "check (char_length(id_hash) = 64", "check (char_length(code_hash) = 64", "check (char_length(state_hash) = 64", "create index"} {
 		if !strings.Contains(strings.ToLower(migration), required) {
 			t.Errorf("migration missing %q", required)
 		}
@@ -31,6 +31,10 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 	consume := strings.ToLower(namedQuery(t, queries, "ConsumeAuthorizationCode"))
 	if !strings.Contains(consume, "update oauth_authorization_codes") || !strings.Contains(consume, "consumed_at is null") {
 		t.Error("ConsumeAuthorizationCode must atomically update only an unconsumed code")
+	}
+	loginConsume := strings.ToLower(namedQuery(t, queries, "ConsumeOIDCLoginAttempt"))
+	if !strings.Contains(loginConsume, "delete from oidc_login_attempts") || !strings.Contains(loginConsume, "expires_at >") || !strings.Contains(loginConsume, "returning") {
+		t.Error("ConsumeOIDCLoginAttempt must atomically delete and return only an unexpired attempt")
 	}
 	for _, required := range []string{
 		"add constraint uq_org_units_enterprise_id_id unique (enterprise_id, id)",

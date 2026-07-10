@@ -11,6 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const acquireEnterpriseAuditLock = `-- name: AcquireEnterpriseAuditLock :one
+SELECT pg_advisory_xact_lock(hashtextextended($1, 0))
+`
+
+func (q *Queries) AcquireEnterpriseAuditLock(ctx context.Context, hashtextextended string) (interface{}, error) {
+	row := q.db.QueryRow(ctx, acquireEnterpriseAuditLock, hashtextextended)
+	var pg_advisory_xact_lock interface{}
+	err := row.Scan(&pg_advisory_xact_lock)
+	return pg_advisory_xact_lock, err
+}
+
 const appendAuditEvent = `-- name: AppendAuditEvent :one
 INSERT INTO audit_events (
     id,
@@ -27,9 +38,16 @@ INSERT INTO audit_events (
     output_hash,
     evidence_pointer,
     prev_hash,
-    event_hash
+	event_hash,
+	created_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+    GREATEST(
+        clock_timestamp(),
+        COALESCE((SELECT MAX(created_at) + INTERVAL '1 microsecond' FROM audit_events WHERE enterprise_id = $2), clock_timestamp())
+    )
+)
 RETURNING id, enterprise_id, case_ticket_id, step_grant_id, actor_user_id, connector_instance_id, resource_type, resource_id, action, decision, input_hash, output_hash, evidence_pointer, prev_hash, event_hash, created_at
 `
 
@@ -89,6 +107,22 @@ func (q *Queries) AppendAuditEvent(ctx context.Context, arg AppendAuditEventPara
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const getLatestEnterpriseAuditHash = `-- name: GetLatestEnterpriseAuditHash :one
+SELECT COALESCE((
+    SELECT event_hash FROM audit_events
+    WHERE enterprise_id = $1
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+), '')::TEXT AS event_hash
+`
+
+func (q *Queries) GetLatestEnterpriseAuditHash(ctx context.Context, enterpriseID string) (string, error) {
+	row := q.db.QueryRow(ctx, getLatestEnterpriseAuditHash, enterpriseID)
+	var event_hash string
+	err := row.Scan(&event_hash)
+	return event_hash, err
 }
 
 const listAuditEventsForTicket = `-- name: ListAuditEventsForTicket :many

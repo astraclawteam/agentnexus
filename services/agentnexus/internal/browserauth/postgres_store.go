@@ -75,6 +75,28 @@ func (s *PostgresStore) CreateAuthorizationCode(ctx context.Context, code stored
 	return err
 }
 
+func (s *PostgresStore) CreateLoginAttempt(ctx context.Context, attempt storedLoginAttempt) error {
+	_, err := db.New(s.pool).CreateOIDCLoginAttempt(ctx, db.CreateOIDCLoginAttemptParams{
+		StateHash: attempt.StateHash, EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID,
+		RedirectUri: attempt.RedirectURI, ConsoleState: attempt.ConsoleState, ConsoleNonce: attempt.ConsoleNonce,
+		CodeChallenge: attempt.CodeChallenge, UpstreamNonce: attempt.UpstreamNonce,
+		CreatedAt: timestamp(attempt.CreatedAt), ExpiresAt: timestamp(attempt.ExpiresAt),
+	})
+	return err
+}
+
+func (s *PostgresStore) ConsumeLoginAttempt(ctx context.Context, stateHash string, now time.Time) (storedLoginAttempt, error) {
+	record, err := db.New(s.pool).ConsumeOIDCLoginAttempt(ctx, db.ConsumeOIDCLoginAttemptParams{StateHash: stateHash, ExpiresAt: timestamp(now)})
+	if err != nil {
+		return storedLoginAttempt{}, mapPostgresNotFound(err)
+	}
+	return storedLoginAttempt{StateHash: record.StateHash, LoginAttempt: LoginAttempt{
+		EnterpriseID: record.EnterpriseID, ClientID: record.ClientID, RedirectURI: record.RedirectUri,
+		ConsoleState: record.ConsoleState, ConsoleNonce: record.ConsoleNonce, CodeChallenge: record.CodeChallenge,
+		UpstreamNonce: record.UpstreamNonce, CreatedAt: record.CreatedAt.Time, ExpiresAt: record.ExpiresAt.Time,
+	}}, nil
+}
+
 func (s *PostgresStore) ExchangeAuthorizationCode(ctx context.Context, request exchangeRequest) (storedAuthorizationCode, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {

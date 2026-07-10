@@ -6,6 +6,20 @@ import (
 )
 
 func NewGatewayAPIRouter(serviceName, version string) http.Handler {
+	return newGatewayAPIMux(serviceName, version)
+}
+
+func NewGatewayAPIRouterWithDependencies(serviceName, version string, deps BrowserAuthDependencies) (http.Handler, error) {
+	mux := newGatewayAPIMux(serviceName, version)
+	handler, err := newBrowserAuthHandler(deps)
+	if err != nil {
+		return nil, err
+	}
+	handler.register(mux)
+	return mux, nil
+}
+
+func newGatewayAPIMux(serviceName, version string) *http.ServeMux {
 	mux := http.NewServeMux()
 	health := NewHealthStatus(serviceName, version, true)
 

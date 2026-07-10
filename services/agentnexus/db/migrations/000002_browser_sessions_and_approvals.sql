@@ -36,6 +36,19 @@ CREATE TABLE oauth_authorization_codes (
         REFERENCES enterprise_users(enterprise_id, id)
 );
 
+CREATE TABLE oidc_login_attempts (
+    state_hash TEXT PRIMARY KEY CHECK (char_length(state_hash) = 64 AND state_hash ~ '^[0-9a-f]{64}$'),
+    enterprise_id TEXT NOT NULL REFERENCES enterprises(id),
+    client_id TEXT NOT NULL,
+    redirect_uri TEXT NOT NULL,
+    console_state TEXT NOT NULL,
+    console_nonce TEXT NOT NULL,
+    code_challenge TEXT NOT NULL CHECK (char_length(code_challenge) = 43 AND code_challenge ~ '^[A-Za-z0-9_-]{43}$'),
+    upstream_nonce TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL CHECK (expires_at > created_at AND expires_at <= created_at + INTERVAL '5 minutes')
+);
+
 CREATE TABLE approval_queue_items (
     id TEXT PRIMARY KEY,
     enterprise_id TEXT NOT NULL,
@@ -59,6 +72,7 @@ CREATE TABLE approval_queue_items (
 CREATE INDEX idx_browser_sessions_user ON browser_sessions(enterprise_id, enterprise_user_id);
 CREATE INDEX idx_browser_sessions_expiry ON browser_sessions(idle_expires_at, absolute_expires_at) WHERE revoked_at IS NULL;
 CREATE INDEX idx_oauth_authorization_codes_expiry ON oauth_authorization_codes(expires_at) WHERE consumed_at IS NULL;
+CREATE INDEX idx_oidc_login_attempts_expiry ON oidc_login_attempts(expires_at);
 CREATE INDEX idx_approval_queue_items_enterprise_status ON approval_queue_items(enterprise_id, status, created_at);
 -- +goose StatementEnd
 
@@ -66,6 +80,7 @@ CREATE INDEX idx_approval_queue_items_enterprise_status ON approval_queue_items(
 -- +goose StatementBegin
 DROP TABLE IF EXISTS approval_queue_items;
 DROP TABLE IF EXISTS oauth_authorization_codes;
+DROP TABLE IF EXISTS oidc_login_attempts;
 DROP TABLE IF EXISTS browser_sessions;
 ALTER TABLE org_units DROP CONSTRAINT IF EXISTS uq_org_units_enterprise_id_id;
 ALTER TABLE enterprise_users DROP CONSTRAINT IF EXISTS uq_enterprise_users_enterprise_id_id;

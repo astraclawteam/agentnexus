@@ -39,6 +39,32 @@ type ExchangeResult struct {
 	Nonce        string
 }
 
+type CreateLoginAttemptInput struct {
+	EnterpriseID  string
+	ClientID      string
+	RedirectURI   string
+	ConsoleState  string
+	ConsoleNonce  string
+	CodeChallenge string
+}
+
+type LoginAttempt struct {
+	EnterpriseID  string
+	ClientID      string
+	RedirectURI   string
+	ConsoleState  string
+	ConsoleNonce  string
+	CodeChallenge string
+	UpstreamNonce string
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+}
+
+type storedLoginAttempt struct {
+	StateHash string
+	LoginAttempt
+}
+
 type storedSession struct {
 	IDHash            string
 	EnterpriseID      string

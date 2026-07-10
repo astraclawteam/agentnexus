@@ -176,6 +176,19 @@ type OauthAuthorizationCode struct {
 	ConsumedAt       pgtype.Timestamptz
 }
 
+type OidcLoginAttempt struct {
+	StateHash     string
+	EnterpriseID  string
+	ClientID      string
+	RedirectUri   string
+	ConsoleState  string
+	ConsoleNonce  string
+	CodeChallenge string
+	UpstreamNonce string
+	CreatedAt     pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+}
+
 type OrgEvent struct {
 	ID           string
 	EnterpriseID string

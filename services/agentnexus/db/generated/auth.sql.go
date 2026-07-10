@@ -30,6 +30,36 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAutho
 	return result.RowsAffected(), nil
 }
 
+const consumeOIDCLoginAttempt = `-- name: ConsumeOIDCLoginAttempt :one
+DELETE FROM oidc_login_attempts
+WHERE state_hash = $1 AND expires_at > $2
+RETURNING state_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+          code_challenge, upstream_nonce, created_at, expires_at
+`
+
+type ConsumeOIDCLoginAttemptParams struct {
+	StateHash string
+	ExpiresAt pgtype.Timestamptz
+}
+
+func (q *Queries) ConsumeOIDCLoginAttempt(ctx context.Context, arg ConsumeOIDCLoginAttemptParams) (OidcLoginAttempt, error) {
+	row := q.db.QueryRow(ctx, consumeOIDCLoginAttempt, arg.StateHash, arg.ExpiresAt)
+	var i OidcLoginAttempt
+	err := row.Scan(
+		&i.StateHash,
+		&i.EnterpriseID,
+		&i.ClientID,
+		&i.RedirectUri,
+		&i.ConsoleState,
+		&i.ConsoleNonce,
+		&i.CodeChallenge,
+		&i.UpstreamNonce,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const createAuthorizationCode = `-- name: CreateAuthorizationCode :one
 INSERT INTO oauth_authorization_codes (
     code_hash, client_id, redirect_uri, enterprise_id, enterprise_user_id,
@@ -125,6 +155,57 @@ func (q *Queries) CreateBrowserSession(ctx context.Context, arg CreateBrowserSes
 	return i, err
 }
 
+const createOIDCLoginAttempt = `-- name: CreateOIDCLoginAttempt :one
+INSERT INTO oidc_login_attempts (
+    state_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+    code_challenge, upstream_nonce, created_at, expires_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+RETURNING state_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+          code_challenge, upstream_nonce, created_at, expires_at
+`
+
+type CreateOIDCLoginAttemptParams struct {
+	StateHash     string
+	EnterpriseID  string
+	ClientID      string
+	RedirectUri   string
+	ConsoleState  string
+	ConsoleNonce  string
+	CodeChallenge string
+	UpstreamNonce string
+	CreatedAt     pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+}
+
+func (q *Queries) CreateOIDCLoginAttempt(ctx context.Context, arg CreateOIDCLoginAttemptParams) (OidcLoginAttempt, error) {
+	row := q.db.QueryRow(ctx, createOIDCLoginAttempt,
+		arg.StateHash,
+		arg.EnterpriseID,
+		arg.ClientID,
+		arg.RedirectUri,
+		arg.ConsoleState,
+		arg.ConsoleNonce,
+		arg.CodeChallenge,
+		arg.UpstreamNonce,
+		arg.CreatedAt,
+		arg.ExpiresAt,
+	)
+	var i OidcLoginAttempt
+	err := row.Scan(
+		&i.StateHash,
+		&i.EnterpriseID,
+		&i.ClientID,
+		&i.RedirectUri,
+		&i.ConsoleState,
+		&i.ConsoleNonce,
+		&i.CodeChallenge,
+		&i.UpstreamNonce,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const enterpriseUserBindingExists = `-- name: EnterpriseUserBindingExists :one
 SELECT EXISTS (
     SELECT 1 FROM enterprise_users
@@ -170,6 +251,30 @@ func (q *Queries) GetAuthorizationCodeForUpdate(ctx context.Context, codeHash st
 	return i, err
 }
 
+const getBrowserProfile = `-- name: GetBrowserProfile :one
+SELECT u.display_name,
+       COALESCE((SELECT MAX(v.version_number) FROM org_versions AS v WHERE v.enterprise_id = u.enterprise_id), 0)::BIGINT AS org_version
+FROM enterprise_users AS u
+WHERE u.enterprise_id = $1 AND u.id = $2
+`
+
+type GetBrowserProfileParams struct {
+	EnterpriseID string
+	ID           string
+}
+
+type GetBrowserProfileRow struct {
+	DisplayName string
+	OrgVersion  int64
+}
+
+func (q *Queries) GetBrowserProfile(ctx context.Context, arg GetBrowserProfileParams) (GetBrowserProfileRow, error) {
+	row := q.db.QueryRow(ctx, getBrowserProfile, arg.EnterpriseID, arg.ID)
+	var i GetBrowserProfileRow
+	err := row.Scan(&i.DisplayName, &i.OrgVersion)
+	return i, err
+}
+
 const getBrowserSessionForUpdate = `-- name: GetBrowserSessionForUpdate :one
 SELECT id_hash, enterprise_id, enterprise_user_id, created_at, last_seen_at,
        idle_expires_at, absolute_expires_at, revoked_at, user_agent_hash
@@ -192,6 +297,62 @@ func (q *Queries) GetBrowserSessionForUpdate(ctx context.Context, idHash string)
 		&i.RevokedAt,
 		&i.UserAgentHash,
 	)
+	return i, err
+}
+
+const listBrowserProfileOrgUnits = `-- name: ListBrowserProfileOrgUnits :many
+SELECT org_unit_id
+FROM org_memberships
+WHERE enterprise_id = $1 AND enterprise_user_id = $2
+ORDER BY org_unit_id
+`
+
+type ListBrowserProfileOrgUnitsParams struct {
+	EnterpriseID     string
+	EnterpriseUserID string
+}
+
+func (q *Queries) ListBrowserProfileOrgUnits(ctx context.Context, arg ListBrowserProfileOrgUnitsParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, listBrowserProfileOrgUnits, arg.EnterpriseID, arg.EnterpriseUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var org_unit_id string
+		if err := rows.Scan(&org_unit_id); err != nil {
+			return nil, err
+		}
+		items = append(items, org_unit_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const resolveExternalIdentity = `-- name: ResolveExternalIdentity :one
+SELECT enterprise_id, enterprise_user_id
+FROM external_identities
+WHERE enterprise_id = $1 AND provider = $2 AND external_subject = $3
+`
+
+type ResolveExternalIdentityParams struct {
+	EnterpriseID    string
+	Provider        string
+	ExternalSubject string
+}
+
+type ResolveExternalIdentityRow struct {
+	EnterpriseID     string
+	EnterpriseUserID string
+}
+
+func (q *Queries) ResolveExternalIdentity(ctx context.Context, arg ResolveExternalIdentityParams) (ResolveExternalIdentityRow, error) {
+	row := q.db.QueryRow(ctx, resolveExternalIdentity, arg.EnterpriseID, arg.Provider, arg.ExternalSubject)
+	var i ResolveExternalIdentityRow
+	err := row.Scan(&i.EnterpriseID, &i.EnterpriseUserID)
 	return i, err
 }
 

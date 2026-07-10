@@ -15,12 +15,14 @@ const (
 	defaultIdleTimeout     = 8 * time.Hour
 	defaultAbsoluteTimeout = 24 * time.Hour
 	defaultCodeTimeout     = 60 * time.Second
+	defaultLoginTimeout    = 5 * time.Minute
 )
 
 var (
-	ErrInvalidSession = errors.New("invalid browser session")
-	ErrInvalidGrant   = errors.New("invalid authorization grant")
-	ErrInvalidInput   = errors.New("invalid browser authorization input")
+	ErrInvalidSession      = errors.New("invalid browser session")
+	ErrInvalidGrant        = errors.New("invalid authorization grant")
+	ErrInvalidInput        = errors.New("invalid browser authorization input")
+	ErrInvalidLoginAttempt = errors.New("invalid OIDC login attempt")
 )
 
 var (
@@ -36,6 +38,42 @@ type Store interface {
 	RevokeSession(context.Context, string, time.Time) error
 	CreateAuthorizationCode(context.Context, storedAuthorizationCode) error
 	ExchangeAuthorizationCode(context.Context, exchangeRequest) (storedAuthorizationCode, error)
+	CreateLoginAttempt(context.Context, storedLoginAttempt) error
+	ConsumeLoginAttempt(context.Context, string, time.Time) (storedLoginAttempt, error)
+}
+
+func (s *Service) CreateLoginAttempt(ctx context.Context, input CreateLoginAttemptInput) (string, LoginAttempt, error) {
+	if s == nil || s.store == nil || input.EnterpriseID == "" || input.ClientID == "" || input.RedirectURI == "" || input.ConsoleState == "" || input.ConsoleNonce == "" || !validS256Challenge(input.CodeChallenge) {
+		return "", LoginAttempt{}, ErrInvalidInput
+	}
+	state, err := s.generateSecret()
+	if err != nil {
+		return "", LoginAttempt{}, err
+	}
+	nonce, err := s.generateSecret()
+	if err != nil {
+		return "", LoginAttempt{}, err
+	}
+	if validateGeneratedSecret(state) != nil || validateGeneratedSecret(nonce) != nil {
+		return "", LoginAttempt{}, ErrInvalidInput
+	}
+	now := s.now().UTC()
+	attempt := LoginAttempt{EnterpriseID: input.EnterpriseID, ClientID: input.ClientID, RedirectURI: input.RedirectURI, ConsoleState: input.ConsoleState, ConsoleNonce: input.ConsoleNonce, CodeChallenge: input.CodeChallenge, UpstreamNonce: nonce, CreatedAt: now, ExpiresAt: now.Add(defaultLoginTimeout)}
+	if err := s.store.CreateLoginAttempt(ctx, storedLoginAttempt{StateHash: hashHex(state), LoginAttempt: attempt}); err != nil {
+		return "", LoginAttempt{}, err
+	}
+	return state, attempt, nil
+}
+
+func (s *Service) ConsumeLoginAttempt(ctx context.Context, state string) (LoginAttempt, error) {
+	if s == nil || s.store == nil || state == "" {
+		return LoginAttempt{}, ErrInvalidLoginAttempt
+	}
+	record, err := s.store.ConsumeLoginAttempt(ctx, hashHex(state), s.now().UTC())
+	if err != nil {
+		return LoginAttempt{}, ErrInvalidLoginAttempt
+	}
+	return record.LoginAttempt, nil
 }
 
 type Service struct {

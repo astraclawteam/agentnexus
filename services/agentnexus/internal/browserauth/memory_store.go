@@ -9,15 +9,68 @@ import (
 )
 
 type MemoryStore struct {
-	mu       sync.Mutex
-	users    map[string]struct{}
-	sessions map[string]storedSession
-	codes    map[string]storedAuthorizationCode
-	err      error
+	mu            sync.Mutex
+	users         map[string]struct{}
+	sessions      map[string]storedSession
+	codes         map[string]storedAuthorizationCode
+	loginAttempts map[string]storedLoginAttempt
+	err           error
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{users: map[string]struct{}{}, sessions: map[string]storedSession{}, codes: map[string]storedAuthorizationCode{}}
+	return &MemoryStore{users: map[string]struct{}{}, sessions: map[string]storedSession{}, codes: map[string]storedAuthorizationCode{}, loginAttempts: map[string]storedLoginAttempt{}}
+}
+
+func (s *MemoryStore) CreateLoginAttempt(ctx context.Context, attempt storedLoginAttempt) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !attempt.ExpiresAt.After(attempt.CreatedAt) || attempt.ExpiresAt.Sub(attempt.CreatedAt) > defaultLoginTimeout {
+		return ErrInvalidInput
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.err != nil {
+		return s.err
+	}
+	if _, ok := s.loginAttempts[attempt.StateHash]; ok {
+		return errDuplicate
+	}
+	s.loginAttempts[attempt.StateHash] = attempt
+	return nil
+}
+
+func (s *MemoryStore) ConsumeLoginAttempt(ctx context.Context, stateHash string, now time.Time) (storedLoginAttempt, error) {
+	if err := ctx.Err(); err != nil {
+		return storedLoginAttempt{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return storedLoginAttempt{}, err
+	}
+	if s.err != nil {
+		return storedLoginAttempt{}, s.err
+	}
+	record, ok := s.loginAttempts[stateHash]
+	if !ok || !now.Before(record.ExpiresAt) {
+		return storedLoginAttempt{}, errNotFound
+	}
+	delete(s.loginAttempts, stateHash)
+	return record, nil
+}
+
+func (s *MemoryStore) loginAttemptSnapshot() map[string]storedLoginAttempt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]storedLoginAttempt, len(s.loginAttempts))
+	for k, v := range s.loginAttempts {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *MemoryStore) AddEnterpriseUser(enterpriseID, userID string) {

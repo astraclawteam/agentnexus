@@ -50,3 +50,34 @@ FOR UPDATE;
 UPDATE oauth_authorization_codes
 SET consumed_at = $2
 WHERE code_hash = $1 AND consumed_at IS NULL;
+
+-- name: CreateOIDCLoginAttempt :one
+INSERT INTO oidc_login_attempts (
+    state_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+    code_challenge, upstream_nonce, created_at, expires_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+RETURNING state_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+          code_challenge, upstream_nonce, created_at, expires_at;
+
+-- name: ConsumeOIDCLoginAttempt :one
+DELETE FROM oidc_login_attempts
+WHERE state_hash = $1 AND expires_at > $2
+RETURNING state_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+          code_challenge, upstream_nonce, created_at, expires_at;
+
+-- name: ResolveExternalIdentity :one
+SELECT enterprise_id, enterprise_user_id
+FROM external_identities
+WHERE enterprise_id = $1 AND provider = $2 AND external_subject = $3;
+
+-- name: GetBrowserProfile :one
+SELECT u.display_name,
+       COALESCE((SELECT MAX(v.version_number) FROM org_versions AS v WHERE v.enterprise_id = u.enterprise_id), 0)::BIGINT AS org_version
+FROM enterprise_users AS u
+WHERE u.enterprise_id = $1 AND u.id = $2;
+
+-- name: ListBrowserProfileOrgUnits :many
+SELECT org_unit_id
+FROM org_memberships
+WHERE enterprise_id = $1 AND enterprise_user_id = $2
+ORDER BY org_unit_id;
