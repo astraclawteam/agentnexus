@@ -101,7 +101,7 @@ func (s *PostgresStore) CreateAuthorizationCode(ctx context.Context, code stored
 	return err
 }
 
-func (s *PostgresStore) CreateLoginAttempt(ctx context.Context, attempt storedLoginAttempt) error {
+func (s *PostgresStore) CreateLoginAttempt(ctx context.Context, attempt storedLoginAttempt, limits LoginAttemptLimits) error {
 	if s == nil || s.pool == nil {
 		return errStoreUnavailable
 	}
@@ -117,15 +117,22 @@ func (s *PostgresStore) CreateLoginAttempt(ctx context.Context, attempt storedLo
 	if err := queries.DeleteExpiredOIDCLoginAttempts(ctx, timestamp(attempt.CreatedAt)); err != nil {
 		return err
 	}
-	count, err := queries.CountOIDCLoginAttempts(ctx, db.CountOIDCLoginAttemptsParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, ExpiresAt: timestamp(attempt.CreatedAt)})
+	globalCount, err := queries.CountOIDCLoginAttemptsGlobal(ctx, db.CountOIDCLoginAttemptsGlobalParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, ExpiresAt: timestamp(attempt.CreatedAt)})
 	if err != nil {
 		return err
 	}
-	if count >= maxLoginAttempts {
+	if globalCount >= int64(limits.Global) {
+		return errLoginAttemptLimited
+	}
+	browserCount, err := queries.CountOIDCLoginAttemptsForBrowser(ctx, db.CountOIDCLoginAttemptsForBrowserParams{EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID, BrowserIDHash: attempt.BrowserIDHash, ExpiresAt: timestamp(attempt.CreatedAt)})
+	if err != nil {
+		return err
+	}
+	if browserCount >= int64(limits.PerBrowser) {
 		return errLoginAttemptLimited
 	}
 	if _, err := queries.CreateOIDCLoginAttempt(ctx, db.CreateOIDCLoginAttemptParams{
-		StateHash: attempt.StateHash, BindingHash: attempt.BindingHash, EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID,
+		StateHash: attempt.StateHash, BindingHash: attempt.BindingHash, BrowserIDHash: attempt.BrowserIDHash, EnterpriseID: attempt.EnterpriseID, ClientID: attempt.ClientID,
 		RedirectUri: attempt.RedirectURI, ConsoleState: attempt.ConsoleState, ConsoleNonce: attempt.ConsoleNonce,
 		CodeChallenge: attempt.CodeChallenge, UpstreamNonce: attempt.UpstreamNonce,
 		CreatedAt: timestamp(attempt.CreatedAt), ExpiresAt: timestamp(attempt.ExpiresAt),
@@ -171,7 +178,7 @@ func (s *PostgresStore) ConsumeLoginAttempt(ctx context.Context, stateHash, bind
 	if err := tx.Commit(ctx); err != nil {
 		return storedLoginAttempt{}, err
 	}
-	return storedLoginAttempt{StateHash: record.StateHash, BindingHash: record.BindingHash, LoginAttempt: LoginAttempt{
+	return storedLoginAttempt{StateHash: record.StateHash, BindingHash: record.BindingHash, BrowserIDHash: record.BrowserIDHash, LoginAttempt: LoginAttempt{
 		EnterpriseID: record.EnterpriseID, ClientID: record.ClientID, RedirectURI: record.RedirectUri,
 		ConsoleState: record.ConsoleState, ConsoleNonce: record.ConsoleNonce, CodeChallenge: record.CodeChallenge,
 		UpstreamNonce: record.UpstreamNonce, CreatedAt: record.CreatedAt.Time, ExpiresAt: record.ExpiresAt.Time,

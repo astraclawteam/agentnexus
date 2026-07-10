@@ -15,12 +15,12 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 	root := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
 	migration := mustRead(t, filepath.Join(root, "db", "migrations", "000002_browser_sessions_and_approvals.sql"))
 	queries := mustRead(t, filepath.Join(root, "db", "queries", "auth.sql"))
-	for _, required := range []string{"browser_sessions", "oauth_authorization_codes", "oidc_login_attempts", "approval_queue_items", "id_hash", "code_hash", "state_hash", "binding_hash", "user_agent_hash", "foreign key (enterprise_id, enterprise_user_id)", "check (char_length(id_hash) = 64", "check (char_length(code_hash) = 64", "check (char_length(state_hash) = 64", "check (char_length(binding_hash) = 64", "create index"} {
+	for _, required := range []string{"browser_sessions", "oauth_authorization_codes", "oidc_login_attempts", "approval_queue_items", "id_hash", "code_hash", "state_hash", "binding_hash", "browser_id_hash", "user_agent_hash", "foreign key (enterprise_id, enterprise_user_id)", "check (char_length(id_hash) = 64", "check (char_length(code_hash) = 64", "check (char_length(state_hash) = 64", "check (char_length(binding_hash) = 64", "check (char_length(browser_id_hash) = 64", "create index idx_oidc_login_attempts_scope_browser"} {
 		if !strings.Contains(strings.ToLower(migration), required) {
 			t.Errorf("migration missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"session_token", "authorization_code text", "user_agent text", "verifier text"} {
+	for _, forbidden := range []string{"session_token", "authorization_code text", "user_agent text", "verifier text", "browser_id text"} {
 		if strings.Contains(strings.ToLower(migration), forbidden) {
 			t.Errorf("migration persists plaintext field %q", forbidden)
 		}
@@ -48,15 +48,19 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 	}
 	lockAttempt := strings.ToLower(namedQuery(t, queries, "LockOIDCLoginAttemptScope"))
 	deleteExpired := strings.ToLower(namedQuery(t, queries, "DeleteExpiredOIDCLoginAttempts"))
-	countAttempts := strings.ToLower(namedQuery(t, queries, "CountOIDCLoginAttempts"))
+	countGlobal := strings.ToLower(namedQuery(t, queries, "CountOIDCLoginAttemptsGlobal"))
+	countBrowser := strings.ToLower(namedQuery(t, queries, "CountOIDCLoginAttemptsForBrowser"))
 	if !strings.Contains(lockAttempt, "pg_advisory_xact_lock") || !strings.Contains(lockAttempt, "enterprise") || !strings.Contains(lockAttempt, "client") {
 		t.Error("login attempt scope must use a transaction advisory lock keyed by enterprise and client")
 	}
 	if !strings.Contains(deleteExpired, "expires_at <=") || strings.Contains(deleteExpired, "enterprise_id") || strings.Contains(deleteExpired, "client_id") {
 		t.Error("login attempt cleanup must delete all expired rows")
 	}
-	if !strings.Contains(countAttempts, "count(") || !strings.Contains(countAttempts, "enterprise_id") || !strings.Contains(countAttempts, "client_id") || !strings.Contains(countAttempts, "expires_at >") {
-		t.Error("login attempt count must be scoped to unexpired enterprise/client rows")
+	if !strings.Contains(countGlobal, "count(") || !strings.Contains(countGlobal, "enterprise_id") || !strings.Contains(countGlobal, "client_id") || strings.Contains(countGlobal, "browser_id_hash") || !strings.Contains(countGlobal, "expires_at >") {
+		t.Error("global login attempt count must be scoped to unexpired enterprise/client rows")
+	}
+	if !strings.Contains(countBrowser, "count(") || !strings.Contains(countBrowser, "enterprise_id") || !strings.Contains(countBrowser, "client_id") || !strings.Contains(countBrowser, "browser_id_hash") || !strings.Contains(countBrowser, "expires_at >") {
+		t.Error("browser login attempt count must include the browser hash")
 	}
 	postgresStore := strings.ToLower(mustRead(t, filepath.Join(root, "internal", "browserauth", "postgres_store.go")))
 	createStart := strings.Index(postgresStore, "func (s *postgresstore) createloginattempt")
@@ -66,11 +70,12 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 	}
 	lockIndex := strings.Index(postgresStore, ".lockoidcloginattemptscope")
 	deleteIndex := strings.Index(postgresStore, ".deleteexpiredoidcloginattempts")
-	countIndex := strings.Index(postgresStore, ".countoidcloginattempts")
+	globalCountIndex := strings.Index(postgresStore, ".countoidcloginattemptsglobal")
+	browserCountIndex := strings.Index(postgresStore, ".countoidcloginattemptsforbrowser")
 	insertIndex := strings.Index(postgresStore, ".createoidcloginattempt")
 	commitIndex := strings.Index(postgresStore, ".commit(ctx)")
-	if lockIndex < 0 || deleteIndex <= lockIndex || countIndex <= deleteIndex || insertIndex <= countIndex || commitIndex <= insertIndex {
-		t.Errorf("postgres login-attempt transaction order is lock=%d delete=%d count=%d insert=%d commit=%d", lockIndex, deleteIndex, countIndex, insertIndex, commitIndex)
+	if lockIndex < 0 || deleteIndex <= lockIndex || globalCountIndex <= deleteIndex || browserCountIndex <= globalCountIndex || insertIndex <= browserCountIndex || commitIndex <= insertIndex {
+		t.Errorf("postgres login-attempt transaction order is lock=%d delete=%d global=%d browser=%d insert=%d commit=%d", lockIndex, deleteIndex, globalCountIndex, browserCountIndex, insertIndex, commitIndex)
 	}
 	for _, required := range []string{
 		"add constraint uq_org_units_enterprise_id_id unique (enterprise_id, id)",
@@ -92,7 +97,7 @@ func TestNilPostgresStoreFailsWithoutPanic(t *testing.T) {
 	store := NewPostgresStore(nil)
 	ctx := context.Background()
 	now := time.Now()
-	checks := []func() error{func() error { _, err := store.EnterpriseUserBindingExists(ctx, "e", "u"); return err }, func() error { return store.CreateSession(ctx, storedSession{}) }, func() error { _, err := store.UseSession(ctx, "h", now, time.Hour); return err }, func() error { return store.RevokeSession(ctx, "h", now) }, func() error { _, err := store.RevokeAndGetSession(ctx, "h", now); return err }, func() error { return store.CreateAuthorizationCode(ctx, storedAuthorizationCode{}) }, func() error { _, err := store.ExchangeAuthorizationCode(ctx, exchangeRequest{}); return err }, func() error { return store.CreateLoginAttempt(ctx, storedLoginAttempt{}) }, func() error { _, err := store.ConsumeLoginAttempt(ctx, "s", "b", now); return err }}
+	checks := []func() error{func() error { _, err := store.EnterpriseUserBindingExists(ctx, "e", "u"); return err }, func() error { return store.CreateSession(ctx, storedSession{}) }, func() error { _, err := store.UseSession(ctx, "h", now, time.Hour); return err }, func() error { return store.RevokeSession(ctx, "h", now) }, func() error { _, err := store.RevokeAndGetSession(ctx, "h", now); return err }, func() error { return store.CreateAuthorizationCode(ctx, storedAuthorizationCode{}) }, func() error { _, err := store.ExchangeAuthorizationCode(ctx, exchangeRequest{}); return err }, func() error { return store.CreateLoginAttempt(ctx, storedLoginAttempt{}, DefaultLoginAttemptLimits()) }, func() error { _, err := store.ConsumeLoginAttempt(ctx, "s", "b", now); return err }}
 	for index, check := range checks {
 		if err := check(); err == nil {
 			t.Fatalf("operation %d returned nil", index)

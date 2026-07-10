@@ -179,6 +179,7 @@ type OauthAuthorizationCode struct {
 type OidcLoginAttempt struct {
 	StateHash     string
 	BindingHash   string
+	BrowserIDHash string
 	EnterpriseID  string
 	ClientID      string
 	RedirectUri   string

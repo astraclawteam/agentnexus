@@ -1,11 +1,16 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestPostgresBrowserAuthDependenciesImplementProductionInterfaces(t *testing.T) {
@@ -13,6 +18,55 @@ func TestPostgresBrowserAuthDependenciesImplementProductionInterfaces(t *testing
 	var _ BrowserProfileResolver = (*PostgresBrowserDirectory)(nil)
 	var _ BrowserAuditSink = (*PostgresBrowserAuditSink)(nil)
 }
+
+func TestPostgresBrowserDirectoryClassifiesIdentityLookupErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		row  pgx.Row
+		want error
+	}{
+		{name: "unknown external identity", row: identityLookupRow{err: pgx.ErrNoRows}, want: ErrUnknownExternalIdentity},
+		{name: "database unavailable", row: identityLookupRow{err: errors.New("database offline")}, want: ErrIdentityDirectoryUnavailable},
+		{name: "context deadline", row: identityLookupRow{err: context.DeadlineExceeded}, want: ErrIdentityDirectoryUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := &PostgresBrowserDirectory{identityDB: identityLookupDB{row: test.row}}
+			_, _, err := directory.ResolveExternalIdentity(context.Background(), "ent-1", "https://issuer.example", "subject-1")
+			if !errors.Is(err, test.want) {
+				t.Fatalf("ResolveExternalIdentity error = %v, want %v", err, test.want)
+			}
+			other := ErrUnknownExternalIdentity
+			if errors.Is(test.want, ErrUnknownExternalIdentity) {
+				other = ErrIdentityDirectoryUnavailable
+			}
+			if errors.Is(err, other) {
+				t.Fatalf("ResolveExternalIdentity error = %v, must not classify as %v", err, other)
+			}
+		})
+	}
+
+	t.Run("nil pool is unavailable", func(t *testing.T) {
+		_, _, err := NewPostgresBrowserDirectory(nil).ResolveExternalIdentity(context.Background(), "ent-1", "https://issuer.example", "subject-1")
+		if !errors.Is(err, ErrIdentityDirectoryUnavailable) || errors.Is(err, ErrUnknownExternalIdentity) {
+			t.Fatalf("ResolveExternalIdentity error = %v", err)
+		}
+	})
+}
+
+type identityLookupDB struct{ row pgx.Row }
+
+func (d identityLookupDB) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, errors.New("unexpected Exec")
+}
+func (d identityLookupDB) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
+	return nil, errors.New("unexpected Query")
+}
+func (d identityLookupDB) QueryRow(context.Context, string, ...interface{}) pgx.Row { return d.row }
+
+type identityLookupRow struct{ err error }
+
+func (r identityLookupRow) Scan(...interface{}) error { return r.err }
 
 func TestBrowserDirectoryAndAuditSQLAreQuerySpecificAndSerialized(t *testing.T) {
 	_, here, _, _ := runtime.Caller(0)

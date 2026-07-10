@@ -6,15 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 )
 
 type BrowserAuthConfig struct {
-	Enabled     bool
-	DatabaseURL string
-	OIDC        browserauth.OIDCConfig
+	Enabled            bool
+	DatabaseURL        string
+	OIDC               browserauth.OIDCConfig
+	LoginAttemptLimits browserauth.LoginAttemptLimits
 }
 
 func LoadBrowserAuth() (BrowserAuthConfig, error) {
@@ -29,7 +31,20 @@ func LoadBrowserAuth() (BrowserAuthConfig, error) {
 	if dsn == "" {
 		dsn = os.Getenv("AGENTNEXUS_DATABASE_URL")
 	}
-	config := BrowserAuthConfig{Enabled: true, DatabaseURL: dsn}
+	limits := browserauth.DefaultLoginAttemptLimits()
+	perBrowser, err := optionalPositiveInt("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_PER_BROWSER_LIMIT", limits.PerBrowser)
+	if err != nil {
+		return BrowserAuthConfig{}, err
+	}
+	global, err := optionalPositiveInt("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_GLOBAL_LIMIT", limits.Global)
+	if err != nil {
+		return BrowserAuthConfig{}, err
+	}
+	limits, err = browserauth.NewLoginAttemptLimits(perBrowser, global)
+	if err != nil {
+		return BrowserAuthConfig{}, fmt.Errorf("invalid OIDC login attempt limits: %w", err)
+	}
+	config := BrowserAuthConfig{Enabled: true, DatabaseURL: dsn, LoginAttemptLimits: limits}
 	if config.DatabaseURL == "" {
 		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_POSTGRES_DSN is required when browser auth is enabled")
 	}
@@ -64,4 +79,16 @@ func LoadBrowserAuth() (BrowserAuthConfig, error) {
 		return BrowserAuthConfig{}, err
 	}
 	return config, nil
+}
+
+func optionalPositiveInt(name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+	return value, nil
 }

@@ -12,15 +12,18 @@ import (
 )
 
 const (
-	defaultIdleTimeout     = 8 * time.Hour
-	defaultAbsoluteTimeout = 24 * time.Hour
-	defaultCodeTimeout     = 60 * time.Second
-	defaultLoginTimeout    = 5 * time.Minute
-	maxLoginAttempts       = 32
-	maxClientIDLength      = 256
-	maxRedirectURILength   = 2048
-	maxConsoleStateLength  = 1024
-	maxNonceLength         = 512
+	defaultIdleTimeout                 = 8 * time.Hour
+	defaultAbsoluteTimeout             = 24 * time.Hour
+	defaultCodeTimeout                 = 60 * time.Second
+	defaultLoginTimeout                = 5 * time.Minute
+	defaultPerBrowserLoginAttemptLimit = 8
+	defaultGlobalLoginAttemptLimit     = 4096
+	maxPerBrowserLoginAttemptLimit     = 64
+	maxGlobalLoginAttemptLimit         = 65536
+	maxClientIDLength                  = 256
+	maxRedirectURILength               = 2048
+	maxConsoleStateLength              = 1024
+	maxNonceLength                     = 512
 )
 
 var (
@@ -50,8 +53,29 @@ type Store interface {
 	RevokeAndGetSession(context.Context, string, time.Time) (storedSession, error)
 	CreateAuthorizationCode(context.Context, storedAuthorizationCode) error
 	ExchangeAuthorizationCode(context.Context, exchangeRequest) (storedAuthorizationCode, error)
-	CreateLoginAttempt(context.Context, storedLoginAttempt) error
+	CreateLoginAttempt(context.Context, storedLoginAttempt, LoginAttemptLimits) error
 	ConsumeLoginAttempt(context.Context, string, string, time.Time) (storedLoginAttempt, error)
+}
+
+type LoginAttemptLimits struct {
+	PerBrowser int
+	Global     int
+}
+
+func DefaultLoginAttemptLimits() LoginAttemptLimits {
+	return LoginAttemptLimits{PerBrowser: defaultPerBrowserLoginAttemptLimit, Global: defaultGlobalLoginAttemptLimit}
+}
+
+func NewLoginAttemptLimits(perBrowser, global int) (LoginAttemptLimits, error) {
+	limits := LoginAttemptLimits{PerBrowser: perBrowser, Global: global}
+	if !limits.valid() {
+		return LoginAttemptLimits{}, ErrInvalidInput
+	}
+	return limits, nil
+}
+
+func (l LoginAttemptLimits) valid() bool {
+	return l.PerBrowser >= 1 && l.PerBrowser <= maxPerBrowserLoginAttemptLimit && l.Global >= l.PerBrowser && l.Global <= maxGlobalLoginAttemptLimit
 }
 
 func (s *Service) LogoutSession(ctx context.Context, token string) (BrowserSession, error) {
@@ -69,7 +93,7 @@ func (s *Service) LogoutSession(ctx context.Context, token string) (BrowserSessi
 }
 
 func (s *Service) CreateLoginAttempt(ctx context.Context, input CreateLoginAttemptInput) (string, string, LoginAttempt, error) {
-	if s == nil || s.store == nil || input.EnterpriseID == "" || !validBounded(input.ClientID, maxClientIDLength) || !validBounded(input.RedirectURI, maxRedirectURILength) || !validBounded(input.ConsoleState, maxConsoleStateLength) || !validBounded(input.ConsoleNonce, maxNonceLength) || !validS256Challenge(input.CodeChallenge) {
+	if s == nil || s.store == nil || !s.loginAttemptLimits.valid() || input.EnterpriseID == "" || !validOpaqueSecret(input.BrowserID) || !validBounded(input.ClientID, maxClientIDLength) || !validBounded(input.RedirectURI, maxRedirectURILength) || !validBounded(input.ConsoleState, maxConsoleStateLength) || !validBounded(input.ConsoleNonce, maxNonceLength) || !validS256Challenge(input.CodeChallenge) {
 		return "", "", LoginAttempt{}, ErrInvalidInput
 	}
 	state, err := s.generateSecret()
@@ -89,7 +113,7 @@ func (s *Service) CreateLoginAttempt(ctx context.Context, input CreateLoginAttem
 	}
 	now := s.now().UTC()
 	attempt := LoginAttempt{EnterpriseID: input.EnterpriseID, ClientID: input.ClientID, RedirectURI: input.RedirectURI, ConsoleState: input.ConsoleState, ConsoleNonce: input.ConsoleNonce, CodeChallenge: input.CodeChallenge, UpstreamNonce: nonce, CreatedAt: now, ExpiresAt: now.Add(defaultLoginTimeout)}
-	if err := s.store.CreateLoginAttempt(ctx, storedLoginAttempt{StateHash: hashHex(state), BindingHash: hashHex(binding), LoginAttempt: attempt}); err != nil {
+	if err := s.store.CreateLoginAttempt(ctx, storedLoginAttempt{StateHash: hashHex(state), BindingHash: hashHex(binding), BrowserIDHash: hashHex(input.BrowserID), LoginAttempt: attempt}, s.loginAttemptLimits); err != nil {
 		if errors.Is(err, errLoginAttemptLimited) {
 			return "", "", LoginAttempt{}, ErrLoginAttemptLimited
 		}
@@ -119,9 +143,10 @@ func validOpaqueSecret(value string) bool {
 }
 
 type Service struct {
-	store          Store
-	now            func() time.Time
-	generateSecret func() (string, error)
+	store              Store
+	now                func() time.Time
+	generateSecret     func() (string, error)
+	loginAttemptLimits LoginAttemptLimits
 }
 
 type Option func(*Service)
@@ -136,8 +161,12 @@ func WithTestSecretGenerator(generator func() (string, error)) Option {
 	return func(service *Service) { service.generateSecret = generator }
 }
 
+func WithLoginAttemptLimits(limits LoginAttemptLimits) Option {
+	return func(service *Service) { service.loginAttemptLimits = limits }
+}
+
 func NewService(store Store, options ...Option) *Service {
-	service := &Service{store: store, now: time.Now, generateSecret: randomOpaqueSecret}
+	service := &Service{store: store, now: time.Now, generateSecret: randomOpaqueSecret, loginAttemptLimits: DefaultLoginAttemptLimits()}
 	for _, option := range options {
 		option(service)
 	}

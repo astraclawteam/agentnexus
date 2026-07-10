@@ -14,19 +14,29 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type PostgresBrowserDirectory struct{ pool *pgxpool.Pool }
+type PostgresBrowserDirectory struct {
+	pool       *pgxpool.Pool
+	identityDB db.DBTX
+}
 
 func NewPostgresBrowserDirectory(pool *pgxpool.Pool) *PostgresBrowserDirectory {
-	return &PostgresBrowserDirectory{pool: pool}
+	directory := &PostgresBrowserDirectory{pool: pool}
+	if pool != nil {
+		directory.identityDB = pool
+	}
+	return directory
 }
 
 func (d *PostgresBrowserDirectory) ResolveExternalIdentity(ctx context.Context, enterpriseID, issuer, subject string) (string, string, error) {
-	if d == nil || d.pool == nil || enterpriseID == "" || issuer == "" || subject == "" {
-		return "", "", errors.New("identity directory unavailable")
+	if d == nil || d.identityDB == nil || enterpriseID == "" || issuer == "" || subject == "" {
+		return "", "", ErrIdentityDirectoryUnavailable
 	}
-	record, err := db.New(d.pool).ResolveExternalIdentity(ctx, db.ResolveExternalIdentityParams{EnterpriseID: enterpriseID, Provider: issuer, ExternalSubject: subject})
+	record, err := db.New(d.identityDB).ResolveExternalIdentity(ctx, db.ResolveExternalIdentityParams{EnterpriseID: enterpriseID, Provider: issuer, ExternalSubject: subject})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrUnknownExternalIdentity
+	}
 	if err != nil {
-		return "", "", err
+		return "", "", errors.Join(ErrIdentityDirectoryUnavailable, err)
 	}
 	return record.EnterpriseID, record.EnterpriseUserID, nil
 }

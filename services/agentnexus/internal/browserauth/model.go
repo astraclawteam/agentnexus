@@ -42,6 +42,7 @@ type ExchangeResult struct {
 type CreateLoginAttemptInput struct {
 	EnterpriseID  string
 	ClientID      string
+	BrowserID     string
 	RedirectURI   string
 	ConsoleState  string
 	ConsoleNonce  string
@@ -61,8 +62,9 @@ type LoginAttempt struct {
 }
 
 type storedLoginAttempt struct {
-	StateHash   string
-	BindingHash string
+	StateHash     string
+	BindingHash   string
+	BrowserIDHash string
 	LoginAttempt
 }
 

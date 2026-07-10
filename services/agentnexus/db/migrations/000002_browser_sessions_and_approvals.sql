@@ -45,6 +45,7 @@ CREATE TABLE oauth_authorization_codes (
 CREATE TABLE oidc_login_attempts (
     state_hash TEXT PRIMARY KEY CHECK (char_length(state_hash) = 64 AND state_hash ~ '^[0-9a-f]{64}$'),
     binding_hash TEXT NOT NULL CHECK (char_length(binding_hash) = 64 AND binding_hash ~ '^[0-9a-f]{64}$'),
+    browser_id_hash TEXT NOT NULL CHECK (char_length(browser_id_hash) = 64 AND browser_id_hash ~ '^[0-9a-f]{64}$'),
     enterprise_id TEXT NOT NULL REFERENCES enterprises(id),
     client_id TEXT NOT NULL,
     redirect_uri TEXT NOT NULL,
@@ -80,6 +81,7 @@ CREATE INDEX idx_browser_sessions_user ON browser_sessions(enterprise_id, enterp
 CREATE INDEX idx_browser_sessions_expiry ON browser_sessions(idle_expires_at, absolute_expires_at) WHERE revoked_at IS NULL;
 CREATE INDEX idx_oauth_authorization_codes_expiry ON oauth_authorization_codes(expires_at) WHERE consumed_at IS NULL;
 CREATE INDEX idx_oidc_login_attempts_expiry ON oidc_login_attempts(expires_at);
+CREATE INDEX idx_oidc_login_attempts_scope_browser ON oidc_login_attempts(enterprise_id, client_id, browser_id_hash, expires_at);
 CREATE INDEX idx_audit_events_enterprise_chain ON audit_events(enterprise_id, created_at DESC, id DESC);
 CREATE INDEX idx_approval_queue_items_enterprise_status ON approval_queue_items(enterprise_id, status, created_at);
 -- +goose StatementEnd

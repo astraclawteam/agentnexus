@@ -21,7 +21,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{users: map[string]struct{}{}, sessions: map[string]storedSession{}, codes: map[string]storedAuthorizationCode{}, loginAttempts: map[string]storedLoginAttempt{}}
 }
 
-func (s *MemoryStore) CreateLoginAttempt(ctx context.Context, attempt storedLoginAttempt) error {
+func (s *MemoryStore) CreateLoginAttempt(ctx context.Context, attempt storedLoginAttempt, limits LoginAttemptLimits) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -41,13 +41,17 @@ func (s *MemoryStore) CreateLoginAttempt(ctx context.Context, attempt storedLogi
 			delete(s.loginAttempts, key)
 		}
 	}
-	count := 0
+	globalCount := 0
+	browserCount := 0
 	for _, record := range s.loginAttempts {
 		if record.EnterpriseID == attempt.EnterpriseID && record.ClientID == attempt.ClientID {
-			count++
+			globalCount++
+			if record.BrowserIDHash == attempt.BrowserIDHash {
+				browserCount++
+			}
 		}
 	}
-	if count >= maxLoginAttempts {
+	if globalCount >= limits.Global || browserCount >= limits.PerBrowser {
 		return errLoginAttemptLimited
 	}
 	if _, ok := s.loginAttempts[attempt.StateHash]; ok {

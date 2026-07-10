@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -19,6 +20,7 @@ import (
 )
 
 const browserSessionCookie = "nexus_browser_session"
+const oidcBrowserCookie = "nexus_oidc_browser"
 const loginBindingCookiePrefix = "nexus_oidc_binding_"
 const maxTokenRequestBytes = 16 << 10
 const maxAuthorizeStateLength = 1024
@@ -27,7 +29,8 @@ const maxUpstreamCodeLength = 4096
 const mandatoryCleanupTimeout = 5 * time.Second
 const upstreamRequestTimeout = 15 * time.Second
 const defaultBrowserRequestTimeout = 20 * time.Second
-const loginAttemptRetryAfterSeconds = "60"
+const loginAttemptRetryAfterSeconds = "300"
+const oidcBrowserCookieTTL = 24 * time.Hour
 
 type BrowserSessionService interface {
 	GetSession(context.Context, string) (browserauth.BrowserSession, error)
@@ -49,6 +52,11 @@ type UpstreamOIDC interface {
 	AuthCodeURL(state, nonce string) string
 	ExchangeAndVerify(context.Context, string) (browserauth.VerifiedIdentity, string, error)
 }
+
+var (
+	ErrUnknownExternalIdentity      = errors.New("unknown external identity")
+	ErrIdentityDirectoryUnavailable = errors.New("identity directory unavailable")
+)
 
 type ExternalIdentityResolver interface {
 	ResolveExternalIdentity(context.Context, string, string, string) (enterpriseID, userID string, err error)
@@ -180,6 +188,17 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
+	browserCookie, browserCookieErr := r.Cookie(oidcBrowserCookie)
+	if browserCookieErr != nil || !canonicalOpaque(browserCookie.Value) {
+		browserID, err := newBrowserID()
+		if err != nil {
+			writeOAuthError(w, http.StatusServiceUnavailable)
+			return
+		}
+		setOIDCBrowserCookie(w, browserID, time.Now().Add(oidcBrowserCookieTTL))
+		http.Redirect(w, r, r.URL.RequestURI(), http.StatusFound)
+		return
+	}
 
 	if cookie, err := r.Cookie(browserSessionCookie); err == nil {
 		session, sessionErr := h.sessions.GetSession(r.Context(), cookie.Value)
@@ -198,7 +217,7 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 		}
 		clearSessionCookie(w)
 	}
-	attemptState, binding, attempt, err := h.sessions.CreateLoginAttempt(r.Context(), browserauth.CreateLoginAttemptInput{EnterpriseID: h.config.EnterpriseID, ClientID: clientID, RedirectURI: redirectURI, ConsoleState: state, ConsoleNonce: nonce, CodeChallenge: challenge})
+	attemptState, binding, attempt, err := h.sessions.CreateLoginAttempt(r.Context(), browserauth.CreateLoginAttemptInput{EnterpriseID: h.config.EnterpriseID, ClientID: clientID, BrowserID: browserCookie.Value, RedirectURI: redirectURI, ConsoleState: state, ConsoleNonce: nonce, CodeChallenge: challenge})
 	if err != nil {
 		if errors.Is(err, browserauth.ErrLoginAttemptLimited) {
 			w.Header().Set("Retry-After", loginAttemptRetryAfterSeconds)
@@ -248,6 +267,10 @@ func (h *browserAuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	enterpriseID, userID, err := h.identities.ResolveExternalIdentity(r.Context(), attempt.EnterpriseID, identity.Issuer, identity.Subject)
+	if err != nil && !errors.Is(err, ErrUnknownExternalIdentity) {
+		writeOAuthError(w, http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil || enterpriseID != attempt.EnterpriseID || userID == "" {
 		writeOAuthError(w, http.StatusUnauthorized)
 		return
@@ -500,6 +523,18 @@ func canonicalOpaque(value string) bool {
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(value)
 	return err == nil && len(raw) == 32 && base64.RawURLEncoding.EncodeToString(raw) == value
+}
+
+func newBrowserID() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func setOIDCBrowserCookie(w http.ResponseWriter, value string, expiry time.Time) {
+	http.SetCookie(w, &http.Cookie{Name: oidcBrowserCookie, Value: value, Path: "/oauth2/authorize", Expires: expiry, MaxAge: int(oidcBrowserCookieTTL.Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 }
 
 func loginBindingCookieName(state string) string {

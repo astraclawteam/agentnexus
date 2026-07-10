@@ -500,7 +500,7 @@ func TestServiceDistinguishesMissingRecordsFromUnavailableStores(t *testing.T) {
 	}
 	store.err = nil
 	attemptSvc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
-	state, binding, _, err := attemptSvc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "agentatlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
+	state, binding, _, err := attemptSvc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "agentatlas", BrowserID: secretFixture('z'), RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
 	if err != nil {
 		t.Fatal(err)
 	}

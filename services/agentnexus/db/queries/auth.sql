@@ -68,21 +68,26 @@ SELECT pg_advisory_xact_lock(
 -- name: DeleteExpiredOIDCLoginAttempts :exec
 DELETE FROM oidc_login_attempts WHERE expires_at <= $1;
 
--- name: CountOIDCLoginAttempts :one
+-- name: CountOIDCLoginAttemptsGlobal :one
 SELECT COUNT(*)
 FROM oidc_login_attempts
 WHERE enterprise_id = $1 AND client_id = $2 AND expires_at > $3;
 
+-- name: CountOIDCLoginAttemptsForBrowser :one
+SELECT COUNT(*)
+FROM oidc_login_attempts
+WHERE enterprise_id = $1 AND client_id = $2 AND browser_id_hash = $3 AND expires_at > $4;
+
 -- name: CreateOIDCLoginAttempt :one
 INSERT INTO oidc_login_attempts (
-    state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+    state_hash, binding_hash, browser_id_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
     code_challenge, upstream_nonce, created_at, expires_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-RETURNING state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+RETURNING state_hash, binding_hash, browser_id_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
           code_challenge, upstream_nonce, created_at, expires_at;
 
 -- name: GetOIDCLoginAttemptForUpdate :one
-SELECT state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+SELECT state_hash, binding_hash, browser_id_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
        code_challenge, upstream_nonce, created_at, expires_at
 FROM oidc_login_attempts
 WHERE state_hash = $1

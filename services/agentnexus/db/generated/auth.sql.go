@@ -30,20 +30,45 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAutho
 	return result.RowsAffected(), nil
 }
 
-const countOIDCLoginAttempts = `-- name: CountOIDCLoginAttempts :one
+const countOIDCLoginAttemptsForBrowser = `-- name: CountOIDCLoginAttemptsForBrowser :one
+SELECT COUNT(*)
+FROM oidc_login_attempts
+WHERE enterprise_id = $1 AND client_id = $2 AND browser_id_hash = $3 AND expires_at > $4
+`
+
+type CountOIDCLoginAttemptsForBrowserParams struct {
+	EnterpriseID  string
+	ClientID      string
+	BrowserIDHash string
+	ExpiresAt     pgtype.Timestamptz
+}
+
+func (q *Queries) CountOIDCLoginAttemptsForBrowser(ctx context.Context, arg CountOIDCLoginAttemptsForBrowserParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOIDCLoginAttemptsForBrowser,
+		arg.EnterpriseID,
+		arg.ClientID,
+		arg.BrowserIDHash,
+		arg.ExpiresAt,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countOIDCLoginAttemptsGlobal = `-- name: CountOIDCLoginAttemptsGlobal :one
 SELECT COUNT(*)
 FROM oidc_login_attempts
 WHERE enterprise_id = $1 AND client_id = $2 AND expires_at > $3
 `
 
-type CountOIDCLoginAttemptsParams struct {
+type CountOIDCLoginAttemptsGlobalParams struct {
 	EnterpriseID string
 	ClientID     string
 	ExpiresAt    pgtype.Timestamptz
 }
 
-func (q *Queries) CountOIDCLoginAttempts(ctx context.Context, arg CountOIDCLoginAttemptsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countOIDCLoginAttempts, arg.EnterpriseID, arg.ClientID, arg.ExpiresAt)
+func (q *Queries) CountOIDCLoginAttemptsGlobal(ctx context.Context, arg CountOIDCLoginAttemptsGlobalParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOIDCLoginAttemptsGlobal, arg.EnterpriseID, arg.ClientID, arg.ExpiresAt)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -146,16 +171,17 @@ func (q *Queries) CreateBrowserSession(ctx context.Context, arg CreateBrowserSes
 
 const createOIDCLoginAttempt = `-- name: CreateOIDCLoginAttempt :one
 INSERT INTO oidc_login_attempts (
-    state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+    state_hash, binding_hash, browser_id_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
     code_challenge, upstream_nonce, created_at, expires_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-RETURNING state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+RETURNING state_hash, binding_hash, browser_id_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
           code_challenge, upstream_nonce, created_at, expires_at
 `
 
 type CreateOIDCLoginAttemptParams struct {
 	StateHash     string
 	BindingHash   string
+	BrowserIDHash string
 	EnterpriseID  string
 	ClientID      string
 	RedirectUri   string
@@ -171,6 +197,7 @@ func (q *Queries) CreateOIDCLoginAttempt(ctx context.Context, arg CreateOIDCLogi
 	row := q.db.QueryRow(ctx, createOIDCLoginAttempt,
 		arg.StateHash,
 		arg.BindingHash,
+		arg.BrowserIDHash,
 		arg.EnterpriseID,
 		arg.ClientID,
 		arg.RedirectUri,
@@ -185,6 +212,7 @@ func (q *Queries) CreateOIDCLoginAttempt(ctx context.Context, arg CreateOIDCLogi
 	err := row.Scan(
 		&i.StateHash,
 		&i.BindingHash,
+		&i.BrowserIDHash,
 		&i.EnterpriseID,
 		&i.ClientID,
 		&i.RedirectUri,
@@ -314,7 +342,7 @@ func (q *Queries) GetBrowserSessionForUpdate(ctx context.Context, idHash string)
 }
 
 const getOIDCLoginAttemptForUpdate = `-- name: GetOIDCLoginAttemptForUpdate :one
-SELECT state_hash, binding_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
+SELECT state_hash, binding_hash, browser_id_hash, enterprise_id, client_id, redirect_uri, console_state, console_nonce,
        code_challenge, upstream_nonce, created_at, expires_at
 FROM oidc_login_attempts
 WHERE state_hash = $1
@@ -327,6 +355,7 @@ func (q *Queries) GetOIDCLoginAttemptForUpdate(ctx context.Context, stateHash st
 	err := row.Scan(
 		&i.StateHash,
 		&i.BindingHash,
+		&i.BrowserIDHash,
 		&i.EnterpriseID,
 		&i.ClientID,
 		&i.RedirectUri,

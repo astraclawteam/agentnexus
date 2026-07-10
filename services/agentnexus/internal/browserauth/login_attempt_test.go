@@ -2,7 +2,10 @@ package browserauth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,7 +19,7 @@ func TestLoginAttemptStoresStateHashAndExpiresAtFiveMinuteBoundary(t *testing.T)
 	svc := NewService(store, WithClock(clock.Now), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
 	state, binding, attempt, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{
 		EnterpriseID: "ent-1", ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback",
-		ConsoleState: "console-state", ConsoleNonce: "console-nonce", CodeChallenge: s256(validVerifier),
+		BrowserID: secretFixture('z'), ConsoleState: "console-state", ConsoleNonce: "console-nonce", CodeChallenge: s256(validVerifier),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +31,7 @@ func TestLoginAttemptStoresStateHashAndExpiresAtFiveMinuteBoundary(t *testing.T)
 		if key == state || strings.Contains(key, state) || len(key) != 64 {
 			t.Fatalf("state stored unsafely: %q", key)
 		}
-		if record.StateHash != key || record.UpstreamNonce == "" || record.BindingHash == "" || record.BindingHash == binding || strings.Contains(record.BindingHash, binding) {
+		if record.StateHash != key || record.UpstreamNonce == "" || record.BindingHash == "" || record.BindingHash == binding || strings.Contains(record.BindingHash, binding) || record.BrowserIDHash == "" || record.BrowserIDHash == secretFixture('z') || strings.Contains(record.BrowserIDHash, secretFixture('z')) {
 			t.Fatalf("record=%+v", record)
 		}
 	}
@@ -46,7 +49,7 @@ func TestLoginAttemptIsConsumedExactlyOnceConcurrently(t *testing.T) {
 	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
 	state, binding, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{
 		EnterpriseID: "ent-1", ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback",
-		ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier),
+		BrowserID: secretFixture('z'), ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +76,7 @@ func TestLoginAttemptIsConsumedExactlyOnceConcurrently(t *testing.T) {
 func TestLoginAttemptCanceledContextDoesNotMutateStore(t *testing.T) {
 	store := NewMemoryStore()
 	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
-	state, binding, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
+	state, binding, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "agentatlas", BrowserID: secretFixture('z'), RedirectURI: "https://atlas/auth/callback", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +93,7 @@ func TestLoginAttemptCanceledContextDoesNotMutateStore(t *testing.T) {
 func TestMemoryLoginAttemptStoreRejectsTTLAboveFiveMinutes(t *testing.T) {
 	store := NewMemoryStore()
 	attempt := storedLoginAttempt{StateHash: strings.Repeat("a", 64), BindingHash: strings.Repeat("b", 64), LoginAttempt: LoginAttempt{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier), UpstreamNonce: "up", CreatedAt: fixedNow, ExpiresAt: fixedNow.Add(5*time.Minute + time.Nanosecond)}}
-	if err := store.CreateLoginAttempt(context.Background(), attempt); err == nil {
+	if err := store.CreateLoginAttempt(context.Background(), attempt, DefaultLoginAttemptLimits()); err == nil {
 		t.Fatal("overlong login attempt accepted")
 	}
 }
@@ -98,7 +101,7 @@ func TestMemoryLoginAttemptStoreRejectsTTLAboveFiveMinutes(t *testing.T) {
 func TestLoginAttemptWrongBrowserBindingDoesNotConsume(t *testing.T) {
 	store := NewMemoryStore()
 	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
-	state, binding, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
+	state, binding, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", BrowserID: secretFixture('z'), RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +120,7 @@ func TestLoginAttemptCleanupRemovesAllExpiredRows(t *testing.T) {
 		store.loginAttempts[strings.Repeat(key, 64)] = storedLoginAttempt{StateHash: strings.Repeat(key, 64), BindingHash: strings.Repeat("b", 64), LoginAttempt: LoginAttempt{CreatedAt: fixedNow.Add(-10 * time.Minute), ExpiresAt: fixedNow.Add(-5 * time.Minute)}}
 	}
 	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('a'), secretFixture('n'), secretFixture('b')}}).Generate))
-	if _, _, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}); err != nil {
+	if _, _, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", BrowserID: secretFixture('z'), RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(store.loginAttemptSnapshot()); got != 1 {
@@ -125,10 +128,10 @@ func TestLoginAttemptCleanupRemovesAllExpiredRows(t *testing.T) {
 	}
 }
 
-func TestLoginAttemptLimitIsAtomicPerEnterpriseClient(t *testing.T) {
+func TestLoginAttemptLimitIsAtomicPerBrowser(t *testing.T) {
 	store := NewMemoryStore()
-	svc := NewService(store, WithClock(func() time.Time { return fixedNow }))
-	input := CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}
+	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithLoginAttemptLimits(LoginAttemptLimits{PerBrowser: 8, Global: 4096}))
+	input := CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", BrowserID: secretFixture('z'), RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}
 
 	var success, limited atomic.Int32
 	var wg sync.WaitGroup
@@ -148,42 +151,78 @@ func TestLoginAttemptLimitIsAtomicPerEnterpriseClient(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if success.Load() != 32 || limited.Load() != 32 {
+	if success.Load() != 8 || limited.Load() != 56 {
 		t.Fatalf("success=%d limited=%d", success.Load(), limited.Load())
 	}
 }
 
-func TestLoginAttemptLimitIsIndependentAndReopensAfterExpiry(t *testing.T) {
+func TestLoginAttemptLimitIsIndependentPerBrowserAndReopensAfterExpiry(t *testing.T) {
 	clock := &mutableClock{now: fixedNow}
-	svc := NewService(NewMemoryStore(), WithClock(clock.Now))
-	create := func(enterpriseID, clientID string) error {
-		_, _, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: enterpriseID, ClientID: clientID, RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
+	svc := NewService(NewMemoryStore(), WithClock(clock.Now), WithLoginAttemptLimits(LoginAttemptLimits{PerBrowser: 8, Global: 4096}))
+	create := func(browserID string) error {
+		_, _, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", BrowserID: browserID, RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
 		return err
 	}
-	for range 32 {
-		if err := create("ent-1", "atlas"); err != nil {
+	for range 8 {
+		if err := create(secretFixture('a')); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := create("ent-1", "atlas"); !errors.Is(err, ErrLoginAttemptLimited) {
+	if err := create(secretFixture('a')); !errors.Is(err, ErrLoginAttemptLimited) {
 		t.Fatalf("same key error=%v", err)
 	}
-	if err := create("ent-2", "atlas"); err != nil {
-		t.Fatalf("different enterprise error=%v", err)
-	}
-	if err := create("ent-1", "other"); err != nil {
-		t.Fatalf("different client error=%v", err)
+	if err := create(secretFixture('b')); err != nil {
+		t.Fatalf("different browser error=%v", err)
 	}
 	clock.now = fixedNow.Add(defaultLoginTimeout)
-	if err := create("ent-1", "atlas"); err != nil {
+	if err := create(secretFixture('a')); err != nil {
 		t.Fatalf("after expiry error=%v", err)
+	}
+}
+
+func TestLoginAttemptGlobalLimitIsAtomicAcrossBrowsers(t *testing.T) {
+	store := NewMemoryStore()
+	svc := NewService(store, WithClock(func() time.Time { return fixedNow }), WithLoginAttemptLimits(LoginAttemptLimits{PerBrowser: 8, Global: 16}))
+	var success, limited atomic.Int32
+	var wg sync.WaitGroup
+	for i := range 64 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			digest := sha256.Sum256([]byte(fmt.Sprintf("browser-%d", i)))
+			browserID := base64.RawURLEncoding.EncodeToString(digest[:])
+			_, _, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", BrowserID: browserID, RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)})
+			switch {
+			case err == nil:
+				success.Add(1)
+			case errors.Is(err, ErrLoginAttemptLimited):
+				limited.Add(1)
+			default:
+				t.Errorf("unexpected error: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if success.Load() != 16 || limited.Load() != 48 {
+		t.Fatalf("success=%d limited=%d", success.Load(), limited.Load())
+	}
+}
+
+func TestLoginAttemptAllowsAtLeast64DistinctBrowsersByDefault(t *testing.T) {
+	svc := NewService(NewMemoryStore(), WithClock(func() time.Time { return fixedNow }))
+	for i := range 64 {
+		digest := sha256.Sum256([]byte(fmt.Sprintf("browser-%d", i)))
+		browserID := base64.RawURLEncoding.EncodeToString(digest[:])
+		if _, _, _, err := svc.CreateLoginAttempt(context.Background(), CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", BrowserID: browserID, RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}); err != nil {
+			t.Fatalf("browser %d: %v", i, err)
+		}
 	}
 }
 
 func TestCreateLoginAttemptMapsStoreErrors(t *testing.T) {
 	store := NewMemoryStore()
 	svc := NewService(store, WithClock(func() time.Time { return fixedNow }))
-	input := CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}
+	input := CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", BrowserID: secretFixture('z'), RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}
 	store.err = errors.New("database unavailable")
 	if _, _, _, err := svc.CreateLoginAttempt(context.Background(), input); !errors.Is(err, ErrLoginAttemptUnavailable) {
 		t.Fatalf("store error=%v", err)
@@ -196,8 +235,8 @@ func TestCreateLoginAttemptMapsStoreErrors(t *testing.T) {
 }
 
 func TestBrowserAuthorizationServiceRejectsOversizedProtocolInputs(t *testing.T) {
-	base := CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}
-	for name, mutate := range map[string]func(*CreateLoginAttemptInput){"client": func(v *CreateLoginAttemptInput) { v.ClientID = strings.Repeat("c", maxClientIDLength+1) }, "redirect": func(v *CreateLoginAttemptInput) { v.RedirectURI = strings.Repeat("r", maxRedirectURILength+1) }, "state": func(v *CreateLoginAttemptInput) { v.ConsoleState = strings.Repeat("s", maxConsoleStateLength+1) }, "nonce": func(v *CreateLoginAttemptInput) { v.ConsoleNonce = strings.Repeat("n", maxNonceLength+1) }} {
+	base := CreateLoginAttemptInput{EnterpriseID: "ent-1", ClientID: "atlas", BrowserID: secretFixture('z'), RedirectURI: "https://atlas/cb", ConsoleState: "s", ConsoleNonce: "n", CodeChallenge: s256(validVerifier)}
+	for name, mutate := range map[string]func(*CreateLoginAttemptInput){"browser": func(v *CreateLoginAttemptInput) { v.BrowserID = "not-canonical" }, "client": func(v *CreateLoginAttemptInput) { v.ClientID = strings.Repeat("c", maxClientIDLength+1) }, "redirect": func(v *CreateLoginAttemptInput) { v.RedirectURI = strings.Repeat("r", maxRedirectURILength+1) }, "state": func(v *CreateLoginAttemptInput) { v.ConsoleState = strings.Repeat("s", maxConsoleStateLength+1) }, "nonce": func(v *CreateLoginAttemptInput) { v.ConsoleNonce = strings.Repeat("n", maxNonceLength+1) }} {
 		t.Run(name, func(t *testing.T) {
 			input := base
 			mutate(&input)

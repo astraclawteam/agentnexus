@@ -25,6 +25,46 @@ import (
 
 const testVerifier = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
 
+func TestBrowserAuthAuthorizeBootstrapsCanonicalBrowserBeforeCreatingAttempt(t *testing.T) {
+	var counting *countingSessionService
+	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+		counting = &countingSessionService{BrowserSessionService: service}
+		return counting
+	})
+	target := "/oauth2/authorize?" + h.authorizeQuery("console-state", "console-nonce").Encode()
+
+	first := performOnce(h.router, http.MethodGet, target, "", nil)
+	if first.Code != http.StatusFound || first.Header().Get("Location") != target {
+		t.Fatalf("bootstrap status=%d location=%q", first.Code, first.Header().Get("Location"))
+	}
+	if first.Header().Get("Cache-Control") != "no-store" || counting.createAttempts != 0 {
+		t.Fatalf("cache=%q attempts=%d", first.Header().Get("Cache-Control"), counting.createAttempts)
+	}
+	browserCookie := namedCookie(t, first, "nexus_oidc_browser")
+	if !browserCookie.HttpOnly || !browserCookie.Secure || browserCookie.SameSite != http.SameSiteLaxMode || browserCookie.Path != "/oauth2/authorize" || browserCookie.MaxAge != 24*60*60 || browserCookie.Expires.IsZero() || !canonicalOpaque(browserCookie.Value) {
+		t.Fatalf("browser cookie=%+v", browserCookie)
+	}
+
+	second := perform(h.router, http.MethodGet, target, "", browserCookie)
+	location, _ := url.Parse(second.Header().Get("Location"))
+	if second.Code != http.StatusFound || location.Scheme+"://"+location.Host != h.idp.server.URL || counting.createAttempts != 1 {
+		t.Fatalf("second status=%d location=%s attempts=%d", second.Code, location, counting.createAttempts)
+	}
+}
+
+func TestBrowserAuthAuthorizeRebootstrapsInvalidBrowserCookieWithoutAttempt(t *testing.T) {
+	var counting *countingSessionService
+	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+		counting = &countingSessionService{BrowserSessionService: service}
+		return counting
+	})
+	target := "/oauth2/authorize?" + h.authorizeQuery("s", "n").Encode()
+	rr := performOnce(h.router, http.MethodGet, target, "", []*http.Cookie{{Name: "nexus_oidc_browser", Value: "not-canonical"}})
+	if rr.Code != http.StatusFound || rr.Header().Get("Location") != target || counting.createAttempts != 0 || !canonicalOpaque(namedCookie(t, rr, "nexus_oidc_browser").Value) {
+		t.Fatalf("status=%d location=%q attempts=%d cookies=%v", rr.Code, rr.Header().Get("Location"), counting.createAttempts, rr.Result().Cookies())
+	}
+}
+
 func TestBrowserAuthAuthorizeUsesEnterpriseIdPOrSilentSession(t *testing.T) {
 	h := newBrowserHarness(t)
 	query := h.authorizeQuery("console-state", "console-nonce")
@@ -133,6 +173,11 @@ func TestBrowserAuthAuthorizeRejectsAmbiguousOrUnsafeInputs(t *testing.T) {
 			if rr.Code != http.StatusBadRequest || rr.Header().Get("Location") != "" {
 				t.Fatalf("status=%d location=%q", rr.Code, rr.Header().Get("Location"))
 			}
+			for _, cookie := range rr.Result().Cookies() {
+				if cookie.Name == oidcBrowserCookie {
+					t.Fatalf("invalid request bootstrapped browser cookie: %+v", cookie)
+				}
+			}
 		})
 	}
 }
@@ -230,6 +275,35 @@ func TestBrowserAuthCallbackFailuresNeverSetSessionCookie(t *testing.T) {
 			rr := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code="+code+"&state="+url.QueryEscape(location.Query().Get("state")), "", loginBindingCookie(t, start))
 			if rr.Code == http.StatusFound || hasSessionCookie(rr) || loginBindingCookie(t, rr).MaxAge >= 0 {
 				t.Fatalf("status=%d cookies=%v", rr.Code, rr.Result().Cookies())
+			}
+		})
+	}
+}
+
+func TestBrowserAuthCallbackClassifiesIdentityDirectoryErrorsWithoutLeakingCredentials(t *testing.T) {
+	tests := []struct {
+		name       string
+		resolveErr error
+		wantStatus int
+	}{
+		{name: "unknown identity", resolveErr: ErrUnknownExternalIdentity, wantStatus: http.StatusUnauthorized},
+		{name: "directory unavailable", resolveErr: ErrIdentityDirectoryUnavailable, wantStatus: http.StatusServiceUnavailable},
+		{name: "unclassified resolver failure", resolveErr: errors.New("resolver failed without classification"), wantStatus: http.StatusServiceUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := newBrowserHarnessRuntimeWithIdentities(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService { return service }, nil, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream }, failingIdentities{err: test.resolveErr}, 0)
+			start := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("state-identity", "nonce-identity").Encode(), "", nil)
+			location, _ := url.Parse(start.Header().Get("Location"))
+			h.idp.setNonce(location.Query().Get("nonce"))
+			target := "/oauth2/idp/callback?code=good&state=" + url.QueryEscape(location.Query().Get("state"))
+			callback := perform(h.router, http.MethodGet, target, "", loginBindingCookie(t, start))
+			if callback.Code != test.wantStatus || callback.Header().Get("Location") != "" || hasSessionCookie(callback) || strings.Contains(callback.Body.String(), "code") {
+				t.Fatalf("callback status=%d headers=%v cookies=%v body=%q", callback.Code, callback.Header(), callback.Result().Cookies(), callback.Body.String())
+			}
+			replay := perform(h.router, http.MethodGet, target, "", loginBindingCookie(t, start))
+			if replay.Code != http.StatusUnauthorized || replay.Header().Get("Location") != "" || hasSessionCookie(replay) {
+				t.Fatalf("replay status=%d headers=%v cookies=%v body=%q", replay.Code, replay.Header(), replay.Result().Cookies(), replay.Body.String())
 			}
 		})
 	}
@@ -373,8 +447,8 @@ func TestBrowserAuthAuthorizeReturns429ForLoginAttemptLimit(t *testing.T) {
 	if rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if rr.Header().Get("Retry-After") == "" {
-		t.Fatal("Retry-After header missing")
+	if rr.Header().Get("Retry-After") != "300" {
+		t.Fatalf("Retry-After=%q", rr.Header().Get("Retry-After"))
 	}
 	if rr.Header().Get("Location") != "" {
 		t.Fatalf("unexpected IdP redirect: %q", rr.Header().Get("Location"))
@@ -383,6 +457,28 @@ func TestBrowserAuthAuthorizeReturns429ForLoginAttemptLimit(t *testing.T) {
 		if strings.HasPrefix(cookie.Name, "nexus_oidc_binding_") && cookie.Value != "" {
 			t.Fatalf("binding cookie set: %+v", cookie)
 		}
+	}
+}
+
+func TestBrowserAuthAuthorizeLimitsOneBrowserWithoutBlockingAnother(t *testing.T) {
+	h := newBrowserHarness(t)
+	browserA := &http.Cookie{Name: oidcBrowserCookie, Value: secretValueForTest()}
+	browserB := &http.Cookie{Name: oidcBrowserCookie, Value: base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("y", 32)))}
+	for i := range 8 {
+		rr := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery(fmt.Sprintf("state-%d", i), fmt.Sprintf("nonce-%d", i)).Encode(), "", browserA)
+		location, _ := url.Parse(rr.Header().Get("Location"))
+		if rr.Code != http.StatusFound || location.Host == "" || location.Path != "/authorize" {
+			t.Fatalf("attempt %d status=%d location=%s", i, rr.Code, location)
+		}
+	}
+	limited := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("state-9", "nonce-9").Encode(), "", browserA)
+	if limited.Code != http.StatusTooManyRequests || limited.Header().Get("Retry-After") != "300" || limited.Header().Get("Location") != "" {
+		t.Fatalf("limited status=%d retry=%q location=%q", limited.Code, limited.Header().Get("Retry-After"), limited.Header().Get("Location"))
+	}
+	other := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("other-state", "other-nonce").Encode(), "", browserB)
+	location, _ := url.Parse(other.Header().Get("Location"))
+	if other.Code != http.StatusFound || location.Path != "/authorize" {
+		t.Fatalf("other status=%d location=%s", other.Code, location)
 	}
 }
 
@@ -635,6 +731,10 @@ func newBrowserHarnessConfigured(t *testing.T, profiles BrowserProfileResolver, 
 }
 
 func newBrowserHarnessRuntime(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService, issuer IDTokenIssuer, upstreamWrap func(UpstreamOIDC) UpstreamOIDC, requestTimeout time.Duration) *browserHarness {
+	return newBrowserHarnessRuntimeWithIdentities(t, profiles, wrap, issuer, upstreamWrap, testIdentities{}, requestTimeout)
+}
+
+func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfileResolver, wrap func(*browserauth.Service) BrowserSessionService, issuer IDTokenIssuer, upstreamWrap func(UpstreamOIDC) UpstreamOIDC, identities ExternalIdentityResolver, requestTimeout time.Duration) *browserHarness {
 	t.Helper()
 	idp := newFakeIDP(t)
 	downstreamKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -652,7 +752,7 @@ func newBrowserHarnessRuntime(t *testing.T, profiles BrowserProfileResolver, wra
 	store.AddEnterpriseUser("ent-2", "user-2")
 	sessions := browserauth.NewService(store)
 	audit := &memoryAudit{}
-	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrap(sessions), Upstream: upstreamWrap(upstream), Identities: testIdentities{}, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout})
+	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrap(sessions), Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,6 +773,12 @@ func (testIdentities) ResolveExternalIdentity(_ context.Context, enterpriseID, i
 		return "", "", fmt.Errorf("unknown identity")
 	}
 	return "ent-1", "user-1", nil
+}
+
+type failingIdentities struct{ err error }
+
+func (f failingIdentities) ResolveExternalIdentity(context.Context, string, string, string) (string, string, error) {
+	return "", "", f.err
 }
 
 type testProfiles struct{}
@@ -703,6 +809,16 @@ type failingSessionService struct {
 	revokeDeadline                                    bool
 	getErr, exchangeErr, consumeErr, createAttemptErr error
 }
+type countingSessionService struct {
+	BrowserSessionService
+	createAttempts int
+}
+
+func (s *countingSessionService) CreateLoginAttempt(ctx context.Context, input browserauth.CreateLoginAttemptInput) (string, string, browserauth.LoginAttempt, error) {
+	s.createAttempts++
+	return s.BrowserSessionService.CreateLoginAttempt(ctx, input)
+}
+
 type blockingSessionService struct {
 	*browserauth.Service
 	blockGet, blockExchange, blockConsume bool
@@ -898,8 +1014,25 @@ func (f *fakeIDP) serveHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func perform(handler http.Handler, method, target, body string, cookie *http.Cookie, headers ...string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	cookies := []*http.Cookie{}
 	if cookie != nil {
+		cookies = append(cookies, cookie)
+	}
+	rr := performOnce(handler, method, target, body, cookies, headers...)
+	if method == http.MethodGet && strings.HasPrefix(target, "/oauth2/authorize?") && rr.Code == http.StatusFound && rr.Header().Get("Location") == target {
+		for _, candidate := range rr.Result().Cookies() {
+			if candidate.Name == oidcBrowserCookie && canonicalOpaque(candidate.Value) {
+				cookies = append(cookies, candidate)
+				return performOnce(handler, method, target, body, cookies, headers...)
+			}
+		}
+	}
+	return rr
+}
+
+func performOnce(handler http.Handler, method, target, body string, cookies []*http.Cookie, headers ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	for _, cookie := range cookies {
 		req.AddCookie(cookie)
 	}
 	for i := 0; i+1 < len(headers); i += 2 {
@@ -941,6 +1074,16 @@ func loginBindingCookie(t *testing.T, rr *httptest.ResponseRecorder) *http.Cooki
 		}
 	}
 	t.Fatalf("binding cookie missing: %v", rr.Header())
+	return nil
+}
+func namedCookie(t *testing.T, rr *httptest.ResponseRecorder, name string) *http.Cookie {
+	t.Helper()
+	for _, cookie := range rr.Result().Cookies() {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+	t.Fatalf("cookie %q missing: %v", name, rr.Header())
 	return nil
 }
 func hasSessionCookie(rr *httptest.ResponseRecorder) bool {
