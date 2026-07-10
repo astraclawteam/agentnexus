@@ -37,12 +37,12 @@ func browserRequestDeadline(next http.Handler, timeout time.Duration) http.Handl
 	})
 }
 func isBrowserAuthPath(path string) bool {
-	return path == "/.well-known/openid-configuration" || strings.HasPrefix(path, "/oauth2/") || strings.HasPrefix(path, "/v1/browser-sessions/")
+	return path == "/.well-known/openid-configuration" || path == "/v1/authorization/decisions" || strings.HasPrefix(path, "/oauth2/") || strings.HasPrefix(path, "/v1/browser-sessions/")
 }
 
 func browserResponseHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/oauth2/") {
+		if strings.HasPrefix(r.URL.Path, "/oauth2/") || r.URL.Path == "/v1/authorization/decisions" {
 			setNoStore(w)
 		}
 		next.ServeHTTP(w, r)

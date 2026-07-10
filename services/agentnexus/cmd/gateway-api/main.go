@@ -69,6 +69,8 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		Audit:                   app.NewPostgresBrowserAuditSink(pool),
 		AuthorizeRateLimiter:    authorizeRateLimiter,
 		AuthorizeSourceResolver: app.NewAuthorizeSourceResolver(browserConfig.TrustedProxyCIDRs),
+		AuthorizationPolicy:     app.NewPostgresAtlasPolicySource(pool),
+		TicketActors:            app.RejectTicketActorAuthenticator{},
 	})
 	if err != nil {
 		cleanup()

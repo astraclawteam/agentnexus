@@ -67,6 +67,25 @@ func TestBuildRouterWiresAuthorizeRateLimiterAndTrustedSourceResolver(t *testing
 	}
 }
 
+func TestBuildRouterWiresAuthorizationPolicyAndFailClosedTicketActor(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	source, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, required := range []string{
+		"AuthorizationPolicy:",
+		"app.NewPostgresAtlasPolicySource(pool)",
+		"TicketActors:",
+		"app.RejectTicketActorAuthenticator{}",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("buildRouter missing %q", required)
+		}
+	}
+}
+
 func TestBuildRouterDoesNotLeakDatabaseCredentialsInStartupError(t *testing.T) {
 	_, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{Enabled: true, DatabaseURL: "postgres://user:supersecret@%zz"})
 	cleanup()

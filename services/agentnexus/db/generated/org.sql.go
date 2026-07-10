@@ -166,6 +166,98 @@ func (q *Queries) GetEnterpriseUser(ctx context.Context, arg GetEnterpriseUserPa
 	return i, err
 }
 
+const getLatestAuthorizationOrgVersion = `-- name: GetLatestAuthorizationOrgVersion :one
+SELECT version_number
+FROM org_versions
+WHERE enterprise_id = $1
+ORDER BY version_number DESC
+LIMIT 1
+`
+
+func (q *Queries) GetLatestAuthorizationOrgVersion(ctx context.Context, enterpriseID string) (int64, error) {
+	row := q.db.QueryRow(ctx, getLatestAuthorizationOrgVersion, enterpriseID)
+	var version_number int64
+	err := row.Scan(&version_number)
+	return version_number, err
+}
+
+const listAuthorizationMemberships = `-- name: ListAuthorizationMemberships :many
+SELECT m.enterprise_id, m.enterprise_user_id, m.org_unit_id, m.role, m.created_at
+FROM org_memberships AS m
+JOIN org_units AS u
+  ON u.enterprise_id = m.enterprise_id
+ AND u.id = m.org_unit_id
+WHERE m.enterprise_id = $1
+  AND m.enterprise_user_id = $2
+  AND u.enterprise_id = $1
+ORDER BY m.org_unit_id, m.role
+`
+
+type ListAuthorizationMembershipsParams struct {
+	EnterpriseID     string
+	EnterpriseUserID string
+}
+
+func (q *Queries) ListAuthorizationMemberships(ctx context.Context, arg ListAuthorizationMembershipsParams) ([]OrgMembership, error) {
+	rows, err := q.db.Query(ctx, listAuthorizationMemberships, arg.EnterpriseID, arg.EnterpriseUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OrgMembership
+	for rows.Next() {
+		var i OrgMembership
+		if err := rows.Scan(
+			&i.EnterpriseID,
+			&i.EnterpriseUserID,
+			&i.OrgUnitID,
+			&i.Role,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuthorizationOrgUnits = `-- name: ListAuthorizationOrgUnits :many
+SELECT id, enterprise_id, parent_id, name, unit_type, created_at
+FROM org_units
+WHERE enterprise_id = $1
+ORDER BY id
+`
+
+func (q *Queries) ListAuthorizationOrgUnits(ctx context.Context, enterpriseID string) ([]OrgUnit, error) {
+	rows, err := q.db.Query(ctx, listAuthorizationOrgUnits, enterpriseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OrgUnit
+	for rows.Next() {
+		var i OrgUnit
+		if err := rows.Scan(
+			&i.ID,
+			&i.EnterpriseID,
+			&i.ParentID,
+			&i.Name,
+			&i.UnitType,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listEnterpriseUsers = `-- name: ListEnterpriseUsers :many
 SELECT id, enterprise_id, display_name, email, phone, created_at
 FROM enterprise_users

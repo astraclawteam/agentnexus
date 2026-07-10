@@ -818,7 +818,7 @@ func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfil
 	if sourceResolver == nil {
 		sourceResolver = NewAuthorizeSourceResolver(nil)
 	}
-	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrap(sessions), Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver})
+	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrap(sessions), Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver, AuthorizationPolicy: authorizationPolicySource(), TicketActors: RejectTicketActorAuthenticator{}})
 	if err != nil {
 		t.Fatal(err)
 	}

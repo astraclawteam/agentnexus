@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 )
 
 const browserSessionCookie = "nexus_browser_session"
@@ -100,6 +101,8 @@ type BrowserAuthDependencies struct {
 	RequestTimeout          time.Duration
 	AuthorizeRateLimiter    browserauth.AuthorizeRateLimiter
 	AuthorizeSourceResolver AuthorizeSourceResolver
+	AuthorizationPolicy     policy.AtlasPolicySource
+	TicketActors            TicketActorAuthenticator
 }
 
 type browserAuthHandler struct {
@@ -112,11 +115,16 @@ type browserAuthHandler struct {
 	issuer                  IDTokenIssuer
 	authorizeRateLimiter    browserauth.AuthorizeRateLimiter
 	authorizeSourceResolver AuthorizeSourceResolver
+	authorization           *authorizationHandler
 }
 
 func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, error) {
-	if deps.Sessions == nil || deps.Upstream == nil || deps.Identities == nil || deps.Profiles == nil || deps.Audit == nil || deps.AuthorizeRateLimiter == nil || deps.AuthorizeSourceResolver == nil {
+	if deps.Sessions == nil || deps.Upstream == nil || deps.Identities == nil || deps.Profiles == nil || deps.Audit == nil || deps.AuthorizeRateLimiter == nil || deps.AuthorizeSourceResolver == nil || deps.AuthorizationPolicy == nil || deps.TicketActors == nil {
 		return nil, errors.New("browser auth dependencies incomplete")
+	}
+	authorization, err := newAuthorizationHandler(authorizationDependencies{EnterpriseID: deps.Config.EnterpriseID, Sessions: deps.Sessions, TicketActors: deps.TicketActors, Evaluator: policy.NewAgentAtlasEvaluator(deps.AuthorizationPolicy)})
+	if err != nil {
+		return nil, err
 	}
 	issuer := deps.TokenIssuer
 	if issuer == nil {
@@ -126,7 +134,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
-	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver}, nil
+	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, authorization: authorization}, nil
 }
 
 func browserRequestTimeout(value time.Duration) (time.Duration, error) {
@@ -147,6 +155,7 @@ func (h *browserAuthHandler) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /oauth2/token", h.token)
 	mux.HandleFunc("GET /v1/browser-sessions/me", h.me)
 	mux.HandleFunc("POST /v1/browser-sessions/logout", h.logout)
+	h.authorization.register(mux)
 }
 
 func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
