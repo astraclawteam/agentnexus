@@ -42,6 +42,14 @@ $$;
 CREATE FUNCTION guard_enterprise_approval_policy_version() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
+	IF TG_OP = 'DELETE' THEN
+		PERFORM pg_advisory_xact_lock(hashtextextended(OLD.enterprise_id, 2));
+	ELSE
+		PERFORM pg_advisory_xact_lock(hashtextextended(NEW.enterprise_id, 2));
+	END IF;
+	IF TG_OP = 'DELETE' THEN
+		RAISE EXCEPTION 'enterprise approval policies cannot be deleted or truncated';
+	END IF;
     IF TG_OP = 'UPDATE' AND (
         NEW.enterprise_id IS DISTINCT FROM OLD.enterprise_id OR
         NEW.policy_version <= OLD.policy_version OR
@@ -54,8 +62,26 @@ END;
 $$;
 
 CREATE TRIGGER guard_enterprise_approval_policy_version
-BEFORE UPDATE ON enterprise_approval_policies
+BEFORE INSERT OR UPDATE OR DELETE ON enterprise_approval_policies
 FOR EACH ROW EXECUTE FUNCTION guard_enterprise_approval_policy_version();
+
+CREATE FUNCTION reject_enterprise_approval_policy_truncate() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+    RAISE EXCEPTION 'enterprise approval policies cannot be deleted or truncated';
+END; $$;
+CREATE TRIGGER reject_enterprise_approval_policy_truncate
+BEFORE TRUNCATE ON enterprise_approval_policies
+FOR EACH STATEMENT EXECUTE FUNCTION reject_enterprise_approval_policy_truncate();
+CREATE FUNCTION guard_enterprise_approval_policy_history() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+    RAISE EXCEPTION 'enterprise approval policy history is immutable and cannot be deleted or truncated';
+END; $$;
+CREATE TRIGGER guard_enterprise_approval_policy_history
+BEFORE UPDATE OR DELETE ON enterprise_approval_policy_versions
+FOR EACH ROW EXECUTE FUNCTION guard_enterprise_approval_policy_history();
+CREATE TRIGGER reject_enterprise_approval_policy_history_truncate
+BEFORE TRUNCATE ON enterprise_approval_policy_versions
+FOR EACH STATEMENT EXECUTE FUNCTION guard_enterprise_approval_policy_history();
 CREATE TRIGGER record_enterprise_approval_policy_version
 AFTER INSERT OR UPDATE ON enterprise_approval_policies
 FOR EACH ROW EXECUTE FUNCTION record_enterprise_approval_policy_version();
@@ -70,11 +96,13 @@ ALTER TABLE approval_queue_items
     ADD COLUMN queue TEXT,
     ADD COLUMN route_input_hash TEXT NOT NULL CHECK (char_length(route_input_hash) = 64 AND route_input_hash ~ '^[0-9a-f]{64}$'),
     ADD COLUMN route_output_hash TEXT NOT NULL CHECK (char_length(route_output_hash) = 64 AND route_output_hash ~ '^[0-9a-f]{64}$'),
-    ADD COLUMN policy_version BIGINT NOT NULL CHECK (policy_version >= 0),
-    ADD COLUMN policy_version_ref BIGINT,
+    ADD COLUMN policy_version BIGINT NOT NULL CHECK (policy_version > 0),
+    ADD COLUMN policy_version_ref BIGINT NOT NULL,
     ADD COLUMN idempotency_key_hash TEXT NOT NULL CHECK (idempotency_key_hash ~ '^[0-9a-f]{64}$'),
     ADD COLUMN reviewer_org_unit_id TEXT,
     ADD COLUMN reviewer_display_name TEXT,
+    ADD COLUMN reviewer_permission TEXT CHECK (reviewer_permission IN ('publish_low_risk','approve_high_risk')),
+    ADD COLUMN reviewer_permission_org_unit_id TEXT,
     ADD CONSTRAINT fk_approval_queue_org_version
         FOREIGN KEY (enterprise_id, org_version)
         REFERENCES org_versions(enterprise_id, version_number),
@@ -84,12 +112,14 @@ ALTER TABLE approval_queue_items
     ADD CONSTRAINT fk_approval_queue_reviewer_snapshot_unit
         FOREIGN KEY (enterprise_id, org_version, reviewer_org_unit_id)
         REFERENCES org_policy_snapshot_units(enterprise_id, version_number, org_unit_id),
+    ADD CONSTRAINT fk_approval_queue_permission_snapshot_unit
+        FOREIGN KEY (enterprise_id, org_version, reviewer_permission_org_unit_id)
+        REFERENCES org_policy_snapshot_units(enterprise_id, version_number, org_unit_id),
     ADD CONSTRAINT fk_approval_queue_policy_version
         FOREIGN KEY (enterprise_id, policy_version_ref)
         REFERENCES enterprise_approval_policy_versions(enterprise_id, policy_version),
     ADD CONSTRAINT chk_approval_queue_policy_version_ref CHECK (
-        (policy_version = 0 AND policy_version_ref IS NULL) OR
-        (policy_version > 0 AND policy_version_ref = policy_version)
+        policy_version_ref = policy_version
     ),
     ADD CONSTRAINT chk_approval_queue_no_self_review
         CHECK (reviewer_user_id IS NULL OR reviewer_user_id <> requester_user_id),
@@ -104,11 +134,14 @@ ALTER TABLE approval_queue_items
         (queue IS NULL OR (queue <> '' AND btrim(queue) = queue))
     ),
     ADD CONSTRAINT chk_approval_queue_route_shape CHECK (
-        (route_mode = 'upward_review' AND reviewer_user_id IS NOT NULL AND reviewer_org_unit_id IS NOT NULL AND reviewer_display_name IS NOT NULL AND queue IS NULL) OR
-        (route_mode = 'enterprise_knowledge_admin_queue' AND reviewer_user_id IS NULL AND queue = 'enterprise_knowledge_admin')
+        (route_mode = 'upward_review' AND reviewer_user_id IS NOT NULL AND reviewer_org_unit_id IS NOT NULL AND reviewer_display_name IS NOT NULL AND reviewer_permission IS NOT NULL AND reviewer_permission_org_unit_id IS NOT NULL AND queue IS NULL) OR
+        (route_mode = 'enterprise_knowledge_admin_queue' AND reviewer_user_id IS NULL AND reviewer_org_unit_id IS NULL AND reviewer_display_name IS NULL AND reviewer_permission IS NULL AND reviewer_permission_org_unit_id IS NULL AND queue = 'enterprise_knowledge_admin')
     ),
     ADD CONSTRAINT chk_approval_queue_status CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled')),
     ADD CONSTRAINT uq_approval_queue_idempotency UNIQUE (enterprise_id, idempotency_key_hash);
+
+ALTER TABLE approval_queue_items ADD CONSTRAINT uq_approval_queue_enterprise_id_id UNIQUE (enterprise_id, id);
+ALTER TABLE audit_events ADD CONSTRAINT uq_audit_events_enterprise_id_id UNIQUE (enterprise_id, id);
 
 CREATE TABLE approval_resolution_idempotency (
     enterprise_id TEXT NOT NULL REFERENCES enterprises(id),
@@ -117,8 +150,8 @@ CREATE TABLE approval_resolution_idempotency (
     requester_user_id TEXT NOT NULL,
     org_version BIGINT NOT NULL CHECK (org_version > 0),
     org_unit_id TEXT NOT NULL,
-    policy_version BIGINT NOT NULL CHECK (policy_version >= 0),
-    policy_version_ref BIGINT,
+    policy_version BIGINT NOT NULL CHECK (policy_version > 0),
+    policy_version_ref BIGINT NOT NULL,
     resource_type TEXT NOT NULL,
     resource_id TEXT NOT NULL,
     action TEXT NOT NULL,
@@ -128,11 +161,15 @@ CREATE TABLE approval_resolution_idempotency (
     reviewer_user_id TEXT,
     reviewer_org_unit_id TEXT,
     reviewer_display_name TEXT,
+    reviewer_permission TEXT CHECK (reviewer_permission IN ('publish_low_risk','approve_high_risk')),
+    reviewer_permission_org_unit_id TEXT,
     org_path JSONB NOT NULL,
     queue TEXT,
     auto_publish BOOLEAN NOT NULL DEFAULT false CHECK (auto_publish = false),
     queue_item_id TEXT,
     audit_event_id TEXT NOT NULL,
+    expected_audit_input_hash TEXT NOT NULL CHECK (expected_audit_input_hash ~ '^[0-9a-f]{64}$'),
+    expected_audit_output_hash TEXT NOT NULL CHECK (expected_audit_output_hash ~ '^[0-9a-f]{64}$'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (enterprise_id, idempotency_key_hash),
     UNIQUE (audit_event_id),
@@ -142,21 +179,22 @@ CREATE TABLE approval_resolution_idempotency (
     FOREIGN KEY (enterprise_id, org_version) REFERENCES org_versions(enterprise_id, version_number),
     FOREIGN KEY (enterprise_id, org_version, org_unit_id) REFERENCES org_policy_snapshot_units(enterprise_id, version_number, org_unit_id),
     FOREIGN KEY (enterprise_id, org_version, reviewer_org_unit_id) REFERENCES org_policy_snapshot_units(enterprise_id, version_number, org_unit_id),
+    FOREIGN KEY (enterprise_id, org_version, reviewer_permission_org_unit_id) REFERENCES org_policy_snapshot_units(enterprise_id, version_number, org_unit_id),
     FOREIGN KEY (enterprise_id, policy_version_ref) REFERENCES enterprise_approval_policy_versions(enterprise_id, policy_version),
-    CHECK ((policy_version=0 AND policy_version_ref IS NULL) OR (policy_version>0 AND policy_version_ref=policy_version)),
+    CHECK (policy_version_ref=policy_version),
     CHECK (reviewer_user_id IS NULL OR reviewer_user_id <> requester_user_id),
     CHECK (
-        (route_mode = 'single_confirmation' AND risk_level = 'low' AND reviewer_user_id IS NULL AND queue IS NULL AND queue_item_id IS NULL) OR
-        (route_mode = 'upward_review' AND reviewer_user_id IS NOT NULL AND reviewer_org_unit_id IS NOT NULL AND reviewer_display_name IS NOT NULL AND queue IS NULL AND queue_item_id IS NOT NULL) OR
-        (route_mode = 'enterprise_knowledge_admin_queue' AND reviewer_user_id IS NULL AND queue = 'enterprise_knowledge_admin' AND queue_item_id IS NOT NULL)
+        (route_mode = 'single_confirmation' AND risk_level = 'low' AND reviewer_user_id IS NULL AND reviewer_org_unit_id IS NULL AND reviewer_display_name IS NULL AND reviewer_permission IS NULL AND reviewer_permission_org_unit_id IS NULL AND queue IS NULL AND queue_item_id IS NULL) OR
+        (route_mode = 'upward_review' AND reviewer_user_id IS NOT NULL AND reviewer_org_unit_id IS NOT NULL AND reviewer_display_name IS NOT NULL AND reviewer_permission IS NOT NULL AND reviewer_permission_org_unit_id IS NOT NULL AND queue IS NULL AND queue_item_id IS NOT NULL) OR
+        (route_mode = 'enterprise_knowledge_admin_queue' AND reviewer_user_id IS NULL AND reviewer_org_unit_id IS NULL AND reviewer_display_name IS NULL AND reviewer_permission IS NULL AND reviewer_permission_org_unit_id IS NULL AND queue = 'enterprise_knowledge_admin' AND queue_item_id IS NOT NULL)
     )
 );
 
 ALTER TABLE approval_resolution_idempotency
-    ADD CONSTRAINT fk_approval_resolution_queue_item FOREIGN KEY (queue_item_id)
-        REFERENCES approval_queue_items(id) DEFERRABLE INITIALLY DEFERRED,
-    ADD CONSTRAINT fk_approval_resolution_audit_event FOREIGN KEY (audit_event_id)
-        REFERENCES audit_events(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT fk_approval_resolution_queue_item FOREIGN KEY (enterprise_id, queue_item_id)
+        REFERENCES approval_queue_items(enterprise_id, id) DEFERRABLE INITIALLY DEFERRED,
+    ADD CONSTRAINT fk_approval_resolution_audit_event FOREIGN KEY (enterprise_id, audit_event_id)
+        REFERENCES audit_events(enterprise_id, id) DEFERRABLE INITIALLY DEFERRED;
 
 CREATE FUNCTION require_sealed_approval_org_version() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -232,22 +270,80 @@ BEGIN
         NOT EXISTS (SELECT 1 FROM enterprise_users u WHERE u.enterprise_id=NEW.enterprise_id AND u.id=NEW.reviewer_user_id AND u.display_name=NEW.reviewer_display_name) OR
         NOT EXISTS (SELECT 1 FROM org_policy_snapshot_memberships m WHERE m.enterprise_id=NEW.enterprise_id AND m.version_number=NEW.org_version AND m.enterprise_user_id=NEW.reviewer_user_id AND m.org_unit_id=NEW.reviewer_org_unit_id AND m.role='manager')
     ) THEN RAISE EXCEPTION 'invalid reviewer evidence'; END IF;
+    IF NEW.reviewer_user_id IS NOT NULL AND (
+        NEW.reviewer_permission IS DISTINCT FROM CASE WHEN NEW.risk_level='low' THEN 'publish_low_risk' ELSE 'approve_high_risk' END OR
+        NOT EXISTS (SELECT 1 FROM org_policy_snapshot_memberships m WHERE m.enterprise_id=NEW.enterprise_id AND m.version_number=NEW.org_version AND m.enterprise_user_id=NEW.reviewer_user_id AND m.org_unit_id=NEW.reviewer_permission_org_unit_id AND m.role=NEW.reviewer_permission) OR
+        NOT EXISTS (
+            WITH RECURSIVE ancestors(org_unit_id, parent_id) AS (
+                SELECT u.org_unit_id, u.parent_id FROM org_policy_snapshot_units u
+                WHERE u.enterprise_id=NEW.enterprise_id AND u.version_number=NEW.org_version AND u.org_unit_id=NEW.org_unit_id
+                UNION ALL
+                SELECT p.org_unit_id, p.parent_id FROM org_policy_snapshot_units p JOIN ancestors a ON p.org_unit_id=a.parent_id
+                WHERE p.enterprise_id=NEW.enterprise_id AND p.version_number=NEW.org_version
+            ) SELECT 1 FROM ancestors WHERE org_unit_id=NEW.reviewer_permission_org_unit_id
+        )
+    ) THEN RAISE EXCEPTION 'invalid reviewer permission evidence'; END IF;
+    IF NEW.route_mode='enterprise_knowledge_admin_queue' AND EXISTS (
+        SELECT 1 FROM org_policy_snapshot_units u WHERE u.enterprise_id=NEW.enterprise_id AND u.version_number=NEW.org_version AND u.org_unit_id=(NEW.org_path->>(jsonb_array_length(NEW.org_path)-1)) AND u.parent_id IS NOT NULL
+    ) THEN RAISE EXCEPTION 'organization admin path must reach root'; END IF;
     RETURN NEW;
 END;
 $$;
 
+CREATE FUNCTION guard_approval_resolution_evidence() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+    RAISE EXCEPTION 'approval resolution evidence is immutable';
+END; $$;
+
+CREATE FUNCTION guard_approval_queue_evidence() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+    IF TG_OP='DELETE' THEN RAISE EXCEPTION 'approval queue evidence is immutable'; END IF;
+    IF NEW.status IS DISTINCT FROM OLD.status AND OLD.status='pending' AND NEW.status IN ('approved', 'rejected', 'cancelled') AND
+       ROW(NEW.id,NEW.enterprise_id,NEW.requester_user_id,NEW.resource_type,NEW.resource_id,NEW.action,NEW.risk_level,NEW.org_unit_id,NEW.reviewer_user_id,NEW.org_version,NEW.risk_reasons,NEW.route_mode,NEW.org_path,NEW.queue,NEW.route_input_hash,NEW.route_output_hash,NEW.policy_version,NEW.idempotency_key_hash,NEW.reviewer_org_unit_id,NEW.reviewer_display_name,NEW.reviewer_permission,NEW.reviewer_permission_org_unit_id,NEW.created_at)
+       IS NOT DISTINCT FROM
+       ROW(OLD.id,OLD.enterprise_id,OLD.requester_user_id,OLD.resource_type,OLD.resource_id,OLD.action,OLD.risk_level,OLD.org_unit_id,OLD.reviewer_user_id,OLD.org_version,OLD.risk_reasons,OLD.route_mode,OLD.org_path,OLD.queue,OLD.route_input_hash,OLD.route_output_hash,OLD.policy_version,OLD.idempotency_key_hash,OLD.reviewer_org_unit_id,OLD.reviewer_display_name,OLD.reviewer_permission,OLD.reviewer_permission_org_unit_id,OLD.created_at)
+    THEN RETURN NEW; END IF;
+    IF NEW.status IS NOT DISTINCT FROM OLD.status AND NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'approval queue evidence is immutable';
+END; $$;
+
+CREATE FUNCTION reject_approval_evidence_truncate() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'approval evidence truncate is forbidden'; END; $$;
+
+CREATE FUNCTION validate_approval_resolution_links() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE linked_audit audit_events%ROWTYPE; linked_queue approval_queue_items%ROWTYPE;
+BEGIN
+    SELECT * INTO linked_audit FROM audit_events WHERE enterprise_id=NEW.enterprise_id AND id=NEW.audit_event_id;
+    IF NOT FOUND OR linked_audit.input_hash IS DISTINCT FROM NEW.expected_audit_input_hash OR linked_audit.output_hash IS DISTINCT FROM NEW.expected_audit_output_hash OR linked_audit.actor_user_id IS DISTINCT FROM NEW.requester_user_id OR linked_audit.resource_type IS DISTINCT FROM NEW.resource_type OR linked_audit.resource_id IS DISTINCT FROM NEW.resource_id OR linked_audit.action <> 'approval.route.resolve' OR linked_audit.decision <> NEW.route_mode THEN
+        RAISE EXCEPTION 'approval audit evidence mismatch';
+    END IF;
+    IF NEW.queue_item_id IS NOT NULL THEN
+        SELECT * INTO linked_queue FROM approval_queue_items WHERE enterprise_id=NEW.enterprise_id AND id=NEW.queue_item_id;
+        IF NOT FOUND OR linked_queue.route_input_hash<>NEW.expected_audit_input_hash OR linked_queue.route_output_hash<>NEW.expected_audit_output_hash OR linked_queue.idempotency_key_hash<>NEW.idempotency_key_hash OR linked_queue.route_mode<>NEW.route_mode THEN RAISE EXCEPTION 'approval queue evidence mismatch'; END IF;
+    END IF;
+    RETURN NULL;
+END; $$;
+
 CREATE TRIGGER require_sealed_approval_org_version
-BEFORE INSERT OR UPDATE ON approval_queue_items
+BEFORE INSERT ON approval_queue_items
 FOR EACH ROW EXECUTE FUNCTION require_sealed_approval_org_version();
 CREATE TRIGGER require_sealed_approval_resolution_org_version
-BEFORE INSERT OR UPDATE ON approval_resolution_idempotency
+BEFORE INSERT ON approval_resolution_idempotency
 FOR EACH ROW EXECUTE FUNCTION require_sealed_approval_org_version();
 CREATE TRIGGER validate_approval_queue_route_evidence
-BEFORE INSERT OR UPDATE ON approval_queue_items
+BEFORE INSERT ON approval_queue_items
 FOR EACH ROW EXECUTE FUNCTION validate_approval_route_evidence();
 CREATE TRIGGER validate_approval_resolution_route_evidence
-BEFORE INSERT OR UPDATE ON approval_resolution_idempotency
+BEFORE INSERT ON approval_resolution_idempotency
 FOR EACH ROW EXECUTE FUNCTION validate_approval_route_evidence();
+CREATE TRIGGER guard_approval_resolution_evidence
+BEFORE UPDATE OR DELETE ON approval_resolution_idempotency FOR EACH ROW EXECUTE FUNCTION guard_approval_resolution_evidence();
+CREATE TRIGGER guard_approval_queue_evidence
+BEFORE UPDATE OR DELETE ON approval_queue_items FOR EACH ROW EXECUTE FUNCTION guard_approval_queue_evidence();
+CREATE TRIGGER reject_approval_resolution_truncate BEFORE TRUNCATE ON approval_resolution_idempotency FOR EACH STATEMENT EXECUTE FUNCTION reject_approval_evidence_truncate();
+CREATE TRIGGER reject_approval_queue_truncate BEFORE TRUNCATE ON approval_queue_items FOR EACH STATEMENT EXECUTE FUNCTION reject_approval_evidence_truncate();
+CREATE CONSTRAINT TRIGGER validate_approval_resolution_links AFTER INSERT ON approval_resolution_idempotency DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_approval_resolution_links();
 -- +goose StatementEnd
 
 -- +goose Down
@@ -256,6 +352,15 @@ DROP TRIGGER IF EXISTS require_sealed_approval_org_version ON approval_queue_ite
 DROP TRIGGER IF EXISTS require_sealed_approval_resolution_org_version ON approval_resolution_idempotency;
 DROP TRIGGER IF EXISTS validate_approval_queue_route_evidence ON approval_queue_items;
 DROP TRIGGER IF EXISTS validate_approval_resolution_route_evidence ON approval_resolution_idempotency;
+DROP TRIGGER IF EXISTS guard_approval_resolution_evidence ON approval_resolution_idempotency;
+DROP TRIGGER IF EXISTS guard_approval_queue_evidence ON approval_queue_items;
+DROP TRIGGER IF EXISTS reject_approval_resolution_truncate ON approval_resolution_idempotency;
+DROP TRIGGER IF EXISTS reject_approval_queue_truncate ON approval_queue_items;
+DROP TRIGGER IF EXISTS validate_approval_resolution_links ON approval_resolution_idempotency;
+DROP FUNCTION IF EXISTS validate_approval_resolution_links();
+DROP FUNCTION IF EXISTS reject_approval_evidence_truncate();
+DROP FUNCTION IF EXISTS guard_approval_queue_evidence();
+DROP FUNCTION IF EXISTS guard_approval_resolution_evidence();
 DROP FUNCTION IF EXISTS validate_approval_route_evidence();
 DROP FUNCTION IF EXISTS require_sealed_approval_org_version();
 DROP TABLE IF EXISTS approval_resolution_idempotency;
@@ -267,6 +372,7 @@ ALTER TABLE approval_queue_items
     DROP CONSTRAINT IF EXISTS chk_approval_queue_no_self_review,
     DROP CONSTRAINT IF EXISTS fk_approval_queue_snapshot_unit,
     DROP CONSTRAINT IF EXISTS fk_approval_queue_reviewer_snapshot_unit,
+    DROP CONSTRAINT IF EXISTS fk_approval_queue_permission_snapshot_unit,
     DROP CONSTRAINT IF EXISTS fk_approval_queue_org_version,
     DROP CONSTRAINT IF EXISTS fk_approval_queue_policy_version,
     DROP CONSTRAINT IF EXISTS chk_approval_queue_policy_version_ref,
@@ -274,6 +380,8 @@ ALTER TABLE approval_queue_items
     DROP COLUMN IF EXISTS route_input_hash,
     DROP COLUMN IF EXISTS reviewer_display_name,
     DROP COLUMN IF EXISTS reviewer_org_unit_id,
+    DROP COLUMN IF EXISTS reviewer_permission,
+    DROP COLUMN IF EXISTS reviewer_permission_org_unit_id,
     DROP COLUMN IF EXISTS idempotency_key_hash,
     DROP COLUMN IF EXISTS policy_version_ref,
     DROP COLUMN IF EXISTS queue,
@@ -282,8 +390,15 @@ ALTER TABLE approval_queue_items
     DROP COLUMN IF EXISTS risk_reasons,
     DROP COLUMN IF EXISTS org_version,
     DROP COLUMN IF EXISTS policy_version;
+ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS uq_audit_events_enterprise_id_id;
+ALTER TABLE approval_queue_items DROP CONSTRAINT IF EXISTS uq_approval_queue_enterprise_id_id;
 DROP TRIGGER IF EXISTS guard_enterprise_approval_policy_version ON enterprise_approval_policies;
 DROP TRIGGER IF EXISTS record_enterprise_approval_policy_version ON enterprise_approval_policies;
+DROP TRIGGER IF EXISTS reject_enterprise_approval_policy_truncate ON enterprise_approval_policies;
+DROP TRIGGER IF EXISTS guard_enterprise_approval_policy_history ON enterprise_approval_policy_versions;
+DROP TRIGGER IF EXISTS reject_enterprise_approval_policy_history_truncate ON enterprise_approval_policy_versions;
+DROP FUNCTION IF EXISTS guard_enterprise_approval_policy_history();
+DROP FUNCTION IF EXISTS reject_enterprise_approval_policy_truncate();
 DROP FUNCTION IF EXISTS record_enterprise_approval_policy_version();
 DROP FUNCTION IF EXISTS guard_enterprise_approval_policy_version();
 DROP TABLE IF EXISTS enterprise_approval_policy_versions;

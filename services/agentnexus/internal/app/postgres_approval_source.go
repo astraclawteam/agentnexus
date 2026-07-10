@@ -100,19 +100,17 @@ func (s *PostgresApprovalSource) LoadApprovalSnapshot(ctx context.Context, enter
 	if err != nil || version != requestedVersion {
 		return LoadedApprovalSnapshot{}, errors.Join(approval.ErrApprovalUnavailable, err)
 	}
-	approvalPolicy := approval.DefaultPolicy()
-	policyVersion := int64(0)
+	var approvalPolicy approval.Policy
+	var policyVersion int64
 	policyRow, err := tx.GetEnterpriseApprovalPolicy(ctx, enterpriseID)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil {
 		return LoadedApprovalSnapshot{}, errors.Join(approval.ErrApprovalUnavailable, err)
 	}
-	if err == nil {
-		if policyRow.EnterpriseID != enterpriseID || policyRow.PolicyVersion < 1 || policyRow.MaxLowImpactedUsers < 0 || policyRow.MaxLowImpactedOrgUnits < 0 {
-			return LoadedApprovalSnapshot{}, approval.ErrApprovalUnavailable
-		}
-		approvalPolicy = approval.Policy{MinimumRisk: approval.RiskLevel(policyRow.MinimumRisk), MaxLowImpactedUsers: int(policyRow.MaxLowImpactedUsers), MaxLowImpactedOrgUnits: int(policyRow.MaxLowImpactedOrgUnits)}
-		policyVersion = policyRow.PolicyVersion
+	if policyRow.EnterpriseID != enterpriseID || policyRow.PolicyVersion < 1 || policyRow.MaxLowImpactedUsers < 0 || policyRow.MaxLowImpactedOrgUnits < 0 {
+		return LoadedApprovalSnapshot{}, approval.ErrApprovalUnavailable
 	}
+	approvalPolicy = approval.Policy{MinimumRisk: approval.RiskLevel(policyRow.MinimumRisk), MaxLowImpactedUsers: int(policyRow.MaxLowImpactedUsers), MaxLowImpactedOrgUnits: int(policyRow.MaxLowImpactedOrgUnits)}
+	policyVersion = policyRow.PolicyVersion
 	units, err := tx.ListApprovalOrgUnits(ctx, db.ListApprovalOrgUnitsParams{EnterpriseID: enterpriseID, VersionNumber: version})
 	if err != nil || len(units) > approval.MaxSnapshotOrgUnits {
 		return LoadedApprovalSnapshot{}, errors.Join(approval.ErrApprovalUnavailable, err)

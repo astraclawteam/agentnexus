@@ -59,6 +59,7 @@ func TestHMACChangeFactsVerifierRejectsExpiredAndLongLivedAttestations(t *testin
 		t.Fatal(err)
 	}
 	for _, input := range []ChangeFactsVerificationInput{
+		func() ChangeFactsVerificationInput { v := verifiedFactsInput(now); v.FactsExpiresAt = now; return v }(),
 		func() ChangeFactsVerificationInput {
 			v := verifiedFactsInput(now)
 			v.FactsExpiresAt = now.Add(-time.Second)

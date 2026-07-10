@@ -48,6 +48,19 @@ func TestApprovalMigrationBindsImmutableRouteEvidence(t *testing.T) {
 		"non-adjacent organization path",
 		"invalid reviewer evidence",
 		"validate_approval_resolution_route_evidence",
+		"enterprise approval policies cannot be deleted or truncated",
+		"enterprise approval policy history is immutable and cannot be deleted or truncated",
+		"before insert on approval_queue_items",
+		"approval resolution evidence is immutable",
+		"approval queue evidence is immutable",
+		"pending' and new.status in ('approved', 'rejected', 'cancelled')",
+		"foreign key (enterprise_id, audit_event_id)",
+		"expected_audit_input_hash",
+		"expected_audit_output_hash",
+		"reviewer_permission",
+		"approve_high_risk",
+		"publish_low_risk",
+		"organization admin path must reach root",
 	}
 	for _, value := range required {
 		if !strings.Contains(sql, value) {
@@ -67,7 +80,7 @@ func TestApprovalQueriesAreVersionTenantAndLimitScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	sql := strings.ToLower(string(raw))
-	for _, value := range []string{"getlatestapprovalorgversion", "getenterpriseapprovalpolicy", "getcurrentapprovalpolicyversion", "listapprovalorgunits", "listapprovalmemberships", "listapprovalusers", "insertapprovalqueueitem", "enterprise_id = $1", "version_number = $2", "limit 10001", "limit 100001"} {
+	for _, value := range []string{"getlatestapprovalorgversion", "getenterpriseapprovalpolicy", "getcurrentapprovalpolicyversion", "acquireenterpriseapprovalpolicylock", "hashtextextended($1, 2)", "listapprovalorgunits", "listapprovalmemberships", "listapprovalusers", "insertapprovalqueueitem", "enterprise_id = $1", "version_number = $2", "limit 10001", "limit 100001"} {
 		if !strings.Contains(sql, value) {
 			t.Errorf("queries missing %q", value)
 		}

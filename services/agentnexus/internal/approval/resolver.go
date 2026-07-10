@@ -161,16 +161,19 @@ type Request struct {
 }
 
 type Route struct {
-	Mode                RouteMode    `json:"mode"`
-	RiskLevel           RiskLevel    `json:"risk_level"`
-	RiskReasons         []RiskReason `json:"risk_reasons"`
-	RequesterUserID     string       `json:"requester_user_id"`
-	ReviewerUserID      string       `json:"reviewer_user_id,omitempty"`
-	ReviewerDisplayName string       `json:"reviewer_display_name,omitempty"`
-	OrgPath             []string     `json:"org_path"`
-	Queue               string       `json:"queue,omitempty"`
-	AutoPublish         bool         `json:"auto_publish"`
-	PolicyVersion       int64        `json:"policy_version"`
+	Mode                        RouteMode    `json:"mode"`
+	RiskLevel                   RiskLevel    `json:"risk_level"`
+	RiskReasons                 []RiskReason `json:"risk_reasons"`
+	RequesterUserID             string       `json:"requester_user_id"`
+	ReviewerUserID              string       `json:"reviewer_user_id,omitempty"`
+	ReviewerDisplayName         string       `json:"reviewer_display_name,omitempty"`
+	OrgPath                     []string     `json:"org_path"`
+	Queue                       string       `json:"queue,omitempty"`
+	AutoPublish                 bool         `json:"auto_publish"`
+	PolicyVersion               int64        `json:"policy_version"`
+	AdminRootReached            bool         `json:"-"`
+	ReviewerPermission          Permission   `json:"-"`
+	ReviewerPermissionOrgUnitID string       `json:"-"`
 }
 
 type Resolver struct {
@@ -208,7 +211,7 @@ func (r *Resolver) Resolve(ctx context.Context, req Request, snapshot OrgSnapsho
 	permission := PermissionApproveHighRisk
 	if assessment.Level == RiskLow {
 		permission = PermissionPublishLowRisk
-		allowed := permissionIndex.allows(req.RequesterUserID, permission)
+		_, allowed := permissionIndex.allows(req.RequesterUserID, permission)
 		if allowed {
 			base.RiskReasons = append(base.RiskReasons, RiskReasonExplicitConfirmation)
 			sort.Slice(base.RiskReasons, func(i, j int) bool { return base.RiskReasons[i] < base.RiskReasons[j] })
@@ -246,11 +249,13 @@ func (r *Resolver) Resolve(ctx context.Context, req Request, snapshot OrgSnapsho
 			if candidateID == req.RequesterUserID {
 				continue
 			}
-			allowed := permissionIndex.allows(candidateID, permission)
+			permissionScope, allowed := permissionIndex.allows(candidateID, permission)
 			if allowed {
 				base.Mode = ModeUpwardReview
 				base.ReviewerUserID = candidateID
 				base.ReviewerDisplayName = displayNames[candidateID]
+				base.ReviewerPermission = permission
+				base.ReviewerPermissionOrgUnitID = permissionScope
 				base.OrgPath = append([]string{}, path...)
 				return base, nil
 			}
@@ -259,15 +264,22 @@ func (r *Resolver) Resolve(ctx context.Context, req Request, snapshot OrgSnapsho
 	base.Mode = ModeEnterpriseKnowledgeAdminQueue
 	base.Queue = EnterpriseKnowledgeAdminQueue
 	base.OrgPath = append([]string{}, path...)
+	base.AdminRootReached = true
 	return base, nil
 }
 
-type snapshotPermissionIndex map[string]map[Permission]bool
+type snapshotPermissionGrant struct {
+	scope string
+	depth int
+}
+type snapshotPermissionIndex map[string]map[Permission]snapshotPermissionGrant
 
 func newSnapshotPermissionIndex(snapshot OrgSnapshot, parents map[string]string, targetUnitID string, observe func(string)) snapshotPermissionIndex {
-	ancestors := make(map[string]struct{}, MaxSnapshotOrgDepth)
+	ancestors := make(map[string]int, MaxSnapshotOrgDepth)
+	depth := 0
 	for cursor := targetUnitID; cursor != ""; cursor = parents[cursor] {
-		ancestors[cursor] = struct{}{}
+		ancestors[cursor] = depth
+		depth++
 	}
 	index := make(snapshotPermissionIndex)
 	for _, membership := range snapshot.memberships {
@@ -278,19 +290,24 @@ func newSnapshotPermissionIndex(snapshot OrgSnapshot, parents map[string]string,
 		if permission != PermissionPublishLowRisk && permission != PermissionApproveHighRisk {
 			continue
 		}
-		if _, covers := ancestors[membership.OrgUnitID]; !covers {
+		grantDepth, covers := ancestors[membership.OrgUnitID]
+		if !covers {
 			continue
 		}
 		if index[membership.UserID] == nil {
-			index[membership.UserID] = make(map[Permission]bool)
+			index[membership.UserID] = make(map[Permission]snapshotPermissionGrant)
 		}
-		index[membership.UserID][permission] = true
+		existing, exists := index[membership.UserID][permission]
+		if !exists || grantDepth < existing.depth {
+			index[membership.UserID][permission] = snapshotPermissionGrant{scope: membership.OrgUnitID, depth: grantDepth}
+		}
 	}
 	return index
 }
 
-func (i snapshotPermissionIndex) allows(userID string, permission Permission) bool {
-	return i[userID][permission]
+func (i snapshotPermissionIndex) allows(userID string, permission Permission) (string, bool) {
+	grant, ok := i[userID][permission]
+	return grant.scope, ok
 }
 
 func canonicalRequest(req Request) bool {

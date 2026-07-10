@@ -23,7 +23,7 @@ func TestResolveUnauthorizedLowWalksUpUsingPublishPermission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if route.Mode != ModeUpwardReview || route.ReviewerUserID != "dept-head" || route.ReviewerDisplayName != "Department Head" || !reflect.DeepEqual(route.OrgPath, []string{"team", "dept"}) || route.AutoPublish {
+	if route.Mode != ModeUpwardReview || route.ReviewerUserID != "dept-head" || route.ReviewerDisplayName != "Department Head" || route.ReviewerPermission != PermissionPublishLowRisk || route.ReviewerPermissionOrgUnitID != "dept" || !reflect.DeepEqual(route.OrgPath, []string{"team", "dept"}) || route.AutoPublish {
 		t.Fatalf("route=%+v", route)
 	}
 }
@@ -45,7 +45,7 @@ func TestResolveMediumAndHighUseApprovePermissionAndExcludeRequester(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			if route.Mode != ModeUpwardReview || route.ReviewerUserID != "dept-head" || route.ReviewerUserID == req.RequesterUserID || route.AutoPublish {
+			if route.Mode != ModeUpwardReview || route.ReviewerUserID != "dept-head" || route.ReviewerUserID == req.RequesterUserID || route.ReviewerPermission != PermissionApproveHighRisk || route.ReviewerPermissionOrgUnitID != "dept" || route.AutoPublish {
 				t.Fatalf("route=%+v", route)
 			}
 		})

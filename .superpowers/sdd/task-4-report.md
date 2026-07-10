@@ -123,16 +123,36 @@ Tests prove a `manager` role has no implicit approval permission and only explic
 
 Strict HTTP coverage includes single Content-Type, JSON object, unknown keys, duplicate keys, nulls, trailing documents, canonical unique arrays, 16 KiB limit, session actor, CaseTicket actor, no-store, timeout, and candidate/error non-disclosure.
 
+### Third review hardening: immutable evidence and shared policy serialization
+
+1. RED: `go test ./internal/approval -run TestApprovalMigration -count=1`
+   - Failed on missing delete/truncate guards, policy advisory-lock contract, insert-only route validation, immutable queue/resolution evidence, enterprise-composite links, audit hashes, reviewer-permission evidence, and full-root administrator route evidence.
+2. RED: `go test ./internal/app -run 'TestHMACChangeFactsVerifierRejectsExpired|TestPostgresApprovalSourceLoadsEnterprisePolicy|TestRecordedRouteRejects' -count=1`
+   - Accepted an expiry equal to `now`, silently substituted the default policy when the enterprise policy was absent, and accepted a prefixed administrator path.
+3. GREEN:
+   - Policy rows now serialize on a dedicated enterprise advisory lock and cannot be deleted or truncated; the approval writer takes locks in org -> policy -> audit order and missing policies fail closed.
+   - Resolution evidence is insert-only. Queue evidence is immutable except for one-way `pending` -> terminal status transitions, so later org/policy versions do not prevent a legitimate terminal status change.
+   - Resolution links to queue/audit rows use enterprise-composite foreign keys and a deferred content validator. Expected audit input/output hashes are stored with the resolution and checked at commit.
+   - Reviewer routes persist the exact permission and covering snapshot org unit; both application and database validation require the risk-appropriate permission, explicit snapshot membership, target coverage, and a manager at the selected review unit.
+   - Administrator fallback records a full root traversal; application and database checks reject prefix paths. Replayed database routes restore all internal permission/root evidence.
+   - Signed change facts now require `expires_at` strictly after `now`.
+4. GREEN verification:
+   - `go test ./internal/approval -run TestApprovalMigration -count=1`
+   - `go test ./internal/app -run 'TestHMACChangeFactsVerifierRejectsExpired|TestPostgresApprovalSourceLoadsEnterprisePolicy|TestRecordedRouteRejects|TestApprovalQueueStatusTransitionsAreOneWayAfterVersionsAdvance|TestPostgresApprovalStoreUsesOneTransactionAndAuditLock' -count=1`
+   - `go test ./internal/approval ./internal/app ./internal/policy ./db/generated -run 'Approval|Resolve|Atlas|Authorization' -count=20`
+
+No live PostgreSQL service was available: Docker Desktop was installed but its Linux engine was not running. Migration SQL is covered by contract tests and sqlc generation; live trigger/FK/contention execution remains deferred to Task 6.
+
 ## Final Verification
 
 Run from `services/agentnexus`:
 
-- `go test ./internal/approval ./internal/app ./internal/policy ./db/generated -run 'Approval|Atlas|Authorization' -count=20`
+- `go test ./internal/approval ./internal/app ./internal/policy ./db/generated -run 'Approval|Resolve|Atlas|Authorization' -count=20`
   - PASS: approval, app, and policy; generated package has no tests.
 - `go test ./... -count=1`
   - PASS: all packages, including gateway API, app, approval, policy, Task 2/3 packages, e2e, and integration.
-- `go vet ./...`
-  - PASS.
+- `$env:GOFLAGS='-buildvcs=false'; go vet ./...`
+  - PASS (`-buildvcs=false` is required in this worktree because VCS stamping cannot resolve its Git metadata).
 - `go build -buildvcs=false -o $TEMP/agentnexus-connector-agent.exe ./cmd/connector-agent`
   - PASS.
 - `go build -buildvcs=false -o $TEMP/agentnexus-connector-worker.exe ./cmd/connector-worker`

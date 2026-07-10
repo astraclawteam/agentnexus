@@ -214,7 +214,7 @@ func randomApprovalID(source io.Reader, prefix string) (string, error) {
 }
 
 func validRecordedRoute(req approval.Request, route approval.Route) bool {
-	if req.EnterpriseID == "" || req.RequesterUserID == "" || req.OrgVersion < 1 || len(req.IdempotencyHash) != 64 || len(req.ReplayHash) != 64 || route.PolicyVersion != req.PolicyVersion || route.RequesterUserID != req.RequesterUserID || route.AutoPublish || len(route.RiskReasons) == 0 || route.OrgPath == nil || len(route.OrgPath) == 0 || route.ReviewerUserID == req.RequesterUserID {
+	if req.EnterpriseID == "" || req.RequesterUserID == "" || req.OrgVersion < 1 || req.PolicyVersion < 1 || len(req.IdempotencyHash) != 64 || len(req.ReplayHash) != 64 || route.PolicyVersion != req.PolicyVersion || route.RequesterUserID != req.RequesterUserID || route.AutoPublish || len(route.RiskReasons) == 0 || route.OrgPath == nil || len(route.OrgPath) == 0 || route.ReviewerUserID == req.RequesterUserID {
 		return false
 	}
 	allowedReasons := map[approval.RiskReason]bool{
@@ -241,12 +241,23 @@ func validRecordedRoute(req approval.Request, route approval.Route) bool {
 	}
 	switch route.Mode {
 	case approval.ModeSingleConfirmation:
-		return route.RiskLevel == approval.RiskLow && route.ReviewerUserID == "" && route.Queue == ""
+		return route.RiskLevel == approval.RiskLow && route.ReviewerUserID == "" && route.ReviewerDisplayName == "" && route.ReviewerPermission == "" && route.ReviewerPermissionOrgUnitID == "" && !route.AdminRootReached && route.Queue == ""
 	case approval.ModeUpwardReview:
-		return route.ReviewerUserID != "" && canonicalAuthorizationValue(route.ReviewerDisplayName) && route.Queue == ""
+		expected := approval.PermissionApproveHighRisk
+		if route.RiskLevel == approval.RiskLow {
+			expected = approval.PermissionPublishLowRisk
+		}
+		return canonicalAuthorizationValue(route.ReviewerUserID) && canonicalAuthorizationValue(route.ReviewerDisplayName) && route.ReviewerPermission == expected && canonicalAuthorizationValue(route.ReviewerPermissionOrgUnitID) && seenUnits[route.ReviewerPermissionOrgUnitID] && !route.AdminRootReached && route.Queue == ""
 	case approval.ModeEnterpriseKnowledgeAdminQueue:
-		return route.ReviewerUserID == "" && route.Queue == approval.EnterpriseKnowledgeAdminQueue
+		return route.ReviewerUserID == "" && route.ReviewerDisplayName == "" && route.ReviewerPermission == "" && route.ReviewerPermissionOrgUnitID == "" && route.AdminRootReached && route.Queue == approval.EnterpriseKnowledgeAdminQueue
 	default:
 		return false
 	}
+}
+
+func validApprovalQueueStatusTransition(current, next string) bool {
+	if current == next {
+		return current == "pending" || current == "approved" || current == "rejected" || current == "cancelled"
+	}
+	return current == "pending" && (next == "approved" || next == "rejected" || next == "cancelled")
 }

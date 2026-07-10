@@ -138,7 +138,7 @@ func (v *HMACChangeFactsVerifier) VerifyChangeFacts(ctx context.Context, input C
 	now := v.now().UTC()
 	issued := input.FactsIssuedAt.UTC()
 	expires := input.FactsExpiresAt.UTC()
-	if issued.After(now.Add(30*time.Second)) || expires.Before(now) || !expires.After(issued) || expires.Sub(issued) > maxFactsAttestationTTL {
+	if issued.After(now.Add(30*time.Second)) || !expires.After(now) || !expires.After(issued) || expires.Sub(issued) > maxFactsAttestationTTL {
 		return unverified, nil
 	}
 	digest := sha256.Sum256(payload)

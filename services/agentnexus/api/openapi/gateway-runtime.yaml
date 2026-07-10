@@ -377,7 +377,7 @@ components:
             - false
         policy_version:
           type: integer
-          minimum: 0
+          minimum: 1
     ApprovalResolveRequest:
       type: object
       additionalProperties: false

@@ -16,6 +16,7 @@ import (
 
 type approvalWriteTx interface {
 	AcquireEnterpriseOrgPublicationLock(context.Context, string) (any, error)
+	AcquireEnterpriseApprovalPolicyLock(context.Context, string) (any, error)
 	AcquireEnterpriseAuditLock(context.Context, string) (any, error)
 	GetLatestApprovalOrgVersion(context.Context, string) (int64, error)
 	GetCurrentApprovalPolicyVersion(context.Context, string) (int64, error)
@@ -56,6 +57,9 @@ func (t *postgresApprovalWriteTx) AcquireEnterpriseAuditLock(ctx context.Context
 func (t *postgresApprovalWriteTx) AcquireEnterpriseOrgPublicationLock(ctx context.Context, enterpriseID string) (any, error) {
 	return t.queries.AcquireEnterpriseOrgPublicationLock(ctx, enterpriseID)
 }
+func (t *postgresApprovalWriteTx) AcquireEnterpriseApprovalPolicyLock(ctx context.Context, enterpriseID string) (any, error) {
+	return t.queries.AcquireEnterpriseApprovalPolicyLock(ctx, enterpriseID)
+}
 func (t *postgresApprovalWriteTx) GetLatestApprovalOrgVersion(ctx context.Context, enterpriseID string) (int64, error) {
 	return t.queries.GetLatestApprovalOrgVersion(ctx, enterpriseID)
 }
@@ -95,6 +99,9 @@ func (s *PostgresApprovalStore) LookupResolution(ctx context.Context, enterprise
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if _, err := tx.AcquireEnterpriseOrgPublicationLock(ctx, enterpriseID); err != nil {
+		return approval.Route{}, false, err
+	}
+	if _, err := tx.AcquireEnterpriseApprovalPolicyLock(ctx, enterpriseID); err != nil {
 		return approval.Route{}, false, err
 	}
 	row, err := tx.GetApprovalResolution(ctx, db.GetApprovalResolutionParams{EnterpriseID: enterpriseID, IdempotencyKeyHash: idempotencyHash})
@@ -152,6 +159,9 @@ func (s *PostgresApprovalStore) RecordResolution(ctx context.Context, req approv
 	if _, err := tx.AcquireEnterpriseOrgPublicationLock(ctx, req.EnterpriseID); err != nil {
 		return approval.Route{}, err
 	}
+	if _, err := tx.AcquireEnterpriseApprovalPolicyLock(ctx, req.EnterpriseID); err != nil {
+		return approval.Route{}, err
+	}
 	existing, err := tx.GetApprovalResolution(ctx, db.GetApprovalResolutionParams{EnterpriseID: req.EnterpriseID, IdempotencyKeyHash: req.IdempotencyHash})
 	if err == nil {
 		if existing.RequestHash != req.ReplayHash {
@@ -201,12 +211,12 @@ func (s *PostgresApprovalStore) RecordResolution(ctx context.Context, req approv
 	if route.Mode == approval.ModeUpwardReview {
 		reviewerUnit = route.OrgPath[len(route.OrgPath)-1]
 	}
-	inserted, err := tx.InsertApprovalResolution(ctx, db.InsertApprovalResolutionParams{EnterpriseID: req.EnterpriseID, IdempotencyKeyHash: req.IdempotencyHash, RequestHash: req.ReplayHash, RequesterUserID: req.RequesterUserID, OrgVersion: req.OrgVersion, OrgUnitID: req.OrgUnitID, PolicyVersion: req.PolicyVersion, ResourceType: req.ResourceType, ResourceID: req.ResourceID, Action: req.Action, RouteMode: string(route.Mode), RiskLevel: string(route.RiskLevel), RiskReasons: reasons, ReviewerUserID: textValue(route.ReviewerUserID), ReviewerOrgUnitID: textValue(reviewerUnit), ReviewerDisplayName: textValue(route.ReviewerDisplayName), OrgPath: path, Queue: textValue(route.Queue), QueueItemID: textValue(queueID), AuditEventID: auditID})
+	inserted, err := tx.InsertApprovalResolution(ctx, db.InsertApprovalResolutionParams{EnterpriseID: req.EnterpriseID, IdempotencyKeyHash: req.IdempotencyHash, RequestHash: req.ReplayHash, RequesterUserID: req.RequesterUserID, OrgVersion: req.OrgVersion, OrgUnitID: req.OrgUnitID, PolicyVersion: req.PolicyVersion, ResourceType: req.ResourceType, ResourceID: req.ResourceID, Action: req.Action, RouteMode: string(route.Mode), RiskLevel: string(route.RiskLevel), RiskReasons: reasons, ReviewerUserID: textValue(route.ReviewerUserID), ReviewerOrgUnitID: textValue(reviewerUnit), ReviewerDisplayName: textValue(route.ReviewerDisplayName), ReviewerPermission: textValue(string(route.ReviewerPermission)), ReviewerPermissionOrgUnitID: textValue(route.ReviewerPermissionOrgUnitID), OrgPath: path, Queue: textValue(route.Queue), QueueItemID: textValue(queueID), AuditEventID: auditID, ExpectedAuditInputHash: inputHash, ExpectedAuditOutputHash: outputHash})
 	if err != nil || inserted != 1 {
 		return approval.Route{}, errors.Join(ErrApprovalIdempotencyConflict, err)
 	}
 	if queueID != "" {
-		if err := tx.InsertApprovalQueueItem(ctx, db.InsertApprovalQueueItemParams{ID: queueID, EnterpriseID: req.EnterpriseID, RequesterUserID: req.RequesterUserID, ResourceType: req.ResourceType, ResourceID: req.ResourceID, Action: req.Action, RiskLevel: string(route.RiskLevel), OrgUnitID: req.OrgUnitID, ReviewerUserID: textValue(route.ReviewerUserID), OrgVersion: req.OrgVersion, RiskReasons: reasons, RouteMode: string(route.Mode), OrgPath: path, Queue: textValue(route.Queue), RouteInputHash: inputHash, RouteOutputHash: outputHash, PolicyVersion: req.PolicyVersion, IdempotencyKeyHash: req.IdempotencyHash, ReviewerOrgUnitID: textValue(reviewerUnit), ReviewerDisplayName: textValue(route.ReviewerDisplayName)}); err != nil {
+		if err := tx.InsertApprovalQueueItem(ctx, db.InsertApprovalQueueItemParams{ID: queueID, EnterpriseID: req.EnterpriseID, RequesterUserID: req.RequesterUserID, ResourceType: req.ResourceType, ResourceID: req.ResourceID, Action: req.Action, RiskLevel: string(route.RiskLevel), OrgUnitID: req.OrgUnitID, ReviewerUserID: textValue(route.ReviewerUserID), OrgVersion: req.OrgVersion, RiskReasons: reasons, RouteMode: string(route.Mode), OrgPath: path, Queue: textValue(route.Queue), RouteInputHash: inputHash, RouteOutputHash: outputHash, PolicyVersion: req.PolicyVersion, IdempotencyKeyHash: req.IdempotencyHash, ReviewerOrgUnitID: textValue(reviewerUnit), ReviewerDisplayName: textValue(route.ReviewerDisplayName), ReviewerPermission: textValue(string(route.ReviewerPermission)), ReviewerPermissionOrgUnitID: textValue(route.ReviewerPermissionOrgUnitID)}); err != nil {
 			return approval.Route{}, err
 		}
 	}
@@ -229,5 +239,20 @@ func routeFromResolution(row db.ApprovalResolutionIdempotency) (approval.Route, 
 	if err := json.Unmarshal(row.OrgPath, &path); err != nil || path == nil {
 		return approval.Route{}, errors.New("invalid stored approval resolution")
 	}
-	return approval.Route{Mode: approval.RouteMode(row.RouteMode), RiskLevel: approval.RiskLevel(row.RiskLevel), RiskReasons: reasons, RequesterUserID: row.RequesterUserID, ReviewerUserID: row.ReviewerUserID.String, ReviewerDisplayName: row.ReviewerDisplayName.String, OrgPath: path, Queue: row.Queue.String, AutoPublish: row.AutoPublish, PolicyVersion: row.PolicyVersion}, nil
+	mode := approval.RouteMode(row.RouteMode)
+	return approval.Route{
+		Mode:                        mode,
+		RiskLevel:                   approval.RiskLevel(row.RiskLevel),
+		RiskReasons:                 reasons,
+		RequesterUserID:             row.RequesterUserID,
+		ReviewerUserID:              row.ReviewerUserID.String,
+		ReviewerDisplayName:         row.ReviewerDisplayName.String,
+		ReviewerPermission:          approval.Permission(row.ReviewerPermission.String),
+		ReviewerPermissionOrgUnitID: row.ReviewerPermissionOrgUnitID.String,
+		OrgPath:                     path,
+		Queue:                       row.Queue.String,
+		AutoPublish:                 row.AutoPublish,
+		PolicyVersion:               row.PolicyVersion,
+		AdminRootReached:            mode == approval.ModeEnterpriseKnowledgeAdminQueue,
+	}, nil
 }

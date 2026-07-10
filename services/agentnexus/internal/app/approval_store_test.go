@@ -21,7 +21,7 @@ func TestMemoryApprovalStoreCreatesQueueOnlyForReviewRoutesAndAlwaysAudits(t *te
 	if err := store.Record(context.Background(), req, direct); err != nil {
 		t.Fatal(err)
 	}
-	review := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", OrgPath: []string{"team", "root"}, PolicyVersion: req.PolicyVersion}
+	review := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", ReviewerPermission: approval.PermissionApproveHighRisk, ReviewerPermissionOrgUnitID: "root", OrgPath: []string{"team", "root"}, PolicyVersion: req.PolicyVersion}
 	req.IdempotencyHash = strings.Repeat("f", 64)
 	if err := store.Record(context.Background(), req, review); err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestMemoryApprovalStoreRollsBackQueueAndAuditFailures(t *testing.T) {
 				return nil
 			})
 			req := storeRequest()
-			route := approval.Route{Mode: approval.ModeEnterpriseKnowledgeAdminQueue, RiskLevel: approval.RiskMedium, RiskReasons: []approval.RiskReason{approval.RiskReasonImpactedUserScope}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team", "root"}, Queue: approval.EnterpriseKnowledgeAdminQueue, PolicyVersion: req.PolicyVersion}
+			route := approval.Route{Mode: approval.ModeEnterpriseKnowledgeAdminQueue, RiskLevel: approval.RiskMedium, RiskReasons: []approval.RiskReason{approval.RiskReasonImpactedUserScope}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team", "root"}, Queue: approval.EnterpriseKnowledgeAdminQueue, PolicyVersion: req.PolicyVersion, AdminRootReached: true}
 			if err := store.Record(context.Background(), req, route); err == nil {
 				t.Fatal("expected failure")
 			}
@@ -91,7 +91,7 @@ func TestMemoryApprovalStoreSerializesConcurrentAuditChain(t *testing.T) {
 func TestMemoryApprovalStoreIdempotentReplayConflictAndStaleRevalidation(t *testing.T) {
 	store := newMemoryApprovalTestStore(nil)
 	req := storeRequest()
-	route := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+	route := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", ReviewerPermission: approval.PermissionApproveHighRisk, ReviewerPermissionOrgUnitID: "team", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
 	first, err := store.RecordResolution(context.Background(), req, route)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestMemoryApprovalStoreIdempotentReplayConflictAndStaleRevalidation(t *test
 func TestMemoryApprovalStoreConcurrentSameKeyCommitsOnce(t *testing.T) {
 	store := newMemoryApprovalTestStore(nil)
 	req := storeRequest()
-	route := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+	route := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", ReviewerPermission: approval.PermissionApproveHighRisk, ReviewerPermissionOrgUnitID: "team", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
 	var wg sync.WaitGroup
 	errs := make(chan error, 20)
 	for i := 0; i < 20; i++ {
@@ -153,7 +153,7 @@ func newMemoryApprovalTestStore(fail func(ApprovalRecordStage) error) *MemoryApp
 
 func TestRecordedRouteRejectsMalformedDatabaseEvidence(t *testing.T) {
 	req := storeRequest()
-	valid := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
+	valid := approval.Route{Mode: approval.ModeUpwardReview, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, ReviewerUserID: "reviewer", ReviewerDisplayName: "Reviewer", ReviewerPermission: approval.PermissionApproveHighRisk, ReviewerPermissionOrgUnitID: "team", OrgPath: []string{"team"}, PolicyVersion: req.PolicyVersion}
 	tests := []approval.Route{
 		func() approval.Route { v := valid; v.RiskReasons = []approval.RiskReason{}; return v }(),
 		func() approval.Route {
@@ -169,11 +169,32 @@ func TestRecordedRouteRejectsMalformedDatabaseEvidence(t *testing.T) {
 		func() approval.Route { v := valid; v.OrgPath = []string{"other"}; return v }(),
 		func() approval.Route { v := valid; v.OrgPath = []string{"team", "team"}; return v }(),
 		func() approval.Route { v := valid; v.ReviewerDisplayName = ""; return v }(),
+		func() approval.Route { v := valid; v.ReviewerPermission = approval.PermissionPublishLowRisk; return v }(),
+		func() approval.Route { v := valid; v.ReviewerPermissionOrgUnitID = "other"; return v }(),
+		{Mode: approval.ModeEnterpriseKnowledgeAdminQueue, RiskLevel: approval.RiskHigh, RiskReasons: []approval.RiskReason{approval.RiskReasonExternalSideEffect}, RequesterUserID: req.RequesterUserID, OrgPath: []string{"team"}, Queue: approval.EnterpriseKnowledgeAdminQueue, PolicyVersion: req.PolicyVersion},
 	}
 	for _, route := range tests {
 		if validRecordedRoute(req, route) {
 			t.Fatalf("accepted malformed route=%+v", route)
 		}
+	}
+}
+
+func TestApprovalQueueStatusTransitionsAreOneWayAfterVersionsAdvance(t *testing.T) {
+	for _, next := range []string{"approved", "rejected", "cancelled"} {
+		if !validApprovalQueueStatusTransition("pending", next) {
+			t.Fatalf("pending -> %s rejected", next)
+		}
+		other := "approved"
+		if next == other {
+			other = "rejected"
+		}
+		if validApprovalQueueStatusTransition(next, "pending") || validApprovalQueueStatusTransition(next, other) {
+			t.Fatalf("terminal %s changed", next)
+		}
+	}
+	if !validApprovalQueueStatusTransition("pending", "pending") {
+		t.Fatal("pending no-op rejected")
 	}
 }
 

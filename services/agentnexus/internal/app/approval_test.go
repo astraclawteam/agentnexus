@@ -284,7 +284,7 @@ func directApprovalSource(t *testing.T, enterprise string, version int64, reques
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &stubApprovalSource{loaded: LoadedApprovalSnapshot{Snapshot: snapshot, Policy: approval.DefaultPolicy(), PolicyVersion: 0}}
+	return &stubApprovalSource{loaded: LoadedApprovalSnapshot{Snapshot: snapshot, Policy: approval.DefaultPolicy(), PolicyVersion: 1}}
 }
 
 func validApprovalBody() string {

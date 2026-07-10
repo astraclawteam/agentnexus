@@ -88,10 +88,12 @@ func TestPostgresApprovalSourceDoesNotGiveManagerImplicitPermission(t *testing.T
 	}
 }
 
-func TestPostgresApprovalSourceLoadsEnterprisePolicyOrSafeVersionZeroDefault(t *testing.T) {
-	defaultLoaded, err := newPostgresApprovalSourceWithPool(&fakeApprovalSnapshotPool{tx: validApprovalSnapshotTx()}).LoadApprovalSnapshot(context.Background(), "enterprise-1", 7, "requester")
-	if err != nil || defaultLoaded.PolicyVersion != 0 || defaultLoaded.Policy != approval.DefaultPolicy() {
-		t.Fatalf("default=%+v err=%v", defaultLoaded, err)
+func TestPostgresApprovalSourceRequiresEnterprisePolicy(t *testing.T) {
+	missing := validApprovalSnapshotTx()
+	missing.policyErr = pgx.ErrNoRows
+	_, err := newPostgresApprovalSourceWithPool(&fakeApprovalSnapshotPool{tx: missing}).LoadApprovalSnapshot(context.Background(), "enterprise-1", 7, "requester")
+	if !errors.Is(err, approval.ErrApprovalUnavailable) {
+		t.Fatalf("missing policy err=%v", err)
 	}
 	tx := validApprovalSnapshotTx()
 	tx.policyErr = nil
@@ -139,8 +141,8 @@ func TestPostgresApprovalSourceFailsClosedForStaleCrossTenantLimitsAndCancellati
 
 func validApprovalSnapshotTx() *fakeApprovalSnapshotTx {
 	return &fakeApprovalSnapshotTx{
-		version:   7,
-		policyErr: pgx.ErrNoRows,
+		version: 7,
+		policy:  db.EnterpriseApprovalPolicy{EnterpriseID: "enterprise-1", MinimumRisk: "low", MaxLowImpactedUsers: 25, MaxLowImpactedOrgUnits: 1, PolicyVersion: 1},
 		units: []db.OrgPolicySnapshotUnit{
 			{EnterpriseID: "enterprise-1", VersionNumber: 7, OrgUnitID: "root"},
 			{EnterpriseID: "enterprise-1", VersionNumber: 7, OrgUnitID: "team", ParentID: pgtype.Text{String: "root", Valid: true}},
