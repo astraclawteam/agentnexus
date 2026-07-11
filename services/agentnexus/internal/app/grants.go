@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
@@ -56,8 +57,29 @@ func (a *ScopedGrantAuthorizer) AuthorizeGrant(ctx context.Context, actor ticket
 		decision.FallbackAction == "" &&
 		len(decision.MaskFields) == 0 &&
 		len(decision.Permissions) == 1 && decision.Permissions[0] == policy.PermissionApproveHighRisk &&
-		len(decision.OrgUnitIDs) == 1 && decision.OrgUnitIDs[0] == input.OrgUnitID
-	return tickets.GrantAuthorization{Allowed: allowed, EnterpriseID: actor.EnterpriseID, OrgVersion: decision.OrgVersion, OrgUnitIDs: append([]string(nil), decision.OrgUnitIDs...)}, nil
+		validGrantEvidenceScopes(decision.OrgUnitIDs)
+	normalizedScopes := []string{}
+	if allowed {
+		normalizedScopes = []string{input.OrgUnitID}
+	}
+	return tickets.GrantAuthorization{Allowed: allowed, EnterpriseID: actor.EnterpriseID, OrgVersion: decision.OrgVersion, OrgUnitIDs: normalizedScopes}, nil
+}
+
+func validGrantEvidenceScopes(scopes []string) bool {
+	if len(scopes) == 0 || len(scopes) > policy.MaxAtlasMemberships {
+		return false
+	}
+	seen := make(map[string]struct{}, len(scopes))
+	for _, scope := range scopes {
+		if scope == "" || strings.TrimSpace(scope) != scope {
+			return false
+		}
+		if _, exists := seen[scope]; exists {
+			return false
+		}
+		seen[scope] = struct{}{}
+	}
+	return true
 }
 
 const maxGrantRequestBytes = 16 << 10

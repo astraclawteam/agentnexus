@@ -4,10 +4,38 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
 )
+
+func TestScopedGrantAuthorizerAcceptsInheritedDreamPermissionWithoutInheritingEvidenceScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		memberships []policy.AtlasMembership
+	}{
+		{"parent covers child", []policy.AtlasMembership{{OrgUnitID: "parent", Role: string(policy.PermissionApproveHighRisk)}}},
+		{"multiple covering scopes", []policy.AtlasMembership{{OrgUnitID: "root", Role: string(policy.PermissionApproveHighRisk)}, {OrgUnitID: "parent", Role: string(policy.PermissionApproveHighRisk)}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := policy.NewMemoryAtlasPolicySource()
+			source.StoreSnapshot("ent_1", "user_1", policy.AtlasAccessSnapshot{EnterpriseID: "ent_1", OrgVersion: 7, OrgUnits: []policy.AtlasOrgUnit{{ID: "root"}, {ID: "parent", ParentID: "root"}, {ID: "child", ParentID: "parent"}}, Memberships: tc.memberships})
+			authorizer := NewScopedGrantAuthorizer(fakeGrantOwner{owner: GrantResourceOwner{EnterpriseID: "ent_1", ResourceType: "dream_evidence", ResourceID: "ev-1", OrgUnitID: "child", OrgVersion: 7}}, policy.NewAgentAtlasEvaluator(source))
+			store := tickets.NewMemoryStore()
+			ids := []string{"grant_1", "audit_1"}
+			i := 0
+			svc := tickets.NewService(store, tickets.WithClock(func() time.Time { return time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC) }), tickets.WithIDGenerator(func() string { v := ids[i]; i++; return v }), tickets.WithTokenGenerator(func() (string, error) { return "opaque-step-grant-token", nil }), tickets.WithGrantAuthorizer(authorizer))
+			grant, err := svc.AuthorizeAndCreateGrant(context.Background(), tickets.Actor{EnterpriseID: "ent_1", UserID: "user_1"}, tickets.CreateStepGrantInput{CaseTicketID: "ticket_1", OrgUnitID: "child", OrgVersion: 7, ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", TTL: time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if grant.OrgUnitID != "child" || grant.ResourceID != "ev-1" || len(grant.Scopes) != 1 || grant.Scopes[0] != "dream:evidence:read" {
+				t.Fatalf("grant inherited decision evidence instead of target binding: %+v", grant)
+			}
+		})
+	}
+}
 
 type fakeGrantOwner struct {
 	owner GrantResourceOwner
@@ -82,7 +110,9 @@ func TestScopedGrantAuthorizerRejectsMalformedAllowDecision(t *testing.T) {
 		{"wrong risk", func(d *policy.PermissionDecision) { d.RiskLevel = policy.AtlasRiskLow }},
 		{"fallback", func(d *policy.PermissionDecision) { d.FallbackAction = policy.ActionKnowledgeSuggest }},
 		{"masking", func(d *policy.PermissionDecision) { d.MaskFields = []string{"secret"} }},
-		{"extra scope", func(d *policy.PermissionDecision) { d.OrgUnitIDs = []string{"research", "root"} }},
+		{"empty scopes", func(d *policy.PermissionDecision) { d.OrgUnitIDs = []string{} }},
+		{"duplicate scopes", func(d *policy.PermissionDecision) { d.OrgUnitIDs = []string{"research", "research"} }},
+		{"noncanonical scope", func(d *policy.PermissionDecision) { d.OrgUnitIDs = []string{" research"} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decision := base
