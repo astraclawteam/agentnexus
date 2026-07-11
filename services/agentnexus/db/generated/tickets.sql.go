@@ -55,8 +55,8 @@ func (q *Queries) CreateCaseTicket(ctx context.Context, arg CreateCaseTicketPara
 }
 
 const createStepGrant = `-- name: CreateStepGrant :one
-INSERT INTO step_grants (id, enterprise_id, case_ticket_id, resource_type, resource_id, action, scopes, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO step_grants (id, enterprise_id, case_ticket_id, resource_type, resource_id, action, scopes, expires_at, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING id, enterprise_id, case_ticket_id, resource_type, resource_id, action, scopes, expires_at, created_at
 `
 
@@ -69,6 +69,7 @@ type CreateStepGrantParams struct {
 	Action       string
 	Scopes       []byte
 	ExpiresAt    pgtype.Timestamptz
+	CreatedAt    pgtype.Timestamptz
 }
 
 func (q *Queries) CreateStepGrant(ctx context.Context, arg CreateStepGrantParams) (StepGrant, error) {
@@ -81,6 +82,7 @@ func (q *Queries) CreateStepGrant(ctx context.Context, arg CreateStepGrantParams
 		arg.Action,
 		arg.Scopes,
 		arg.ExpiresAt,
+		arg.CreatedAt,
 	)
 	var i StepGrant
 	err := row.Scan(

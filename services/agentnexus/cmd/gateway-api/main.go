@@ -9,10 +9,8 @@ import (
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
-	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
-	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -52,41 +50,15 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		cleanup()
 		return nil, func() {}, fmt.Errorf("connect browser auth database: %w", err)
 	}
-	upstream, err := browserauth.NewEnterpriseOIDC(ctx, browserConfig.OIDC)
-	if err != nil {
-		cleanup()
-		return nil, func() {}, fmt.Errorf("initialize enterprise OIDC: %w", err)
-	}
-	directory := app.NewPostgresBrowserDirectory(pool)
-	authorizeRateLimiter, err := browserauth.NewPostgresAuthorizeRateLimiter(pool, browserConfig.AuthorizeRateLimitPerMinute, time.Now)
-	if err != nil {
-		cleanup()
-		return nil, func() {}, fmt.Errorf("initialize authorize rate limiter: %w", err)
-	}
-	authorizationPolicy, ticketActors := productionAuthorizationDependencies(browserConfig.OIDC.EnterpriseID, pool)
-	approvalSource, approvalStore := productionApprovalDependencies(pool)
-	grantStore := app.NewPostgresGrantStore(pool)
-	grantService := tickets.NewService(grantStore, tickets.WithGrantAuthorizer(app.NewScopedGrantAuthorizer(grantStore, policy.NewAgentAtlasEvaluator(authorizationPolicy))))
 	approvalFactsVerifier, err := app.LoadChangeFactsVerifierFromFile(os.Getenv("AGENTNEXUS_APPROVAL_FACTS_SECRET_FILE"), time.Now)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err
 	}
-	router, err := app.NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, app.BrowserAuthDependencies{
-		Config:                  browserConfig.OIDC,
-		Sessions:                browserauth.NewService(browserauth.NewPostgresStore(pool), browserauth.WithLoginAttemptLimits(browserConfig.LoginAttemptLimits)),
-		Upstream:                upstream,
-		Identities:              directory,
-		Profiles:                directory,
-		Audit:                   app.NewPostgresBrowserAuditSink(pool),
-		AuthorizeRateLimiter:    authorizeRateLimiter,
-		AuthorizeSourceResolver: app.NewAuthorizeSourceResolver(browserConfig.TrustedProxyCIDRs),
-		AuthorizationPolicy:     authorizationPolicy,
-		TicketActors:            ticketActors,
-		ApprovalSource:          approvalSource,
-		ApprovalStore:           approvalStore,
-		ApprovalFactsVerifier:   approvalFactsVerifier,
-		Grants:                  grantService,
+	router, err := app.NewPostgresGatewayRouter(ctx, pool, app.PostgresGatewayConfig{
+		ServiceName: cfg.ServiceName, Version: cfg.Version, OIDC: browserConfig.OIDC,
+		LoginAttemptLimits: browserConfig.LoginAttemptLimits, AuthorizeRateLimitPerMinute: browserConfig.AuthorizeRateLimitPerMinute,
+		TrustedProxyCIDRs: browserConfig.TrustedProxyCIDRs, ApprovalFactsVerifier: approvalFactsVerifier,
 	})
 	if err != nil {
 		cleanup()
@@ -95,6 +67,7 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 	return router, cleanup, nil
 }
 
+// Kept as focused wiring seams for the command's fail-closed unit tests.
 func productionAuthorizationDependencies(enterpriseID string, pool *pgxpool.Pool) (policy.AtlasPolicySource, app.TicketActorAuthenticator) {
 	return app.NewPostgresAtlasPolicySource(pool), app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)
 }

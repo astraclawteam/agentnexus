@@ -19,6 +19,6 @@ WHERE enterprise_id = $1
 ORDER BY created_at DESC;
 
 -- name: CreateStepGrant :one
-INSERT INTO step_grants (id, enterprise_id, case_ticket_id, resource_type, resource_id, action, scopes, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO step_grants (id, enterprise_id, case_ticket_id, resource_type, resource_id, action, scopes, expires_at, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING id, enterprise_id, case_ticket_id, resource_type, resource_id, action, scopes, expires_at, created_at;

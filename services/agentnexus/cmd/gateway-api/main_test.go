@@ -60,10 +60,10 @@ func TestBuildRouterWiresAuthorizeRateLimiterAndTrustedSourceResolver(t *testing
 	}
 	text := string(source)
 	for _, required := range []string{
-		"browserauth.NewPostgresAuthorizeRateLimiter(pool, browserConfig.AuthorizeRateLimitPerMinute, time.Now)",
-		"app.NewAuthorizeSourceResolver(browserConfig.TrustedProxyCIDRs)",
-		"AuthorizeRateLimiter:",
-		"AuthorizeSourceResolver:",
+		"app.NewPostgresGatewayRouter(ctx, pool",
+		"AuthorizeRateLimitPerMinute: browserConfig.AuthorizeRateLimitPerMinute",
+		"TrustedProxyCIDRs:",
+		"browserConfig.TrustedProxyCIDRs",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("buildRouter missing %q", required)
@@ -84,7 +84,7 @@ func TestBuildRouterWiresAuthorizationPolicyAndPostgresTicketActor(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"productionAuthorizationDependencies(browserConfig.OIDC.EnterpriseID, pool)", "app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)"} {
+	for _, required := range []string{"app.NewPostgresGatewayRouter(ctx, pool", "app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)"} {
 		if !strings.Contains(string(raw), required) {
 			t.Errorf("production authorization wiring missing %q", required)
 		}

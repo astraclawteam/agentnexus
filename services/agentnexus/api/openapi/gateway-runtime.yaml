@@ -4,6 +4,105 @@ info:
   version: 0.1.0
   description: Stable runtime entrypoints for Claw, AgentRag, and enterprise agents.
 paths:
+  /.well-known/openid-configuration:
+    get:
+      operationId: discoverBrowserOIDC
+      summary: Discover the AgentNexus browser OIDC endpoints.
+      responses:
+        '200':
+          description: OIDC discovery metadata.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+  /oauth2/jwks:
+    get:
+      operationId: getBrowserJWKS
+      summary: Get public browser-session ID token signing keys.
+      responses:
+        '200':
+          description: JSON Web Key Set.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+  /oauth2/authorize:
+    get:
+      operationId: authorizeBrowserSession
+      summary: Use an existing browser session or redirect the full page to the enterprise IdP.
+      parameters:
+        - {name: response_type, in: query, required: true, schema: {type: string, enum: [code]}}
+        - {name: client_id, in: query, required: true, schema: {type: string}}
+        - {name: redirect_uri, in: query, required: true, schema: {type: string, format: uri}}
+        - {name: scope, in: query, required: true, schema: {type: string}}
+        - {name: state, in: query, required: true, schema: {type: string, maxLength: 1024}}
+        - {name: nonce, in: query, required: true, schema: {type: string, maxLength: 512}}
+        - {name: code_challenge, in: query, required: true, schema: {type: string}}
+        - {name: code_challenge_method, in: query, required: true, schema: {type: string, enum: [S256]}}
+      responses:
+        '302': {description: Same-page cookie bootstrap, enterprise IdP redirect, or silent authorization-code redirect.}
+  /oauth2/idp/callback:
+    get:
+      operationId: completeEnterpriseOIDC
+      summary: Complete the enterprise IdP code flow in the bound browser.
+      parameters:
+        - {name: code, in: query, required: true, schema: {type: string}}
+        - {name: state, in: query, required: true, schema: {type: string}}
+      responses:
+        '302': {description: Full-page redirect to the allow-listed console callback.}
+  /oauth2/token:
+    post:
+      operationId: exchangeBrowserAuthorizationCode
+      summary: Exchange a one-use authorization code using S256 PKCE.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/BrowserTokenRequest'
+      responses:
+        '200':
+          description: Short-lived ID token; no access or refresh token is issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserTokenResponse'
+  /v1/browser-sessions/me:
+    get:
+      operationId: getBrowserSession
+      summary: Resolve the current HttpOnly browser session and sealed organization snapshot.
+      security: [{browserSession: []}]
+      responses:
+        '200':
+          description: Current browser identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserSession'
+        '401': {description: No active browser session.}
+  /v1/browser-sessions/logout:
+    post:
+      operationId: logoutBrowserSession
+      summary: Revoke the current browser session and clear its cookie.
+      security: [{browserSession: []}]
+      responses:
+        '204': {description: Session revoked.}
+  /v1/authorization/decisions:
+    post:
+      operationId: decideAgentAtlasPermission
+      summary: Evaluate an exact action against the latest sealed organization policy snapshot.
+      security: [{browserSession: []}, {caseTicket: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizationDecisionRequest'
+      responses:
+        '200':
+          description: Scoped permission decision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermissionDecision'
   /v1/runtime/locate:
     post:
       operationId: locateRuntimeResources
@@ -77,6 +176,7 @@ paths:
       operationId: resolveApprovalRoute
       summary: Resolve and audit the approval route for a governed change.
       description: Facts are signed server-side by the AgentAtlas BFF; browser users never receive the signing secret.
+      security: [{browserSession: []}, {caseTicket: []}]
       parameters:
         - name: Idempotency-Key
           in: header
@@ -107,6 +207,7 @@ paths:
     post:
       operationId: createStepGrant
       summary: Issue an audited short-lived grant for one exact sensitive action.
+      security: [{browserSession: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -124,6 +225,7 @@ paths:
     post:
       operationId: verifyStepGrant
       summary: Verify an opaque Step Grant against one exact operation.
+      security: [{browserSession: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -138,7 +240,43 @@ paths:
               schema:
                 $ref: '#/components/schemas/StepGrantVerifyResponse'
 components:
+  securitySchemes:
+    browserSession:
+      type: apiKey
+      in: cookie
+      name: nexus_browser_session
+    caseTicket:
+      type: apiKey
+      in: header
+      name: Authorization
   schemas:
+    BrowserTokenRequest:
+      type: object
+      required: [grant_type, code, code_verifier, client_id, redirect_uri]
+      properties:
+        grant_type: {type: string, enum: [authorization_code]}
+        code: {type: string}
+        code_verifier: {type: string}
+        client_id: {type: string}
+        redirect_uri: {type: string, format: uri}
+    BrowserTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [id_token, token_type, expires_in]
+      properties:
+        id_token: {type: string}
+        token_type: {type: string, enum: [Bearer]}
+        expires_in: {type: integer, minimum: 1}
+    AuthorizationDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [org_unit_id, org_version, resource_type, resource_id, action]
+      properties:
+        org_unit_id: {type: string}
+        org_version: {type: integer, minimum: 1}
+        resource_type: {type: string, enum: [knowledge, workflow, service, dream_evidence]}
+        resource_id: {type: string}
+        action: {type: string}
     RequestEnvelope:
       type: object
       required:

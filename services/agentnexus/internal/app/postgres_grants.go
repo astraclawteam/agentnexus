@@ -168,7 +168,7 @@ func (s *PostgresGrantStore) CreateStepGrantAndAudit(ctx context.Context, grant 
 	if err != nil {
 		return tickets.StepGrant{}, err
 	}
-	if _, err = tx.CreateStepGrant(ctx, db.CreateStepGrantParams{ID: grant.ID, EnterpriseID: grant.EnterpriseID, CaseTicketID: grant.CaseTicketID, ResourceType: grant.ResourceType, ResourceID: grant.ResourceID, Action: grant.Action, Scopes: scopes, ExpiresAt: pgtype.Timestamptz{Time: grant.ExpiresAt, Valid: true}}); err != nil {
+	if _, err = tx.CreateStepGrant(ctx, db.CreateStepGrantParams{ID: grant.ID, EnterpriseID: grant.EnterpriseID, CaseTicketID: grant.CaseTicketID, ResourceType: grant.ResourceType, ResourceID: grant.ResourceID, Action: grant.Action, Scopes: scopes, ExpiresAt: pgtype.Timestamptz{Time: grant.ExpiresAt, Valid: true}, CreatedAt: pgtype.Timestamptz{Time: grant.CreatedAt, Valid: true}}); err != nil {
 		return tickets.StepGrant{}, err
 	}
 	inputHash, outputHash := grantEvidenceHashes(grant)
