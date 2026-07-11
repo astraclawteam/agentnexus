@@ -24,6 +24,11 @@ import (
 )
 
 const testVerifier = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+const testConsoleClientSecret = "AgentAtlas-console-secret-C7mQ4vN8xR2pT6yK9dF3"
+
+func tokenBasicHeader(clientID, secret string) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(clientID+":"+secret))
+}
 
 func TestBrowserAuthAuthorizeBootstrapsCanonicalBrowserWithSingleQueryMarker(t *testing.T) {
 	var counting *countingSessionService
@@ -207,16 +212,20 @@ func TestBrowserAuthAuthorizeRejectsAmbiguousOrUnsafeInputs(t *testing.T) {
 	h := newBrowserHarness(t)
 	base := h.authorizeQuery("s", "n")
 	cases := map[string]func(url.Values){
-		"open redirect":   func(v url.Values) { v.Set("redirect_uri", "https://evil.example/cb") },
-		"duplicate state": func(v url.Values) { v.Add("state", "other") },
-		"plain challenge": func(v url.Values) { v.Set("code_challenge_method", "plain") },
-		"missing nonce":   func(v url.Values) { v.Del("nonce") },
-		"wrong response":  func(v url.Values) { v.Set("response_type", "token") },
-		"missing openid":  func(v url.Values) { v.Set("scope", "profile") },
-		"empty response":  func(v url.Values) { v.Set("response_type", "") },
-		"empty scope":     func(v url.Values) { v.Set("scope", "") },
-		"oversized state": func(v url.Values) { v.Set("state", strings.Repeat("s", maxAuthorizeStateLength+1)) },
-		"oversized nonce": func(v url.Values) { v.Set("nonce", strings.Repeat("n", maxAuthorizeNonceLength+1)) },
+		"open redirect":      func(v url.Values) { v.Set("redirect_uri", "https://evil.example/cb") },
+		"duplicate state":    func(v url.Values) { v.Add("state", "other") },
+		"plain challenge":    func(v url.Values) { v.Set("code_challenge_method", "plain") },
+		"missing nonce":      func(v url.Values) { v.Del("nonce") },
+		"wrong response":     func(v url.Values) { v.Set("response_type", "token") },
+		"missing openid":     func(v url.Values) { v.Set("scope", "profile") },
+		"empty response":     func(v url.Values) { v.Set("response_type", "") },
+		"empty scope":        func(v url.Values) { v.Set("scope", "") },
+		"missing response":   func(v url.Values) { v.Del("response_type") },
+		"missing scope":      func(v url.Values) { v.Del("scope") },
+		"duplicate response": func(v url.Values) { v.Add("response_type", "code") },
+		"duplicate scope":    func(v url.Values) { v.Add("scope", "openid") },
+		"oversized state":    func(v url.Values) { v.Set("state", strings.Repeat("s", maxAuthorizeStateLength+1)) },
+		"oversized nonce":    func(v url.Values) { v.Set("nonce", strings.Repeat("n", maxAuthorizeNonceLength+1)) },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -232,6 +241,47 @@ func TestBrowserAuthAuthorizeRejectsAmbiguousOrUnsafeInputs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBrowserAuthTokenRequiresConfidentialBasicBeforeCodeConsumption(t *testing.T) {
+	var counting *countingSessionService
+	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
+		counting = &countingSessionService{BrowserSessionService: service}
+		return counting
+	})
+	code := issueSilentCode(t, h)
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+	cases := map[string][]string{
+		"missing":   nil,
+		"wrong":     {"Basic " + base64.StdEncoding.EncodeToString([]byte("agentatlas:wrong-secret"))},
+		"duplicate": {tokenBasicHeader("agentatlas", testConsoleClientSecret), tokenBasicHeader("agentatlas", testConsoleClientSecret)},
+		"malformed": {"Basic !!!"},
+	}
+	for name, values := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/oauth2/token", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			for _, value := range values {
+				req.Header.Add("Authorization", value)
+			}
+			rr := httptest.NewRecorder()
+			h.router.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized || responseError(t, rr) != "invalid_client" || rr.Header().Get("WWW-Authenticate") != `Basic realm="AgentNexus token"` {
+				t.Fatalf("status=%d headers=%v body=%s", rr.Code, rr.Header(), rr.Body.String())
+			}
+		})
+	}
+	if counting.exchangeCodes != 0 {
+		t.Fatalf("invalid confidential authentication consumed code %d times", counting.exchangeCodes)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", tokenBasicHeader("agentatlas", testConsoleClientSecret))
+	rr := httptest.NewRecorder()
+	h.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || counting.exchangeCodes != 1 {
+		t.Fatalf("status=%d exchanges=%d body=%s", rr.Code, counting.exchangeCodes, rr.Body.String())
 	}
 }
 
@@ -268,7 +318,7 @@ func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 		t.Fatal("raw session leaked in response")
 	}
 
-	form := url.Values{"grant_type": {"authorization_code"}, "code": {location.Query().Get("code")}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {location.Query().Get("code")}, "code_verifier": {testVerifier}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
 	token := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
 	if token.Code != http.StatusOK {
 		t.Fatalf("token=%d body=%s", token.Code, token.Body.String())
@@ -405,11 +455,11 @@ func TestBrowserAuthDiscoveryIgnoresHostAndLogoutAuditFailureFailsClosed(t *test
 	h.audit.err = fmt.Errorf("audit unavailable")
 	cookie := &http.Cookie{Name: browserSessionCookie, Value: raw}
 	logout := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", cookie)
-	if logout.Code != http.StatusServiceUnavailable || len(logout.Result().Cookies()) == 0 {
+	if logout.Code != http.StatusServiceUnavailable || len(logout.Result().Cookies()) != 0 {
 		t.Fatalf("logout=%d cookies=%v", logout.Code, logout.Result().Cookies())
 	}
-	if _, err := h.sessions.GetSession(context.Background(), raw); err == nil {
-		t.Fatal("session survived failed audit")
+	if _, err := h.sessions.GetSession(context.Background(), raw); err != nil {
+		t.Fatalf("audit failure revoked session before atomic commit: %v", err)
 	}
 }
 
@@ -426,14 +476,14 @@ func TestBrowserAuthDiscoveryAdvertisesAllRotatedAlgorithms(t *testing.T) {
 func TestBrowserAuthTokenSigningFailureIsTemporarilyUnavailable(t *testing.T) {
 	h := newBrowserHarnessConfigured(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService { return service }, staticTokenIssuer{signErr: errors.New("signer unavailable"), algorithms: []string{"RS256"}})
 	code := issueSilentCode(t, h)
-	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
 	rr := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
 	if rr.Code != http.StatusServiceUnavailable || responseError(t, rr) != "temporarily_unavailable" {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 
-func TestBrowserAuthLogoutStoreUnavailableClearsCookieAndReturns503(t *testing.T) {
+func TestBrowserAuthLogoutStoreUnavailablePreservesSessionAndReturns503(t *testing.T) {
 	var failing *failingSessionService
 	h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
 		failing = &failingSessionService{Service: service, logoutErrs: []error{browserauth.ErrSessionUnavailable}}
@@ -444,8 +494,11 @@ func TestBrowserAuthLogoutStoreUnavailableClearsCookieAndReturns503(t *testing.T
 		t.Fatal(err)
 	}
 	rr := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", &http.Cookie{Name: browserSessionCookie, Value: raw})
-	if rr.Code != http.StatusServiceUnavailable || !hasClearedCookie(rr, browserSessionCookie) || len(failing.logoutDeadlines) != 1 || !failing.logoutDeadlines[0] {
+	if rr.Code != http.StatusServiceUnavailable || len(rr.Result().Cookies()) != 0 || len(failing.logoutDeadlines) != 1 || !failing.logoutDeadlines[0] {
 		t.Fatalf("status=%d cookies=%v deadlines=%v", rr.Code, rr.Result().Cookies(), failing.logoutDeadlines)
+	}
+	if _, err := h.sessions.GetSession(context.Background(), raw); err != nil {
+		t.Fatalf("store failure destroyed session: %v", err)
 	}
 }
 
@@ -473,7 +526,7 @@ func TestBrowserAuthRoutesDistinguishStoreUnavailableFromInvalidCredentials(t *t
 		h := newBrowserHarnessWithOptions(t, testProfiles{}, func(service *browserauth.Service) BrowserSessionService {
 			return &failingSessionService{Service: service, exchangeErr: browserauth.ErrGrantUnavailable}
 		})
-		form := url.Values{"grant_type": {"authorization_code"}, "code": {secretValueForTest()}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+		form := url.Values{"grant_type": {"authorization_code"}, "code": {secretValueForTest()}, "code_verifier": {testVerifier}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
 		rr := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
 		if rr.Code != http.StatusServiceUnavailable || responseError(t, rr) != "temporarily_unavailable" {
 			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
@@ -553,7 +606,7 @@ func TestBrowserAuthRequestDeadlineReachesBlockingDependencies(t *testing.T) {
 			blocking = &blockingSessionService{Service: service, blockExchange: true, done: make(chan struct{})}
 			return blocking
 		}, nil, func(upstream UpstreamOIDC) UpstreamOIDC { return upstream }, timeout)
-		form := url.Values{"grant_type": {"authorization_code"}, "code": {secretValueForTest()}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+		form := url.Values{"grant_type": {"authorization_code"}, "code": {secretValueForTest()}, "code_verifier": {testVerifier}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
 		started := time.Now()
 		rr := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
 		assertDeadlineResponse(t, rr, started, blocking.done)
@@ -620,7 +673,7 @@ func TestBrowserAuthTokenRejectsWrongBindingReuseAmbiguityAndOversize(t *testing
 			v.Set("code_verifier", strings.Repeat("w", 43))
 			return "application/x-www-form-urlencoded", v.Encode()
 		},
-		"wrong client": func(_ *browserHarness, v url.Values) (string, string) {
+		"body client id forbidden": func(_ *browserHarness, v url.Values) (string, string) {
 			v.Set("client_id", "other")
 			return "application/x-www-form-urlencoded", v.Encode()
 		},
@@ -628,7 +681,7 @@ func TestBrowserAuthTokenRejectsWrongBindingReuseAmbiguityAndOversize(t *testing
 			v.Set("redirect_uri", "https://evil.example/cb")
 			return "application/x-www-form-urlencoded", v.Encode()
 		},
-		"oversized client": func(_ *browserHarness, v url.Values) (string, string) {
+		"oversized body client forbidden": func(_ *browserHarness, v url.Values) (string, string) {
 			v.Set("client_id", strings.Repeat("c", 257))
 			return "application/x-www-form-urlencoded", v.Encode()
 		},
@@ -649,11 +702,11 @@ func TestBrowserAuthTokenRejectsWrongBindingReuseAmbiguityAndOversize(t *testing
 		t.Run(name, func(t *testing.T) {
 			h := newBrowserHarness(t)
 			code := issueSilentCode(t, h)
-			form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+			form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
 			contentType, body := mutate(h, form)
 			rr := perform(h.router, http.MethodPost, "/oauth2/token", body, nil, "Content-Type", contentType)
 			wantError := "invalid_grant"
-			if name == "duplicate code" || name == "wrong content type" || name == "oversize" || strings.HasPrefix(name, "oversized ") {
+			if name == "duplicate code" || name == "wrong content type" || name == "oversize" || strings.Contains(name, "forbidden") || strings.HasPrefix(name, "oversized ") {
 				wantError = "invalid_request"
 			}
 			if rr.Code < 400 || rr.Header().Get("Cache-Control") != "no-store" || responseError(t, rr) != wantError {
@@ -663,7 +716,7 @@ func TestBrowserAuthTokenRejectsWrongBindingReuseAmbiguityAndOversize(t *testing
 	}
 	h := newBrowserHarness(t)
 	code := issueSilentCode(t, h)
-	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
 	if got := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded").Code; got != http.StatusOK {
 		t.Fatalf("first=%d", got)
 	}
@@ -703,7 +756,7 @@ func TestBrowserAuthRejectsCrossEnterpriseSessionsAndCodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {testVerifier}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
 	token := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
 	if token.Code != http.StatusBadRequest || responseError(t, token) != "invalid_grant" {
 		t.Fatalf("token=%d %s", token.Code, token.Body.String())
@@ -798,7 +851,11 @@ func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfil
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := browserauth.OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: idp.server.URL, PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus-client", ClientSecret: "nexus-secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"agentatlas": {"https://atlas.example.com/auth/callback"}}, SigningKeyID: "key-current", SigningPrivateKey: downstreamKey}
+	credentials, err := browserauth.NewConsoleClientCredentials(map[string][]string{"agentatlas": {testConsoleClientSecret}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := browserauth.OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: idp.server.URL, PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus-client", UpstreamClientSecret: "Upstream-IDP-secret-N8xQ3vK7pT4yR9dF2", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"agentatlas": {"https://atlas.example.com/auth/callback"}}, ConsoleCredentials: credentials, SigningKeyID: "key-current", SigningPrivateKey: downstreamKey}
 	ctx := oidc.ClientContext(context.Background(), idp.server.Client())
 	upstream, err := browserauth.NewEnterpriseOIDC(ctx, config)
 	if err != nil {
@@ -809,6 +866,8 @@ func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfil
 	store.AddEnterpriseUser("ent-2", "user-2")
 	sessions := browserauth.NewService(store)
 	audit := &memoryAudit{}
+	wrappedSessions := wrap(sessions)
+	audit.sessions = wrappedSessions
 	if limiter == nil {
 		limiter, err = browserauth.NewMemoryAuthorizeRateLimiter(browserauth.DefaultAuthorizeRateLimitPerMinute, time.Now)
 		if err != nil {
@@ -818,7 +877,7 @@ func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfil
 	if sourceResolver == nil {
 		sourceResolver = NewAuthorizeSourceResolver(nil)
 	}
-	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrap(sessions), Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver, AuthorizationPolicy: authorizationPolicySource(), TicketActors: RejectTicketActorAuthenticator{}})
+	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrappedSessions, Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver, AuthorizationPolicy: authorizationPolicySource(), TicketActors: RejectTicketActorAuthenticator{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -864,6 +923,23 @@ type memoryAudit struct {
 	events      []BrowserAuditEvent
 	err         error
 	sawDeadline bool
+	sessions    BrowserSessionService
+}
+
+func (m *memoryAudit) LogoutBrowserSession(ctx context.Context, token string, event BrowserAuditEvent) (browserauth.BrowserSession, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, m.sawDeadline = ctx.Deadline()
+	if m.err != nil {
+		return browserauth.BrowserSession{}, m.err
+	}
+	session, err := m.sessions.LogoutSession(ctx, token)
+	if err != nil {
+		return browserauth.BrowserSession{}, err
+	}
+	event.ActorUserID = session.UserID
+	m.events = append(m.events, event)
+	return session, nil
 }
 
 type failingSessionService struct {
@@ -879,7 +955,13 @@ type countingSessionService struct {
 	BrowserSessionService
 	createAttempts int
 	getSessions    int
+	exchangeCodes  int
 	lastAttempt    browserauth.CreateLoginAttemptInput
+}
+
+func (s *countingSessionService) ExchangeCode(ctx context.Context, input browserauth.ExchangeCodeInput) (browserauth.ExchangeResult, error) {
+	s.exchangeCodes++
+	return s.BrowserSessionService.ExchangeCode(ctx, input)
 }
 
 func (s *countingSessionService) GetSession(ctx context.Context, token string) (browserauth.BrowserSession, error) {
@@ -1111,6 +1193,9 @@ func performOnce(handler http.Handler, method, target, body string, cookies []*h
 	}
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
+	}
+	if method == http.MethodPost && target == "/oauth2/token" && req.Header.Get("Authorization") == "" {
+		req.Header.Set("Authorization", tokenBasicHeader("agentatlas", testConsoleClientSecret))
 	}
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)

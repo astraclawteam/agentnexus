@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ type fakeGrantWriteTx struct {
 	committed, rolledBack bool
 	issuance              db.InsertStepGrantIssuanceParams
 	audit                 db.AppendAuditEventParams
+	grantRow              db.GetStepGrantByTokenHashRow
 }
 
 func (f *fakeGrantWriteTx) mark(step string) error {
@@ -55,6 +57,9 @@ func (f *fakeGrantWriteTx) CreateStepGrant(context.Context, db.CreateStepGrantPa
 func (f *fakeGrantWriteTx) InsertStepGrantIssuance(_ context.Context, p db.InsertStepGrantIssuanceParams) (db.StepGrantIssuance, error) {
 	f.issuance = p
 	return db.StepGrantIssuance{}, f.mark("issuance")
+}
+func (f *fakeGrantWriteTx) GetStepGrantByTokenHash(context.Context, db.GetStepGrantByTokenHashParams) (db.GetStepGrantByTokenHashRow, error) {
+	return f.grantRow, f.mark("verify_read")
 }
 func (f *fakeGrantWriteTx) AppendAuditEvent(_ context.Context, p db.AppendAuditEventParams) error {
 	f.audit = p
@@ -118,6 +123,44 @@ func TestPostgresGrantStoreRollsBackAuditFailureAndRejectsStaleOwnership(t *test
 			}
 			if copy.committed || !copy.rolledBack {
 				t.Fatalf("commit=%v rollback=%v", copy.committed, copy.rolledBack)
+			}
+		})
+	}
+}
+
+func TestPostgresGrantStoreVerifiesAndAuditsInOneTransaction(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	row := db.GetStepGrantByTokenHashRow{ID: "grant_1", EnterpriseID: "ent_1", CaseTicketID: "ticket_1", ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", Scopes: []byte(`["dream:evidence:read"]`), ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true}, CreatedAt: pgtype.Timestamptz{Time: now.Add(-time.Minute), Valid: true}, TokenHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ActorUserID: "user_1", OrgVersion: 7, OrgUnitID: "research"}
+	input := tickets.VerifyStepGrantInput{EnterpriseID: "ent_1", ActorUserID: "user_1", ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", Scope: "dream:evidence:read"}
+	for _, tc := range []struct {
+		name       string
+		fail       string
+		wantCommit bool
+	}{
+		{name: "success", wantCommit: true},
+		{name: "audit failure", fail: "audit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &fakeGrantWriteTx{grantRow: row, fail: tc.fail}
+			store := newPostgresGrantStoreWithPool(fakeGrantPool{tx})
+			_, err := store.VerifyStepGrantAndAudit(context.Background(), input, row.TokenHash, "verify_audit", now)
+			if tc.wantCommit && err != nil {
+				t.Fatal(err)
+			}
+			if !tc.wantCommit && err == nil {
+				t.Fatal("audit failure returned successful verification")
+			}
+			if tx.committed != tc.wantCommit || (!tc.wantCommit && !tx.rolledBack) {
+				t.Fatalf("commit=%v rollback=%v steps=%v", tx.committed, tx.rolledBack, tx.steps)
+			}
+			if tc.wantCommit {
+				want := []string{"verify_read", "audit_lock", "audit_hash", "audit", "commit"}
+				if !reflect.DeepEqual(tx.steps, want) {
+					t.Fatalf("steps=%v want=%v", tx.steps, want)
+				}
+				if tx.audit.Action != "step_grant.verify" || tx.audit.EnterpriseID != "ent_1" || tx.audit.CaseTicketID.String != "ticket_1" || tx.audit.StepGrantID.String != "grant_1" || tx.audit.ResourceID.String != "ev-1" || !tx.audit.InputHash.Valid || !tx.audit.OutputHash.Valid {
+					t.Fatalf("audit not fully bound: %+v", tx.audit)
+				}
 			}
 		})
 	}

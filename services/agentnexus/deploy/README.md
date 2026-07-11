@@ -93,3 +93,66 @@ dependencies:
 ```
 
 Do not add production private-deployment automation here. Put production ingress, network policy, secret manager integration, customer overlays, image promotion, compliance controls, and release orchestration in `agentnexus-enterprise/private-deploy`.
+
+## Browser authentication production contract
+
+Browser authentication is disabled unless `AGENTNEXUS_BROWSER_AUTH_ENABLED=true`. When enabled, every item below is required and any missing, malformed, weak, non-canonical, unreadable, or over-permissive secret stops startup. Production `AGENTNEXUS_POSTGRES_DSN` must require TLS (`sslmode=require`, `verify-ca`, or `verify-full`); `sslmode=disable` is test-only.
+
+| Variable | Contract |
+| --- | --- |
+| `AGENTNEXUS_POSTGRES_DSN` | Runtime PostgreSQL DSN. Do not place a password in a checked-in file. |
+| `AGENTNEXUS_OIDC_ENTERPRISE_ID` | Exact tenant served by this gateway instance. |
+| `AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL` | Upstream enterprise IdP issuer/discovery URL. |
+| `AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL` | Externally visible AgentNexus issuer. It determines all discovery endpoints. |
+| `AGENTNEXUS_OIDC_CLIENT_ID` | AgentNexus client id at the upstream enterprise IdP. |
+| `AGENTNEXUS_OIDC_UPSTREAM_CLIENT_SECRET_FILE` | Absolute 0600 regular file containing only the upstream IdP client secret. This is not a console credential. |
+| `AGENTNEXUS_OIDC_CALLBACK_URL` | Must equal `<public issuer>/oauth2/idp/callback`. |
+| `AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON` | Console client id to exact redirect URI array, for example `{"agentatlas":["https://atlas.example.invalid/auth/callback"]}`. |
+| `AGENTNEXUS_OIDC_CONSOLE_CLIENT_SECRET_FILES_JSON` | Same closed client-id set mapped to `[current, optional-previous]` absolute 0600 secret files. Raw downstream secrets are hashed immediately and are never stored in config logs or PostgreSQL. |
+| `AGENTNEXUS_OIDC_SIGNING_KEY_ID` | Unique current ID-token signing key id. |
+| `AGENTNEXUS_OIDC_SIGNING_KEY_PATH` | Absolute 0600 current private signing-key file. |
+| `AGENTNEXUS_OIDC_PREVIOUS_SIGNING_KEYS_JSON` | Optional previous key-id to absolute public-key-file map retained during verifier rollover. |
+| `AGENTNEXUS_APPROVAL_FACTS_SECRET_FILE` | Absolute 0600 HMAC secret shared only with the AgentAtlas BFF that attests change facts. If absent, approvals fail safely at high risk; an invalid configured file stops startup. |
+
+Rate and proxy settings are `AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE`, `AGENTNEXUS_OIDC_LOGIN_ATTEMPT_PER_BROWSER_LIMIT`, `AGENTNEXUS_OIDC_LOGIN_ATTEMPT_GLOBAL_LIMIT`, and `AGENTNEXUS_TRUSTED_PROXY_CIDRS` as described above. Never log `Authorization`, cookies, codes, PKCE verifiers, secret-file contents, private keys, approval attestations, Case Tickets, or Step Grants.
+
+The token endpoint supports only `client_secret_basic`. The AgentAtlas confidential BFF sends the Basic credential; browser JavaScript never receives it. Missing/wrong/duplicate/malformed Basic authentication is rejected before an authorization code is read or consumed. The upstream IdP secret, downstream console secrets, ID-token signing keys, and approval-facts secret are four separate credential domains.
+
+### Rotation
+
+1. Downstream console secret: mount a new current file, keep the old file as the optional previous entry, restart and observe successful BFF exchanges, switch every BFF to the new current secret, then remove the previous entry and restart. Never put the same file or value in both slots.
+2. ID-token signing key: deploy the new private key/current `kid` while listing the old public key under `AGENTNEXUS_OIDC_PREVIOUS_SIGNING_KEYS_JSON`; after the five-minute token lifetime plus clock-skew allowance, remove the old public key.
+3. Upstream IdP secret: configure the new value at the IdP, atomically replace the mounted upstream file, and restart. Roll back by restoring the prior secret at both IdP and mount; never reuse a downstream secret.
+4. Approval-facts HMAC: stop new approval submissions, let the maximum five-minute attestation window drain, rotate the BFF and gateway mounted file together, restart, and resume. Existing approval resolution records remain immutable. Roll back both sides together before resuming submissions.
+
+Observe token `invalid_client`, upstream exchange failures, JWKS verification failures, authorize `429`, approval safe-high reasons, and database/audit rollback errors during every rotation. A failed audit must produce no sensitive success response.
+
+## Database roles
+
+Use environment-specific role names, but preserve this minimum separation:
+
+| Role | Required access | Explicitly revoke |
+| --- | --- | --- |
+| migrator | schema ownership/DDL and data migration while application writes are stopped | normal application login after migration |
+| publisher | `SELECT,INSERT` on `org_events`, `org_versions`; controlled snapshot `SELECT,INSERT,UPDATE` and publication-head trigger access | browser credentials, approval/audit/grant writes |
+| runtime | DML needed for browser sessions/codes/login counters, approval resolutions/queue, Case Tickets/Step Grants/issuance/audit; read sealed organization/policy/resource ownership | DDL, snapshot/head mutation, migration history mutation |
+
+Illustrative hardening (replace role names and expand exact sequences in the private deployment):
+
+```sql
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO agentnexus_runtime, agentnexus_publisher;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON org_policy_snapshot_units, org_policy_snapshot_memberships, org_policy_publication_heads FROM agentnexus_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON org_versions, audit_events, step_grant_issuances, approval_resolution_idempotency FROM agentnexus_runtime;
+GRANT SELECT ON org_versions, org_policy_snapshot_units, org_policy_snapshot_memberships, enterprise_approval_policies, enterprise_approval_policy_versions TO agentnexus_runtime;
+```
+
+The runtime role needs `INSERT` on append-only audit/evidence tables but never update/delete/truncate. The migrator owns migrations; do not run the gateway with migrator credentials.
+
+## Irreversible 000006 release
+
+Migration `000006` revokes every legacy database-id CaseTicket bearer and adds mandatory hash-only credentials. Old and new binaries cannot overlap. Use `make release-auth` only through deployment-owned absolute executable hooks. It fails closed unless maintenance acknowledgement and a TLS DSN are present, and enforces: stop old/writes, create a verified backup, migrate, start only the new binary, then run verification.
+
+Preflight must confirm no old replicas/workers remain, the backup is restorable, secret mounts and file modes are correct, and `make test-auth` passed against real PostgreSQL. If migration/start/verification fails, stop the new binary and restore the pre-migration database backup before starting the old release. SQL Down intentionally raises an exception; there is no destructive in-place rollback.
+
+Ordinary `go test ./...` may skip live PostgreSQL acceptance and is not a release gate. The repository CI provisions a real PostgreSQL service and calls only the fail-closed `make test-auth` target; releases must use that same gate with `AGENTNEXUS_E2E_POSTGRES_DSN` set.

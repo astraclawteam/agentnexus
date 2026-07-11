@@ -4,7 +4,7 @@
 
 body {
   margin: 0;
-  min-width: 1180px;
+  min-width: 0;
   background:
     radial-gradient(circle at 18% 0%, rgba(217, 119, 87, 0.08), transparent 32%),
     radial-gradient(circle at 90% 18%, rgba(94, 122, 125, 0.09), transparent 30%),
@@ -839,11 +839,41 @@ h1 {
   font-weight: 650;
 }
 
-@media (max-width: 900px) {
-  body {
-    min-width: 0;
+@media (max-width: 1179px) {
+  .console-shell {
+    grid-template-columns: minmax(200px, 220px) minmax(0, 1fr);
   }
 
+  .workspace {
+    width: 100%;
+    max-width: 100vw;
+    min-width: 0;
+    padding: 14px 16px 22px;
+  }
+
+  .topbar {
+    grid-template-columns: minmax(160px, 200px) minmax(220px, 1fr) 34px 34px auto 34px 34px;
+  }
+
+  .data-source-chip {
+    display: none;
+  }
+
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lower-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .page-head,
+  .panel-header {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 900px) {
   .console-shell {
     grid-template-columns: 1fr;
   }

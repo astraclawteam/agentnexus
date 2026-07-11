@@ -40,6 +40,24 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 			t.Fatalf("%s operationId=%v", path, operation["operationId"])
 		}
 	}
+	permissions := []any{"suggest", "edit", "publish_low_risk", "approve_high_risk", "workflow_edit", "workflow_advanced", "service_mode"}
+	permissionSchema, ok := schemas["AgentAtlasPermission"].(map[string]any)
+	if !ok {
+		t.Fatal("AgentAtlasPermission schema missing")
+	}
+	assertEnum(t, permissionSchema, permissions)
+	for _, schemaName := range []string{"BrowserSession", "PermissionDecision"} {
+		items := nestedMap(t, property(t, namedSchema(t, schemas, schemaName), "permissions"), "items")
+		if items["$ref"] != "#/components/schemas/AgentAtlasPermission" {
+			t.Fatalf("%s permission items=%v", schemaName, items)
+		}
+	}
+	tokenRequest := namedSchema(t, schemas, "BrowserTokenRequest")
+	assertObjectProperties(t, tokenRequest, []string{"grant_type", "code", "code_verifier", "redirect_uri"}, nil)
+	tokenSecurity := nestedMap(t, document, "components", "securitySchemes", "consoleClientSecret")
+	if tokenSecurity["type"] != "http" || tokenSecurity["scheme"] != "basic" {
+		t.Fatalf("console client security=%v", tokenSecurity)
+	}
 
 	t.Run("BrowserSession", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "BrowserSession")
@@ -54,7 +72,6 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 		assertPropertyType(t, schema, "display_name", "string")
 		assertPropertyType(t, schema, "org_version", "integer")
 		assertStringArray(t, schema, "org_unit_ids")
-		assertStringArray(t, schema, "permissions")
 		assertPropertyType(t, schema, "advanced_mode_allowed", "boolean")
 		assertDateTime(t, schema, "idle_expires_at")
 		assertDateTime(t, schema, "absolute_expires_at")
@@ -66,7 +83,6 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 			"decision", "permissions", "org_unit_ids", "mask_fields", "risk_level", "org_version",
 		}, []string{"fallback_action"})
 		assertEnum(t, property(t, schema, "decision"), []any{"allow", "deny"})
-		assertStringArray(t, schema, "permissions")
 		assertStringArray(t, schema, "org_unit_ids")
 		assertStringArray(t, schema, "mask_fields")
 		assertEnum(t, property(t, schema, "risk_level"), []any{"low", "medium", "high"})

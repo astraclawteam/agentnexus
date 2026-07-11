@@ -29,6 +29,18 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
+const testUpstreamSecret = "Upstream-IdP-client-secret-Q7mV2xK9pR4tY8dF3"
+const testDownstreamSecret = "Console-BFF-client-secret-N8xQ3vK7pT4yR9dF2"
+
+func mustTestConsoleCredentials(t *testing.T, clientID string) ConsoleClientCredentials {
+	t.Helper()
+	credentials, err := NewConsoleClientCredentials(map[string][]string{clientID: {testDownstreamSecret}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return credentials
+}
+
 func TestEnterpriseOIDCHardHTTPTimeoutCancelsJWKSAndAllowsRetry(t *testing.T) {
 	key := mustRSAKey(t)
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, (&jose.SignerOptions{}).WithHeader("kid", "idp"))
@@ -70,7 +82,7 @@ func TestEnterpriseOIDCHardHTTPTimeoutCancelsJWKSAndAllowsRetry(t *testing.T) {
 	ctx := oidc.ClientContext(context.Background(), client)
 	downstream := mustRSAKey(t)
 	hardTimeout := 50 * time.Millisecond
-	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: issuerURL, PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, SigningKeyID: "current", SigningPrivateKey: downstream, HTTPTimeout: hardTimeout}
+	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: issuerURL, PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", UpstreamClientSecret: testUpstreamSecret, CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, ConsoleCredentials: mustTestConsoleCredentials(t, "atlas"), SigningKeyID: "current", SigningPrivateKey: downstream, HTTPTimeout: hardTimeout}
 	upstream, err := NewEnterpriseOIDC(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -121,9 +133,10 @@ func TestOIDCConfigRejectsUnsafeOrAmbiguousRedirectsAndKeys(t *testing.T) {
 	key := mustRSAKey(t)
 	valid := OIDCConfig{
 		EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com",
-		ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback",
-		ConsoleClients: map[string][]string{"agentatlas": {"https://atlas.example.com/auth/callback", "http://127.0.0.1:4173/callback"}},
-		SigningKeyID:   "current", SigningPrivateKey: key, PreviousSigningKeys: map[string]crypto.PublicKey{"previous": &mustRSAKey(t).PublicKey},
+		ClientID: "nexus", UpstreamClientSecret: testUpstreamSecret, CallbackURL: "https://nexus.example.com/oauth2/idp/callback",
+		ConsoleClients:     map[string][]string{"agentatlas": {"https://atlas.example.com/auth/callback", "http://127.0.0.1:4173/callback"}},
+		ConsoleCredentials: mustTestConsoleCredentials(t, "agentatlas"),
+		SigningKeyID:       "current", SigningPrivateKey: key, PreviousSigningKeys: map[string]crypto.PublicKey{"previous": &mustRSAKey(t).PublicKey},
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
@@ -176,7 +189,7 @@ func TestTokenIssuerAdvertisesTheECDSACurveAlgorithm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, SigningKeyID: "ec", SigningPrivateKey: key}
+	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", UpstreamClientSecret: testUpstreamSecret, CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, ConsoleCredentials: mustTestConsoleCredentials(t, "atlas"), SigningKeyID: "ec", SigningPrivateKey: key}
 	issuer, err := NewTokenIssuer(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +209,7 @@ func TestTokenIssuerAdvertisesAlgorithmsForMixedRotationKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, SigningKeyID: "rsa", SigningPrivateKey: current, PreviousSigningKeys: map[string]crypto.PublicKey{"ec": &ec.PublicKey, "ed": edPublic}}
+	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", UpstreamClientSecret: testUpstreamSecret, CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, ConsoleCredentials: mustTestConsoleCredentials(t, "atlas"), SigningKeyID: "rsa", SigningPrivateKey: current, PreviousSigningKeys: map[string]crypto.PublicKey{"ec": &ec.PublicKey, "ed": edPublic}}
 	issuer, err := NewTokenIssuer(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +233,7 @@ func TestTokenIssuerAdvertisesAlgorithmsForMixedRotationKeys(t *testing.T) {
 }
 
 func TestOIDCConfigRejectsMalformedPreviousPublicKeys(t *testing.T) {
-	base := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, SigningKeyID: "rsa", SigningPrivateKey: mustRSAKey(t)}
+	base := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", UpstreamClientSecret: testUpstreamSecret, CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"atlas": {"https://atlas.example.com/cb"}}, ConsoleCredentials: mustTestConsoleCredentials(t, "atlas"), SigningKeyID: "rsa", SigningPrivateKey: mustRSAKey(t)}
 	weak, _ := rsa.GenerateKey(rand.Reader, 1024)
 	badExponent := mustRSAKey(t).PublicKey
 	badExponent.E = 2
@@ -240,7 +253,7 @@ func TestOIDCConfigRejectsMalformedPreviousPublicKeys(t *testing.T) {
 func TestJWKSAndIDTokenExposeOnlyPublicRotatableKeys(t *testing.T) {
 	current := mustRSAKey(t)
 	previous := mustRSAKey(t)
-	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", ClientSecret: "secret", CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"agentatlas": {"https://atlas.example.com/cb"}}, SigningKeyID: "current", SigningPrivateKey: current, PreviousSigningKeys: map[string]crypto.PublicKey{"previous": &previous.PublicKey}}
+	cfg := OIDCConfig{EnterpriseID: "ent-1", EnterpriseIssuerURL: "https://idp.example.com", PublicIssuerURL: "https://nexus.example.com", ClientID: "nexus", UpstreamClientSecret: testUpstreamSecret, CallbackURL: "https://nexus.example.com/oauth2/idp/callback", ConsoleClients: map[string][]string{"agentatlas": {"https://atlas.example.com/cb"}}, ConsoleCredentials: mustTestConsoleCredentials(t, "agentatlas"), SigningKeyID: "current", SigningPrivateKey: current, PreviousSigningKeys: map[string]crypto.PublicKey{"previous": &previous.PublicKey}}
 	issuer, err := NewTokenIssuer(cfg, func() time.Time { return fixedNow })
 	if err != nil {
 		t.Fatal(err)

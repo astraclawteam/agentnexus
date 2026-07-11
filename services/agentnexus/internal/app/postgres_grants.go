@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"time"
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
@@ -24,6 +25,7 @@ type grantWriteTx interface {
 	GetLatestEnterpriseAuditHash(context.Context, string) (string, error)
 	CreateStepGrant(context.Context, db.CreateStepGrantParams) (db.StepGrant, error)
 	InsertStepGrantIssuance(context.Context, db.InsertStepGrantIssuanceParams) (db.StepGrantIssuance, error)
+	GetStepGrantByTokenHash(context.Context, db.GetStepGrantByTokenHashParams) (db.GetStepGrantByTokenHashRow, error)
 	AppendAuditEvent(context.Context, db.AppendAuditEventParams) error
 	Commit(context.Context) error
 	Rollback(context.Context) error
@@ -34,7 +36,6 @@ type grantWriteTxBeginner interface {
 }
 type grantReader interface {
 	GetGrantResourceOwner(context.Context, db.GetGrantResourceOwnerParams) (db.SensitiveResourceOwnership, error)
-	GetStepGrantByTokenHash(context.Context, db.GetStepGrantByTokenHashParams) (db.GetStepGrantByTokenHashRow, error)
 }
 
 type postgresGrantPool struct{ pool *pgxpool.Pool }
@@ -85,6 +86,9 @@ func (t *postgresGrantTx) CreateStepGrant(ctx context.Context, p db.CreateStepGr
 func (t *postgresGrantTx) InsertStepGrantIssuance(ctx context.Context, p db.InsertStepGrantIssuanceParams) (db.StepGrantIssuance, error) {
 	return t.queries.InsertStepGrantIssuance(ctx, p)
 }
+func (t *postgresGrantTx) GetStepGrantByTokenHash(ctx context.Context, p db.GetStepGrantByTokenHashParams) (db.GetStepGrantByTokenHashRow, error) {
+	return t.queries.GetStepGrantByTokenHash(ctx, p)
+}
 func (t *postgresGrantTx) AppendAuditEvent(ctx context.Context, p db.AppendAuditEventParams) error {
 	_, err := t.queries.AppendAuditEvent(ctx, p)
 	return err
@@ -127,7 +131,7 @@ func (s *PostgresGrantStore) CreateStepGrantAndAudit(ctx context.Context, grant 
 	}
 	tx, err := s.writer.BeginGrantWriteTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
-		return tickets.StepGrant{}, err
+		return tickets.StepGrant{}, errors.Join(tickets.ErrGrantUnavailable, err)
 	}
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
@@ -197,11 +201,22 @@ func grantEvidenceHashes(grant tickets.StepGrant) (string, string) {
 	return hex.EncodeToString(in[:]), hex.EncodeToString(out[:])
 }
 
-func (s *PostgresGrantStore) GetStepGrantByTokenHash(ctx context.Context, enterpriseID, tokenHash string) (tickets.StepGrant, error) {
-	if s == nil || s.reader == nil {
+func (s *PostgresGrantStore) VerifyStepGrantAndAudit(ctx context.Context, input tickets.VerifyStepGrantInput, tokenHash, auditID string, now time.Time) (result tickets.StepGrant, resultErr error) {
+	if s == nil || s.writer == nil || len(tokenHash) != 64 || auditID == "" {
 		return tickets.StepGrant{}, tickets.ErrGrantUnavailable
 	}
-	row, err := s.reader.GetStepGrantByTokenHash(ctx, db.GetStepGrantByTokenHashParams{EnterpriseID: enterpriseID, TokenHash: tokenHash})
+	tx, err := s.writer.BeginGrantWriteTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return tickets.StepGrant{}, errors.Join(tickets.ErrGrantUnavailable, err)
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
+		defer cancel()
+		if rollbackErr := tx.Rollback(cleanup); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) && resultErr != nil {
+			resultErr = errors.Join(resultErr, rollbackErr)
+		}
+	}()
+	row, err := tx.GetStepGrantByTokenHash(ctx, db.GetStepGrantByTokenHashParams{EnterpriseID: input.EnterpriseID, TokenHash: tokenHash})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return tickets.StepGrant{}, tickets.ErrGrantDenied
@@ -212,5 +227,34 @@ func (s *PostgresGrantStore) GetStepGrantByTokenHash(ctx context.Context, enterp
 	if json.Unmarshal(row.Scopes, &scopes) != nil {
 		return tickets.StepGrant{}, tickets.ErrGrantUnavailable
 	}
-	return tickets.StepGrant{ID: row.ID, TokenHash: row.TokenHash, EnterpriseID: row.EnterpriseID, ActorUserID: row.ActorUserID, CaseTicketID: row.CaseTicketID, OrgUnitID: row.OrgUnitID, OrgVersion: row.OrgVersion, ResourceType: row.ResourceType, ResourceID: row.ResourceID, Action: row.Action, Scopes: scopes, ExpiresAt: row.ExpiresAt.Time, CreatedAt: row.CreatedAt.Time}, nil
+	grant := tickets.StepGrant{ID: row.ID, TokenHash: row.TokenHash, EnterpriseID: row.EnterpriseID, ActorUserID: row.ActorUserID, CaseTicketID: row.CaseTicketID, OrgUnitID: row.OrgUnitID, OrgVersion: row.OrgVersion, ResourceType: row.ResourceType, ResourceID: row.ResourceID, Action: row.Action, Scopes: scopes, ExpiresAt: row.ExpiresAt.Time, CreatedAt: row.CreatedAt.Time}
+	if grant.EnterpriseID != input.EnterpriseID || grant.ActorUserID != input.ActorUserID || grant.ResourceType != input.ResourceType || grant.ResourceID != input.ResourceID || grant.Action != input.Action || len(grant.Scopes) != 1 || grant.Scopes[0] != input.Scope || !now.Before(grant.ExpiresAt) {
+		return tickets.StepGrant{}, tickets.ErrGrantDenied
+	}
+	if _, err = tx.AcquireEnterpriseAuditLock(ctx, grant.EnterpriseID); err != nil {
+		return tickets.StepGrant{}, errors.Join(tickets.ErrGrantUnavailable, err)
+	}
+	previous, err := tx.GetLatestEnterpriseAuditHash(ctx, grant.EnterpriseID)
+	if err != nil {
+		return tickets.StepGrant{}, errors.Join(tickets.ErrGrantUnavailable, err)
+	}
+	inputHash, outputHash := grantVerificationEvidenceHashes(input, grant, now)
+	event := audit.NewEvent(audit.EventInput{ID: auditID, EnterpriseID: grant.EnterpriseID, CaseTicketID: grant.CaseTicketID, StepGrantID: grant.ID, ActorUserID: grant.ActorUserID, ResourceType: grant.ResourceType, ResourceID: grant.ResourceID, Action: "step_grant.verify", Decision: "allow", InputHash: inputHash, OutputHash: outputHash, EvidencePointer: grant.ID}, previous)
+	if err = tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, CaseTicketID: textValue(event.CaseTicketID), StepGrantID: textValue(event.StepGrantID), ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, InputHash: textValue(event.InputHash), OutputHash: textValue(event.OutputHash), EvidencePointer: textValue(event.EvidencePointer), PrevHash: textValue(event.PrevHash), EventHash: event.EventHash}); err != nil {
+		return tickets.StepGrant{}, errors.Join(tickets.ErrGrantUnavailable, err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return tickets.StepGrant{}, errors.Join(tickets.ErrGrantUnavailable, err)
+	}
+	return grant, nil
+}
+
+func grantVerificationEvidenceHashes(input tickets.VerifyStepGrantInput, grant tickets.StepGrant, verifiedAt time.Time) (string, string) {
+	raw, _ := json.Marshal(struct {
+		EnterpriseID, ActorUserID, CaseTicketID, StepGrantID, ResourceType, ResourceID, Action, Scope string
+		VerifiedAt                                                                                    int64
+	}{input.EnterpriseID, input.ActorUserID, grant.CaseTicketID, grant.ID, input.ResourceType, input.ResourceID, input.Action, input.Scope, verifiedAt.UnixNano()})
+	in := sha256.Sum256(raw)
+	out := sha256.Sum256([]byte(grant.TokenHash + ":allow"))
+	return hex.EncodeToString(in[:]), hex.EncodeToString(out[:])
 }

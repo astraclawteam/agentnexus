@@ -17,7 +17,7 @@ const GrantRecordAudit GrantRecordStage = "audit"
 
 type GovernedGrantStore interface {
 	CreateStepGrantAndAudit(context.Context, StepGrant, string) (StepGrant, error)
-	GetStepGrantByTokenHash(context.Context, string, string) (StepGrant, error)
+	VerifyStepGrantAndAudit(context.Context, VerifyStepGrantInput, string, string, time.Time) (StepGrant, error)
 }
 
 func (s *Service) CreateStepGrant(input CreateStepGrantInput) (StepGrant, error) {
@@ -101,14 +101,18 @@ func (s *Service) VerifyGrant(ctx context.Context, input VerifyStepGrantInput) (
 	if !ok {
 		return StepGrant{}, ErrGrantUnavailable
 	}
-	grant, err := store.GetStepGrantByTokenHash(ctx, input.EnterpriseID, HashStepGrantToken(input.Token))
+	auditID := s.newID()
+	if !canonical(auditID) {
+		return StepGrant{}, ErrGrantUnavailable
+	}
+	grant, err := store.VerifyStepGrantAndAudit(ctx, input, HashStepGrantToken(input.Token), auditID, s.now())
 	if err != nil {
 		if errors.Is(err, ErrGrantUnavailable) {
 			return StepGrant{}, ErrGrantUnavailable
 		}
 		return StepGrant{}, ErrGrantDenied
 	}
-	if grant.EnterpriseID != input.EnterpriseID || grant.ActorUserID != input.ActorUserID || grant.ResourceType != input.ResourceType || grant.ResourceID != input.ResourceID || grant.Action != input.Action || len(grant.Scopes) != 1 || grant.Scopes[0] != input.Scope || s.IsGrantExpired(grant, s.now()) {
+	if grant.EnterpriseID != input.EnterpriseID || grant.ActorUserID != input.ActorUserID || grant.ResourceType != input.ResourceType || grant.ResourceID != input.ResourceID || grant.Action != input.Action || len(grant.Scopes) != 1 || grant.Scopes[0] != input.Scope {
 		return StepGrant{}, ErrGrantDenied
 	}
 	grant.Token = ""
@@ -181,11 +185,18 @@ func (s *MemoryStore) CreateStepGrantAndAudit(_ context.Context, grant StepGrant
 	return grant, nil
 }
 
-func (s *MemoryStore) GetStepGrantByTokenHash(_ context.Context, enterpriseID, tokenHash string) (StepGrant, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *MemoryStore) VerifyStepGrantAndAudit(_ context.Context, input VerifyStepGrantInput, tokenHash, auditID string, now time.Time) (StepGrant, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, grant := range s.grants {
-		if grant.EnterpriseID == enterpriseID && grant.TokenHash == tokenHash {
+		if grant.EnterpriseID == input.EnterpriseID && grant.TokenHash == tokenHash {
+			if grant.ActorUserID != input.ActorUserID || grant.ResourceType != input.ResourceType || grant.ResourceID != input.ResourceID || grant.Action != input.Action || len(grant.Scopes) != 1 || grant.Scopes[0] != input.Scope || !now.Before(grant.ExpiresAt) {
+				return StepGrant{}, ErrGrantDenied
+			}
+			if s.failGrantStage == GrantRecordAudit {
+				return StepGrant{}, ErrGrantUnavailable
+			}
+			s.audits = append(s.audits, auditID)
 			return grant, nil
 		}
 	}
@@ -198,6 +209,7 @@ func (s *MemoryStore) FailGrantRecordAt(stage GrantRecordStage) {
 	s.failGrantStage = stage
 }
 func (s *MemoryStore) GrantCount() int { s.mu.RLock(); defer s.mu.RUnlock(); return len(s.grants) }
+func (s *MemoryStore) AuditCount() int { s.mu.RLock(); defer s.mu.RUnlock(); return len(s.audits) }
 
 func (s *MemoryStore) RawCaseTicketTokenStored(token string) bool {
 	s.mu.RLock()

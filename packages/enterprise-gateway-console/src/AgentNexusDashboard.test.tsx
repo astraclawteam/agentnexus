@@ -25,6 +25,16 @@ describe("AgentNexusDashboard", () => {
     expect(sources.match(/@xiaozhiclaw\/runtime-ui\/styles\.css/g)).toHaveLength(1);
   });
 
+  it("adapts at 1179px without imposing a whole-page minimum width", () => {
+    const css = readFileSync("src/styles.css", "utf8");
+
+    expect(css).not.toMatch(/body\s*\{[^}]*min-width:\s*1180px/s);
+    expect(css).toContain("@media (max-width: 1179px)");
+    expect(css).toMatch(/\.workspace\s*\{[^}]*min-width:\s*0/s);
+    expect(css).toMatch(/\.ticket-table\s*\{[^}]*overflow-x:\s*auto/s);
+    expect(css).toMatch(/\.agent-chat-panel\s*\{[^}]*calc\(100vw - 48px\)/s);
+  });
+
   it("renders the enterprise admin gateway prototype regions", async () => {
     render(<AgentNexusDashboard />);
 

@@ -19,3 +19,11 @@ Before production rollout, run a live PostgreSQL two-connection acceptance test 
 Policy evaluation accepts at most 10,000 organization units, 100,000 actor memberships, and organization depth 256. SQL reads use limit-plus-one bounds so an oversized snapshot fails closed before unbounded conversion or graph work. Browser profile membership reads bind the exact sealed version returned by the first query, return tenant/version/user identity for row revalidation, and apply the same 100,001 limit-plus-one bound.
 
 Historical snapshot rows retain foreign keys to their organization version and enterprise users with `RESTRICT` semantics. User/version deletion therefore requires an explicit governance or anonymization workflow; do not destroy or mutate historical authorization evidence to satisfy routine lifecycle operations.
+
+## Migration 000006: irreversible credential cutover
+
+`000006_scoped_step_grants.sql` is deliberately irreversible. Its Up migration revokes all legacy Case Tickets whose database id previously acted as a bearer, writes non-bearer invalidation hashes, and requires the new domain-separated `token_hash`. The old binary cannot authenticate newly issued credentials and can misinterpret legacy ids, so rolling old/new overlap is forbidden.
+
+Deploy only in stop-write maintenance mode: preflight and test a restore, stop every old gateway/worker, take and record a durable backup, apply all migrations with the migrator role, start only the new binaries, run the real-PostgreSQL `make test-auth`/smoke verification, then reopen traffic. `deploy/release-auth.sh` encodes this order with required deployment-owned hooks.
+
+The Down section always raises `migration 000006 is irreversible`; it never drops `token_hash`, issuance evidence, ownership, or audit constraints. Rollback means stopping the new release and restoring the pre-migration backup while still in maintenance. Legacy ticket revocation cannot be safely undone in place.

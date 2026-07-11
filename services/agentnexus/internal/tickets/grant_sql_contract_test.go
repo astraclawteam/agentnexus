@@ -47,6 +47,15 @@ func TestStepGrantMigrationStoresOnlyHashAndImmutableExactScope(t *testing.T) {
 	if strings.Contains(sql, "sha256(convert_to(id") {
 		t.Fatal("legacy database-visible id must not remain an accepted bearer")
 	}
+	down := sql[strings.Index(sql, "-- +goose down"):]
+	if !strings.Contains(down, "migration 000006 is irreversible") || !strings.Contains(down, "raise exception") {
+		t.Fatal("credential migration Down must fail closed as explicitly irreversible")
+	}
+	for _, dangerous := range []string{"drop column if exists token_hash", "drop table if exists step_grant_issuances", "drop table if exists sensitive_resource_ownerships"} {
+		if strings.Contains(down, dangerous) {
+			t.Fatalf("irreversible migration Down contains destructive rollback: %q", dangerous)
+		}
+	}
 }
 
 func TestStepGrantQueriesAreTenantHashAndVersionScoped(t *testing.T) {

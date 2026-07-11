@@ -1,0 +1,37 @@
+name: AgentNexus auth release gate
+
+on:
+  pull_request:
+    paths:
+      - "services/agentnexus/**"
+      - ".github/workflows/agentnexus-auth.yml"
+  workflow_dispatch:
+
+jobs:
+  auth-contract:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: agentnexus_ci
+          POSTGRES_DB: agentnexus_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentnexus_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      AGENTNEXUS_E2E_POSTGRES_DSN: postgres://postgres:agentnexus_ci@127.0.0.1:5432/agentnexus_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/agentnexus/go.mod
+          cache-dependency-path: services/agentnexus/go.sum
+      - name: Run the fail-closed real-PostgreSQL auth release gate
+        working-directory: services/agentnexus
+        run: make test-auth

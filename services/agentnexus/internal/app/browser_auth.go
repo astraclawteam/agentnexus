@@ -12,7 +12,6 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -88,6 +87,7 @@ type BrowserAuditEvent struct {
 
 type BrowserAuditSink interface {
 	AppendBrowserAudit(context.Context, BrowserAuditEvent) error
+	LogoutBrowserSession(context.Context, string, BrowserAuditEvent) (browserauth.BrowserSession, error)
 }
 
 type BrowserAuthDependencies struct {
@@ -220,11 +220,13 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
-	if values, present := query["response_type"]; present && (len(values) != 1 || values[0] != "code") {
+	responseType, ok := requiredSingle(query, "response_type")
+	if !ok || responseType != "code" {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
-	if values, present := query["scope"]; present && (len(values) != 1 || values[0] == "" || !slices.Contains(strings.Fields(values[0]), "openid")) {
+	scope, ok := requiredSingle(query, "scope")
+	if !ok || !containsExactWord(strings.Fields(scope), "openid") {
 		writeOAuthError(w, http.StatusBadRequest)
 		return
 	}
@@ -405,6 +407,11 @@ func (h *browserAuthHandler) token(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
+	clientID, clientSecret, ok := confidentialBasicCredentials(r.Header)
+	if !ok || !h.config.AuthenticateConsoleClient(clientID, clientSecret) {
+		writeInvalidClient(w)
+		return
+	}
 	grant, ok := requiredSingle(form, "grant_type")
 	if !ok {
 		writeTokenError(w, http.StatusBadRequest, "invalid_request")
@@ -424,15 +431,6 @@ func (h *browserAuthHandler) token(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	clientID, ok := requiredSingle(form, "client_id")
-	if !ok {
-		writeTokenError(w, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	if len(clientID) > 256 {
-		writeTokenError(w, http.StatusBadRequest, "invalid_request")
-		return
-	}
 	redirectURI, ok := requiredSingle(form, "redirect_uri")
 	if !ok {
 		writeTokenError(w, http.StatusBadRequest, "invalid_request")
@@ -446,7 +444,7 @@ func (h *browserAuthHandler) token(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
 		return
 	}
-	if len(form) != 5 {
+	if len(form) != 4 {
 		writeTokenError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -473,7 +471,7 @@ func (h *browserAuthHandler) token(w http.ResponseWriter, r *http.Request) {
 
 func (h *browserAuthHandler) discovery(w http.ResponseWriter, _ *http.Request) {
 	issuer := strings.TrimRight(h.config.PublicIssuerURL, "/")
-	writeJSON(w, http.StatusOK, map[string]any{"issuer": h.config.PublicIssuerURL, "authorization_endpoint": issuer + "/oauth2/authorize", "token_endpoint": issuer + "/oauth2/token", "jwks_uri": issuer + "/oauth2/jwks", "response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code"}, "code_challenge_methods_supported": []string{"S256"}, "id_token_signing_alg_values_supported": h.issuer.Algorithms()})
+	writeJSON(w, http.StatusOK, map[string]any{"issuer": h.config.PublicIssuerURL, "authorization_endpoint": issuer + "/oauth2/authorize", "token_endpoint": issuer + "/oauth2/token", "jwks_uri": issuer + "/oauth2/jwks", "response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code"}, "code_challenge_methods_supported": []string{"S256"}, "token_endpoint_auth_methods_supported": []string{"client_secret_basic"}, "id_token_signing_alg_values_supported": h.issuer.Algorithms()})
 }
 
 func (h *browserAuthHandler) jwks(w http.ResponseWriter, _ *http.Request) {
@@ -524,16 +522,17 @@ func (h *browserAuthHandler) me(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *browserAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
-	clearSessionCookie(w)
 	cookie, err := r.Cookie(browserSessionCookie)
 	if err != nil {
+		clearSessionCookie(w)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	logoutCtx, cancel := boundedCleanupContext(r.Context())
-	session, err := h.sessions.LogoutSession(logoutCtx, cookie.Value)
+	session, err := h.audit.LogoutBrowserSession(logoutCtx, cookie.Value, BrowserAuditEvent{EnterpriseID: h.config.EnterpriseID, Action: "browser_session.logout", Decision: "allow"})
 	cancel()
 	if errors.Is(err, browserauth.ErrInvalidSession) {
+		clearSessionCookie(w)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -541,12 +540,11 @@ func (h *browserAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusServiceUnavailable)
 		return
 	}
-	auditCtx, auditCancel := boundedCleanupContext(r.Context())
-	defer auditCancel()
-	if err := h.audit.AppendBrowserAudit(auditCtx, BrowserAuditEvent{EnterpriseID: session.EnterpriseID, ActorUserID: session.UserID, Action: "browser_session.logout", Decision: "allow"}); err != nil {
+	if session.EnterpriseID != h.config.EnterpriseID || session.UserID == "" {
 		writeOAuthError(w, http.StatusServiceUnavailable)
 		return
 	}
+	clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -566,6 +564,39 @@ func constantTimeEqual(left, right string) bool {
 	leftHash := sha256.Sum256([]byte(left))
 	rightHash := sha256.Sum256([]byte(right))
 	return subtle.ConstantTimeCompare(leftHash[:], rightHash[:]) == 1
+}
+func containsExactWord(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func confidentialBasicCredentials(header http.Header) (string, string, bool) {
+	values := header.Values("Authorization")
+	if len(values) != 1 || !strings.HasPrefix(values[0], "Basic ") || strings.Count(values[0], " ") != 1 {
+		return "", "", false
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(values[0], "Basic "))
+	if err != nil || len(raw) == 0 || len(raw) > 1024 {
+		return "", "", false
+	}
+	separator := strings.IndexByte(string(raw), ':')
+	if separator < 1 || separator > 256 || separator == len(raw)-1 {
+		return "", "", false
+	}
+	clientID, secret := string(raw[:separator]), string(raw[separator+1:])
+	if strings.TrimSpace(clientID) != clientID || strings.TrimSpace(secret) != secret {
+		return "", "", false
+	}
+	return clientID, secret, true
+}
+
+func writeInvalidClient(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Basic realm="AgentNexus token"`)
+	writeTokenError(w, http.StatusUnauthorized, "invalid_client")
 }
 func validChallenge(value string) bool {
 	decoded, err := browserauth.DecodeS256Challenge(value)

@@ -312,3 +312,10 @@ func hashHex(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
 }
+
+func HashBrowserSessionToken(token string) string {
+	if validateGeneratedSecret(token) != nil {
+		return ""
+	}
+	return hashHex(token)
+}

@@ -32,17 +32,18 @@ import (
 const idTokenLifetime = 5 * time.Minute
 
 type OIDCConfig struct {
-	EnterpriseID        string
-	EnterpriseIssuerURL string
-	PublicIssuerURL     string
-	ClientID            string
-	ClientSecret        string
-	CallbackURL         string
-	ConsoleClients      map[string][]string
-	SigningKeyID        string
-	SigningPrivateKey   crypto.Signer
-	PreviousSigningKeys map[string]crypto.PublicKey
-	HTTPTimeout         time.Duration
+	EnterpriseID         string
+	EnterpriseIssuerURL  string
+	PublicIssuerURL      string
+	ClientID             string
+	UpstreamClientSecret string
+	CallbackURL          string
+	ConsoleClients       map[string][]string
+	ConsoleCredentials   ConsoleClientCredentials
+	SigningKeyID         string
+	SigningPrivateKey    crypto.Signer
+	PreviousSigningKeys  map[string]crypto.PublicKey
+	HTTPTimeout          time.Duration
 }
 
 const defaultOIDCHTTPTimeout = 15 * time.Second
@@ -58,7 +59,7 @@ func (c OIDCConfig) effectiveHTTPTimeout() (time.Duration, error) {
 }
 
 func (c OIDCConfig) Validate() error {
-	if c.EnterpriseID == "" || c.EnterpriseIssuerURL == "" || c.PublicIssuerURL == "" || c.ClientID == "" || c.ClientSecret == "" || c.CallbackURL == "" || c.SigningKeyID == "" || c.SigningPrivateKey == nil || len(c.ConsoleClients) == 0 {
+	if c.EnterpriseID == "" || c.EnterpriseIssuerURL == "" || c.PublicIssuerURL == "" || c.ClientID == "" || c.UpstreamClientSecret == "" || c.CallbackURL == "" || c.SigningKeyID == "" || c.SigningPrivateKey == nil || len(c.ConsoleClients) == 0 {
 		return errors.New("browser OIDC configuration incomplete")
 	}
 	if _, err := c.effectiveHTTPTimeout(); err != nil {
@@ -110,7 +111,14 @@ func (c OIDCConfig) Validate() error {
 			unique[redirect] = struct{}{}
 		}
 	}
+	if err := c.ConsoleCredentials.ValidateClosedSet(c.ConsoleClients); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (c OIDCConfig) AuthenticateConsoleClient(clientID, secret string) bool {
+	return c.ConsoleCredentials.Authenticate(clientID, secret)
 }
 
 func validateIssuerURL(raw string, allowLoopback bool) error {
@@ -439,7 +447,7 @@ func NewEnterpriseOIDC(ctx context.Context, config OIDCConfig) (*EnterpriseOIDC,
 	if err != nil {
 		return nil, err
 	}
-	return &EnterpriseOIDC{oauth2: oauth2.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, Endpoint: provider.Endpoint(), RedirectURL: config.CallbackURL, Scopes: []string{oidc.ScopeOpenID}}, verifier: provider.Verifier(&oidc.Config{ClientID: config.ClientID}), client: client, clientID: config.ClientID}, nil
+	return &EnterpriseOIDC{oauth2: oauth2.Config{ClientID: config.ClientID, ClientSecret: config.UpstreamClientSecret, Endpoint: provider.Endpoint(), RedirectURL: config.CallbackURL, Scopes: []string{oidc.ScopeOpenID}}, verifier: provider.Verifier(&oidc.Config{ClientID: config.ClientID}), client: client, clientID: config.ClientID}, nil
 }
 
 type oidcTimeoutTransport struct {

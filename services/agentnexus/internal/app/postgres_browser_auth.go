@@ -7,9 +7,11 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"time"
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -181,6 +183,52 @@ func (s *PostgresBrowserAuditSink) AppendBrowserAudit(ctx context.Context, input
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (s *PostgresBrowserAuditSink) LogoutBrowserSession(ctx context.Context, token string, input BrowserAuditEvent) (result browserauth.BrowserSession, resultErr error) {
+	idHash := browserauth.HashBrowserSessionToken(token)
+	if s == nil || s.pool == nil || idHash == "" || input.EnterpriseID == "" || input.Action != "browser_session.logout" || input.Decision != "allow" {
+		return browserauth.BrowserSession{}, browserauth.ErrInvalidSession
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
+		defer cancel()
+		if rollbackErr := tx.Rollback(cleanup); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) && resultErr != nil {
+			resultErr = errors.Join(resultErr, rollbackErr)
+		}
+	}()
+	queries := db.New(tx)
+	now := time.Now().UTC()
+	record, err := queries.RevokeAndGetBrowserSession(ctx, db.RevokeAndGetBrowserSessionParams{IDHash: idHash, RevokedAt: pgtype.Timestamptz{Time: now, Valid: true}})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return browserauth.BrowserSession{}, browserauth.ErrInvalidSession
+	}
+	if err != nil || record.EnterpriseID != input.EnterpriseID || record.EnterpriseUserID == "" {
+		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+	}
+	if _, err = queries.AcquireEnterpriseAuditLock(ctx, record.EnterpriseID); err != nil {
+		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+	}
+	previous, err := queries.GetLatestEnterpriseAuditHash(ctx, record.EnterpriseID)
+	if err != nil {
+		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+	}
+	id, err := randomAuditID(s.random)
+	if err != nil {
+		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+	}
+	event := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: record.EnterpriseID, ActorUserID: record.EnterpriseUserID, ResourceType: "browser_session", ResourceID: record.EnterpriseUserID, Action: input.Action, Decision: input.Decision}, previous)
+	if _, err = queries.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, PrevHash: textValue(event.PrevHash), EventHash: event.EventHash}); err != nil {
+		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+	}
+	return browserauth.BrowserSession{EnterpriseID: record.EnterpriseID, UserID: record.EnterpriseUserID, CreatedAt: record.CreatedAt.Time, LastSeenAt: record.LastSeenAt.Time, IdleExpiresAt: record.IdleExpiresAt.Time, AbsoluteExpiresAt: record.AbsoluteExpiresAt.Time}, nil
 }
 
 func randomAuditID(source io.Reader) (string, error) {

@@ -128,22 +128,7 @@ FOR EACH ROW EXECUTE FUNCTION validate_step_grant_issuance();
 
 -- +goose Down
 -- +goose StatementBegin
-DROP TRIGGER IF EXISTS validate_step_grant_issuance ON step_grant_issuances;
-DROP TRIGGER IF EXISTS guard_governed_step_grant_scope ON step_grants;
-DROP TRIGGER IF EXISTS guard_step_grant_issuance_evidence ON step_grant_issuances;
-DROP TRIGGER IF EXISTS reject_step_grant_issuance_truncate ON step_grant_issuances;
-DROP TRIGGER IF EXISTS serialize_sensitive_resource_ownership ON sensitive_resource_ownerships;
-DROP FUNCTION IF EXISTS validate_step_grant_issuance();
-DROP FUNCTION IF EXISTS guard_governed_step_grant_scope();
-DROP FUNCTION IF EXISTS guard_step_grant_issuance_evidence();
-DROP FUNCTION IF EXISTS serialize_sensitive_resource_ownership();
-DROP INDEX IF EXISTS idx_step_grants_enterprise_expiry;
-DROP TABLE IF EXISTS step_grant_issuances;
-DROP TABLE IF EXISTS sensitive_resource_ownerships;
-ALTER TABLE step_grants DROP CONSTRAINT IF EXISTS fk_step_grants_enterprise_ticket;
-ALTER TABLE step_grants DROP CONSTRAINT IF EXISTS uq_step_grants_enterprise_id_id;
-ALTER TABLE case_tickets DROP CONSTRAINT IF EXISTS uq_case_tickets_enterprise_id_id;
-ALTER TABLE case_tickets DROP CONSTRAINT IF EXISTS uq_case_ticket_token_hash;
-ALTER TABLE case_tickets DROP CONSTRAINT IF EXISTS chk_case_ticket_token_hash;
-ALTER TABLE case_tickets DROP COLUMN IF EXISTS token_hash;
+DO $$ BEGIN
+    RAISE EXCEPTION 'migration 000006 is irreversible: legacy CaseTicket bearers were revoked; restore the pre-migration backup under maintenance instead';
+END $$;
 -- +goose StatementEnd

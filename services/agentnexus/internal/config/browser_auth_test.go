@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
@@ -32,6 +33,7 @@ func TestLoadBrowserAuthEnabledFailsClosedOnEveryRequiredSetting(t *testing.T) {
 }
 
 func TestLoadBrowserAuthReadsSigningKeyOnlyFromMountedPath(t *testing.T) {
+	setBrowserSecretFiles(t, "agentatlas")
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +50,7 @@ func TestLoadBrowserAuthReadsSigningKeyOnlyFromMountedPath(t *testing.T) {
 		"AGENTNEXUS_BROWSER_AUTH_ENABLED": "true", "AGENTNEXUS_POSTGRES_DSN": "postgres://localhost/agentnexus",
 		"AGENTNEXUS_OIDC_ENTERPRISE_ID": "ent-1", "AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL": "https://idp.example.com",
 		"AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL": "https://nexus.example.com", "AGENTNEXUS_OIDC_CLIENT_ID": "nexus",
-		"AGENTNEXUS_OIDC_CLIENT_SECRET": "secret", "AGENTNEXUS_OIDC_CALLBACK_URL": "https://nexus.example.com/oauth2/idp/callback",
+		"AGENTNEXUS_OIDC_CALLBACK_URL":         "https://nexus.example.com/oauth2/idp/callback",
 		"AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON": `{"agentatlas":["https://atlas.example.com/auth/callback"]}`,
 		"AGENTNEXUS_OIDC_SIGNING_KEY_ID":       "current", "AGENTNEXUS_OIDC_SIGNING_KEY_PATH": path,
 	}
@@ -65,12 +67,13 @@ func TestLoadBrowserAuthReadsSigningKeyOnlyFromMountedPath(t *testing.T) {
 }
 
 func TestLoadBrowserAuthPrefersDeploymentPostgresDSN(t *testing.T) {
+	setBrowserSecretFiles(t, "atlas")
 	// Reuse the valid key/config fixture from the path-loading test through explicit environment setup.
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	der, _ := x509.MarshalPKCS8PrivateKey(key)
 	path := filepath.Join(t.TempDir(), "key.pem")
 	_ = os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600)
-	for name, value := range map[string]string{"AGENTNEXUS_BROWSER_AUTH_ENABLED": "true", "AGENTNEXUS_POSTGRES_DSN": "postgres://preferred/agentnexus", "AGENTNEXUS_DATABASE_URL": "postgres://legacy/wrong", "AGENTNEXUS_OIDC_ENTERPRISE_ID": "ent-1", "AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL": "https://idp.example.com", "AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL": "https://nexus.example.com", "AGENTNEXUS_OIDC_CLIENT_ID": "nexus", "AGENTNEXUS_OIDC_CLIENT_SECRET": "secret", "AGENTNEXUS_OIDC_CALLBACK_URL": "https://nexus.example.com/oauth2/idp/callback", "AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON": `{"atlas":["https://atlas.example.com/cb"]}`, "AGENTNEXUS_OIDC_SIGNING_KEY_ID": "current", "AGENTNEXUS_OIDC_SIGNING_KEY_PATH": path} {
+	for name, value := range map[string]string{"AGENTNEXUS_BROWSER_AUTH_ENABLED": "true", "AGENTNEXUS_POSTGRES_DSN": "postgres://preferred/agentnexus", "AGENTNEXUS_DATABASE_URL": "postgres://legacy/wrong", "AGENTNEXUS_OIDC_ENTERPRISE_ID": "ent-1", "AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL": "https://idp.example.com", "AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL": "https://nexus.example.com", "AGENTNEXUS_OIDC_CLIENT_ID": "nexus", "AGENTNEXUS_OIDC_CALLBACK_URL": "https://nexus.example.com/oauth2/idp/callback", "AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON": `{"atlas":["https://atlas.example.com/cb"]}`, "AGENTNEXUS_OIDC_SIGNING_KEY_ID": "current", "AGENTNEXUS_OIDC_SIGNING_KEY_PATH": path} {
 		t.Setenv(name, value)
 	}
 	cfg, err := LoadBrowserAuth()
@@ -149,6 +152,7 @@ func TestLoadBrowserAuthParsesTrustedProxyCIDRsStrictly(t *testing.T) {
 
 func setValidBrowserAuthEnvironment(t *testing.T) {
 	t.Helper()
+	setBrowserSecretFiles(t, "atlas")
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +165,23 @@ func setValidBrowserAuthEnvironment(t *testing.T) {
 	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for name, value := range map[string]string{"AGENTNEXUS_BROWSER_AUTH_ENABLED": "true", "AGENTNEXUS_POSTGRES_DSN": "postgres://localhost/agentnexus", "AGENTNEXUS_OIDC_ENTERPRISE_ID": "ent-1", "AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL": "https://idp.example.com", "AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL": "https://nexus.example.com", "AGENTNEXUS_OIDC_CLIENT_ID": "nexus", "AGENTNEXUS_OIDC_CLIENT_SECRET": "secret", "AGENTNEXUS_OIDC_CALLBACK_URL": "https://nexus.example.com/oauth2/idp/callback", "AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON": `{"atlas":["https://atlas.example.com/cb"]}`, "AGENTNEXUS_OIDC_SIGNING_KEY_ID": "current", "AGENTNEXUS_OIDC_SIGNING_KEY_PATH": path} {
+	for name, value := range map[string]string{"AGENTNEXUS_BROWSER_AUTH_ENABLED": "true", "AGENTNEXUS_POSTGRES_DSN": "postgres://localhost/agentnexus", "AGENTNEXUS_OIDC_ENTERPRISE_ID": "ent-1", "AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL": "https://idp.example.com", "AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL": "https://nexus.example.com", "AGENTNEXUS_OIDC_CLIENT_ID": "nexus", "AGENTNEXUS_OIDC_CALLBACK_URL": "https://nexus.example.com/oauth2/idp/callback", "AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON": `{"atlas":["https://atlas.example.com/cb"]}`, "AGENTNEXUS_OIDC_SIGNING_KEY_ID": "current", "AGENTNEXUS_OIDC_SIGNING_KEY_PATH": path} {
 		t.Setenv(name, value)
 	}
+}
+
+func setBrowserSecretFiles(t *testing.T, clientID string) {
+	t.Helper()
+	dir := t.TempDir()
+	upstream := filepath.Join(dir, "upstream.secret")
+	downstream := filepath.Join(dir, "downstream.secret")
+	if err := os.WriteFile(upstream, []byte("Upstream-IDP-secret-N8xQ3vK7pT4yR9dF2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(downstream, []byte("Console-BFF-secret-Q7mV2xK9pR4tY8dF3"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTNEXUS_OIDC_UPSTREAM_CLIENT_SECRET_FILE", upstream)
+	jsonPath := strings.ReplaceAll(downstream, `\`, `\\`)
+	t.Setenv("AGENTNEXUS_OIDC_CONSOLE_CLIENT_SECRET_FILES_JSON", `{"`+clientID+`":["`+jsonPath+`"]}`)
 }

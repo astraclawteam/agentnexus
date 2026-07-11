@@ -73,6 +73,14 @@ func LoadBrowserAuth() (BrowserAuthConfig, error) {
 	if err := json.Unmarshal([]byte(os.Getenv("AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON")), &clients); err != nil {
 		return BrowserAuthConfig{}, fmt.Errorf("parse console clients: %w", err)
 	}
+	consoleCredentials, err := browserauth.LoadConsoleClientSecretFiles(os.Getenv("AGENTNEXUS_OIDC_CONSOLE_CLIENT_SECRET_FILES_JSON"), clients)
+	if err != nil {
+		return BrowserAuthConfig{}, fmt.Errorf("load downstream console client credentials: %w", err)
+	}
+	upstreamClientSecret, err := browserauth.LoadOIDCUpstreamClientSecret(os.Getenv("AGENTNEXUS_OIDC_UPSTREAM_CLIENT_SECRET_FILE"))
+	if err != nil {
+		return BrowserAuthConfig{}, fmt.Errorf("load upstream OIDC client secret: %w", err)
+	}
 	previous := map[string]crypto.PublicKey{}
 	previousPaths := map[string]string{}
 	if raw := strings.TrimSpace(os.Getenv("AGENTNEXUS_OIDC_PREVIOUS_SIGNING_KEYS_JSON")); raw != "" {
@@ -89,8 +97,8 @@ func LoadBrowserAuth() (BrowserAuthConfig, error) {
 	}
 	config.OIDC = browserauth.OIDCConfig{
 		EnterpriseID: os.Getenv("AGENTNEXUS_OIDC_ENTERPRISE_ID"), EnterpriseIssuerURL: os.Getenv("AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL"),
-		PublicIssuerURL: os.Getenv("AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL"), ClientID: os.Getenv("AGENTNEXUS_OIDC_CLIENT_ID"), ClientSecret: os.Getenv("AGENTNEXUS_OIDC_CLIENT_SECRET"),
-		CallbackURL: os.Getenv("AGENTNEXUS_OIDC_CALLBACK_URL"), ConsoleClients: clients, SigningKeyID: os.Getenv("AGENTNEXUS_OIDC_SIGNING_KEY_ID"), SigningPrivateKey: privateKey, PreviousSigningKeys: previous,
+		PublicIssuerURL: os.Getenv("AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL"), ClientID: os.Getenv("AGENTNEXUS_OIDC_CLIENT_ID"), UpstreamClientSecret: upstreamClientSecret,
+		CallbackURL: os.Getenv("AGENTNEXUS_OIDC_CALLBACK_URL"), ConsoleClients: clients, ConsoleCredentials: consoleCredentials, SigningKeyID: os.Getenv("AGENTNEXUS_OIDC_SIGNING_KEY_ID"), SigningPrivateKey: privateKey, PreviousSigningKeys: previous,
 	}
 	if err := config.OIDC.Validate(); err != nil {
 		return BrowserAuthConfig{}, err

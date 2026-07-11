@@ -65,14 +65,20 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 	gateway := httptest.NewUnstartedServer(nil)
 	gatewayURL := "https://" + gateway.Listener.Addr().String()
 	consoleRedirect := "http://127.0.0.1:43123/auth/callback"
+	consoleSecret := "AgentAtlas-e2e-console-secret-N8xQ3vK7pT4yR9dF2"
+	consoleCredentials, err := browserauth.NewConsoleClientCredentials(map[string][]string{"agentatlas": {consoleSecret}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	oidcContext := context.WithValue(context.Background(), oauth2.HTTPClient, idp.server.Client())
 	router, err := app.NewPostgresGatewayRouter(oidcContext, pool, app.PostgresGatewayConfig{
 		ServiceName: "gateway-api", Version: "e2e",
 		OIDC: browserauth.OIDCConfig{
 			EnterpriseID: e2eEnterprise, EnterpriseIssuerURL: idp.server.URL,
-			PublicIssuerURL: gatewayURL, ClientID: "enterprise-console", ClientSecret: "upstream-secret",
+			PublicIssuerURL: gatewayURL, ClientID: "enterprise-console", UpstreamClientSecret: "Upstream-e2e-IDP-secret-Q7mV2xK9pR4tY8dF3",
 			CallbackURL: gatewayURL + "/oauth2/idp/callback", ConsoleClients: map[string][]string{"agentatlas": {consoleRedirect}},
-			SigningKeyID: "gateway-e2e", SigningPrivateKey: key, HTTPTimeout: 5 * time.Second,
+			ConsoleCredentials: consoleCredentials,
+			SigningKeyID:       "gateway-e2e", SigningPrivateKey: key, HTTPTimeout: 5 * time.Second,
 		},
 		LoginAttemptLimits: browserauth.DefaultLoginAttemptLimits(), AuthorizeRateLimitPerMinute: browserauth.DefaultAuthorizeRateLimitPerMinute,
 		ApprovalFactsVerifier: verifier, RequestTimeout: 10 * time.Second,
@@ -121,8 +127,8 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 		t.Fatalf("silent redirect=%s", location)
 	}
 	silent.Body.Close()
-	tokenForm := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {e2eVerifier}, "client_id": {"agentatlas"}, "redirect_uri": {consoleRedirect}}
-	token := mustRequest(t, client, http.MethodPost, gatewayURL+"/oauth2/token", tokenForm.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+	tokenForm := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {e2eVerifier}, "redirect_uri": {consoleRedirect}}
+	token := mustRequest(t, client, http.MethodPost, gatewayURL+"/oauth2/token", tokenForm.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("agentatlas:"+consoleSecret))})
 	if token.StatusCode != http.StatusOK {
 		t.Fatalf("token status=%d body=%s", token.StatusCode, readBody(t, token))
 	}
@@ -204,13 +210,45 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 		t.Fatalf("verify status=%d body=%s", verify.StatusCode, readBody(t, verify))
 	}
 	assertNoStore(t, verify)
+	repeatVerify := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/tickets/verify", verifyBody, map[string]string{"Content-Type": "application/json"})
+	if repeatVerify.StatusCode != http.StatusOK {
+		t.Fatalf("repeat verify status=%d body=%s", repeatVerify.StatusCode, readBody(t, repeatVerify))
+	}
+	repeatVerify.Body.Close()
+	if _, err := pool.Exec(context.Background(), `CREATE FUNCTION fail_sensitive_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected audit failure'; END $$; CREATE TRIGGER fail_sensitive_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION fail_sensitive_audit()`); err != nil {
+		t.Fatal(err)
+	}
+	failedVerify := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/tickets/verify", verifyBody, map[string]string{"Content-Type": "application/json"})
+	if failedVerify.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("audit-failed verify status=%d body=%s", failedVerify.StatusCode, readBody(t, failedVerify))
+	}
+	failedVerify.Body.Close()
 
 	assertOpaqueStorage(t, pool, grantPayload.Token)
+	failedLogout := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/browser-sessions/logout", "", nil)
+	if failedLogout.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("audit-failed logout status=%d body=%s", failedLogout.StatusCode, readBody(t, failedLogout))
+	}
+	failedLogout.Body.Close()
+	stillActive := mustRequest(t, client, http.MethodGet, gatewayURL+"/v1/browser-sessions/me", "", nil)
+	if stillActive.StatusCode != http.StatusOK {
+		t.Fatalf("audit-failed logout revoked session: %d body=%s", stillActive.StatusCode, readBody(t, stillActive))
+	}
+	stillActive.Body.Close()
+	if _, err := pool.Exec(context.Background(), `DROP TRIGGER fail_sensitive_audit ON audit_events; DROP FUNCTION fail_sensitive_audit()`); err != nil {
+		t.Fatal(err)
+	}
 	logout := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/browser-sessions/logout", "", nil)
 	if logout.StatusCode != http.StatusNoContent {
 		t.Fatalf("logout status=%d", logout.StatusCode)
 	}
 	logout.Body.Close()
+	for action, want := range map[string]int{"step_grant.verify": 2, "browser_session.logout": 1} {
+		var count int
+		if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM audit_events WHERE enterprise_id=$1 AND action=$2 AND event_hash ~ '^sha256:[0-9a-f]{64}$'`, e2eEnterprise, action).Scan(&count); err != nil || count != want {
+			t.Fatalf("audit action=%s count=%d err=%v", action, count, err)
+		}
+	}
 	postLogout := mustRequest(t, client, http.MethodGet, gatewayURL+"/v1/browser-sessions/me", "", nil)
 	if postLogout.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("post logout me=%d", postLogout.StatusCode)

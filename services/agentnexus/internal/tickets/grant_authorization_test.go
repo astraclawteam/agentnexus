@@ -127,6 +127,66 @@ func TestGrantVerificationEnforcesExactBindingAndExpiry(t *testing.T) {
 	}
 }
 
+func TestGrantVerificationAuditsEverySuccessfulExactTenantBoundUse(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	store := NewMemoryStore()
+	svc := NewService(store, WithClock(func() time.Time { return now }), WithGrantAuthorizer(allowGrantAuthorizer()), WithTokenGenerator(func() (string, error) { return "opaque-step-grant-token", nil }), WithIDGenerator(sequenceIDs("grant_1", "issue_audit", "verify_audit_1", "verify_audit_2", "verify_audit_3")))
+	_, err := svc.AuthorizeAndCreateGrant(context.Background(), Actor{EnterpriseID: "ent_1", UserID: "user_1"}, CreateStepGrantInput{CaseTicketID: "ticket_1", OrgUnitID: "research", OrgVersion: 7, ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", TTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := VerifyStepGrantInput{Token: "opaque-step-grant-token", EnterpriseID: "ent_1", ActorUserID: "user_1", ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", Scope: "dream:evidence:read"}
+	for i := 1; i <= 2; i++ {
+		if _, err := svc.VerifyGrant(context.Background(), valid); err != nil {
+			t.Fatalf("verify %d: %v", i, err)
+		}
+		if got := store.AuditCount(); got != 1+i {
+			t.Fatalf("audit count=%d after verify %d", got, i)
+		}
+	}
+	store.FailGrantRecordAt(GrantRecordAudit)
+	if _, err := svc.VerifyGrant(context.Background(), valid); !errors.Is(err, ErrGrantUnavailable) {
+		t.Fatalf("audit failure err=%v", err)
+	}
+	if got := store.AuditCount(); got != 3 {
+		t.Fatalf("failed verify appended audit: %d", got)
+	}
+	otherTenant := valid
+	otherTenant.EnterpriseID = "ent_2"
+	if _, err := svc.VerifyGrant(context.Background(), otherTenant); !errors.Is(err, ErrGrantDenied) {
+		t.Fatalf("cross-tenant verify err=%v", err)
+	}
+}
+
+func TestGrantVerificationUsesOneAtomicVerificationTimestamp(t *testing.T) {
+	base := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	clockCalls := 0
+	clock := func() time.Time {
+		clockCalls++
+		switch clockCalls {
+		case 1:
+			return base
+		case 2:
+			return base.Add(30 * time.Second)
+		default:
+			return base.Add(2 * time.Minute)
+		}
+	}
+	store := NewMemoryStore()
+	svc := NewService(store, WithClock(clock), WithGrantAuthorizer(allowGrantAuthorizer()), WithTokenGenerator(func() (string, error) { return "opaque-step-grant-token", nil }), WithIDGenerator(sequenceIDs("grant_1", "issue_audit", "verify_audit")))
+	_, err := svc.AuthorizeAndCreateGrant(context.Background(), Actor{EnterpriseID: "ent_1", UserID: "user_1"}, CreateStepGrantInput{CaseTicketID: "ticket_1", OrgUnitID: "research", OrgVersion: 7, ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", TTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := VerifyStepGrantInput{Token: "opaque-step-grant-token", EnterpriseID: "ent_1", ActorUserID: "user_1", ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", Scope: "dream:evidence:read"}
+	if _, err := svc.VerifyGrant(context.Background(), input); err != nil {
+		t.Fatalf("atomically valid verification denied after audit: %v", err)
+	}
+	if clockCalls != 2 || store.AuditCount() != 2 {
+		t.Fatalf("clock calls=%d audit count=%d", clockCalls, store.AuditCount())
+	}
+}
+
 func TestCredentialHashesAreDomainSeparated(t *testing.T) {
 	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
 	store := NewMemoryStore()
