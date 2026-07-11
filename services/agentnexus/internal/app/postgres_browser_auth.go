@@ -3,7 +3,10 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"sort"
@@ -154,6 +157,49 @@ type PostgresBrowserAuditSink struct {
 
 func NewPostgresBrowserAuditSink(pool *pgxpool.Pool) *PostgresBrowserAuditSink {
 	return &PostgresBrowserAuditSink{pool: pool, random: rand.Reader}
+}
+
+func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, input AuditEvidenceInput) (string, error) {
+	if s == nil || s.pool == nil || input.EnterpriseID == "" || input.ActorUserID == "" || !ValidAuditEvidenceAction(input.Action) {
+		return "", errors.New("invalid audit evidence")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	queries := db.New(tx)
+	if _, err := queries.AcquireEnterpriseAuditLock(ctx, input.EnterpriseID); err != nil {
+		return "", err
+	}
+	previous, err := queries.GetLatestEnterpriseAuditHash(ctx, input.EnterpriseID)
+	if err != nil {
+		return "", err
+	}
+	id, err := randomAuditID(s.random)
+	if err != nil {
+		return "", err
+	}
+	details, err := json.Marshal(input.Details)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(details)
+	resourceID := input.WorkflowRunID
+	if resourceID == "" {
+		resourceID = input.TraceID
+	}
+	if resourceID == "" {
+		resourceID = string(input.Action)
+	}
+	event := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: input.EnterpriseID, ActorUserID: input.ActorUserID, ResourceType: "agentatlas_action", ResourceID: resourceID, Action: string(input.Action), Decision: "allow", InputHash: "sha256:" + hex.EncodeToString(sum[:]), EvidencePointer: input.TraceID}, previous)
+	if _, err := queries.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, InputHash: textValue(event.InputHash), EvidencePointer: textValue(event.EvidencePointer), PrevHash: textValue(event.PrevHash), EventHash: event.EventHash}); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func (s *PostgresBrowserAuditSink) AppendBrowserAudit(ctx context.Context, input BrowserAuditEvent) error {

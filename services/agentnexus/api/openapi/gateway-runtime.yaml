@@ -240,6 +240,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepGrantVerifyResponse'
+  /v1/audit/evidence:
+    post:
+      operationId: appendAuditEvidence
+      summary: Append an authenticated AgentAtlas action to the audit chain.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AuditEvidenceRequest'}
+      responses:
+        '201':
+          description: Audit reference created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditEvidenceResponse'}
 components:
   securitySchemes:
     consoleClientSecret:
@@ -256,6 +271,37 @@ components:
       name: Authorization
       description: 'Use the exact header format: Authorization: CaseTicket <opaque>'
   schemas:
+    AuditEvidenceAction:
+      type: string
+      enum:
+        - workflow_draft_created
+        - workflow_version_published
+        - dream_policy_created
+        - dream_policy_create_authorized
+        - dream_job_run
+        - retrieval_plan_created
+        - evidence_located
+        - evidence_read
+        - answer_trace_created
+        - sensitive_artifact_parsed
+        - visibility_rule_changed
+    AuditEvidenceRequest:
+      type: object
+      additionalProperties: false
+      required: [ticket_id, enterprise_id, action]
+      properties:
+        ticket_id: {type: string, minLength: 1}
+        enterprise_id: {type: string, minLength: 1}
+        action: {$ref: '#/components/schemas/AuditEvidenceAction'}
+        trace_id: {type: string}
+        workflow_run_id: {type: string}
+        details: {type: object, maxProperties: 100, additionalProperties: true}
+    AuditEvidenceResponse:
+      type: object
+      additionalProperties: false
+      required: [audit_ref_id]
+      properties:
+        audit_ref_id: {type: string, minLength: 1}
     BrowserTokenRequest:
       type: object
       additionalProperties: false

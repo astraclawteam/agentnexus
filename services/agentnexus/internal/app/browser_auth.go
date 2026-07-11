@@ -97,6 +97,7 @@ type BrowserAuthDependencies struct {
 	Identities              ExternalIdentityResolver
 	Profiles                BrowserProfileResolver
 	Audit                   BrowserAuditSink
+	AuditEvidence           AuditEvidenceSink
 	TokenIssuer             IDTokenIssuer
 	RequestTimeout          time.Duration
 	AuthorizeRateLimiter    browserauth.AuthorizeRateLimiter
@@ -122,6 +123,7 @@ type browserAuthHandler struct {
 	authorization           *authorizationHandler
 	approval                *approvalHandler
 	grants                  *grantHandler
+	auditEvidence           *auditEvidenceHandler
 }
 
 func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, error) {
@@ -149,6 +151,13 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
+	var auditEvidence *auditEvidenceHandler
+	if deps.AuditEvidence != nil {
+		auditEvidence, err = newAuditEvidenceHandler(deps.Config.EnterpriseID, deps.TicketActors, deps.AuditEvidence)
+		if err != nil {
+			return nil, err
+		}
+	}
 	issuer := deps.TokenIssuer
 	if issuer == nil {
 		var err error
@@ -157,7 +166,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
-	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, authorization: authorization, approval: approvalRoutes, grants: grants}, nil
+	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, authorization: authorization, approval: approvalRoutes, grants: grants, auditEvidence: auditEvidence}, nil
 }
 
 func browserRequestTimeout(value time.Duration) (time.Duration, error) {
@@ -184,6 +193,9 @@ func (h *browserAuthHandler) register(mux *http.ServeMux) {
 	}
 	if h.grants != nil {
 		h.grants.register(mux)
+	}
+	if h.auditEvidence != nil {
+		h.auditEvidence.register(mux)
 	}
 }
 
