@@ -90,6 +90,12 @@ type BrowserAuditSink interface {
 	LogoutBrowserSession(context.Context, string, BrowserAuditEvent) (browserauth.BrowserSession, error)
 }
 
+type agentAtlasServiceAuthenticator struct{ config browserauth.OIDCConfig }
+
+func (a agentAtlasServiceAuthenticator) AuthenticateService(clientID, secret string) bool {
+	return clientID == "agentatlas" && a.config.AuthenticateConsoleClient(clientID, secret)
+}
+
 type BrowserAuthDependencies struct {
 	Config                  browserauth.OIDCConfig
 	Sessions                BrowserSessionService
@@ -153,7 +159,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 	}
 	var auditEvidence *auditEvidenceHandler
 	if deps.AuditEvidence != nil {
-		auditEvidence, err = newAuditEvidenceHandler(deps.Config.EnterpriseID, deps.TicketActors, deps.AuditEvidence)
+		auditEvidence, err = newAuditEvidenceHandler(deps.Config.EnterpriseID, deps.TicketActors, deps.AuditEvidence, agentAtlasServiceAuthenticator{config: deps.Config})
 		if err != nil {
 			return nil, err
 		}
