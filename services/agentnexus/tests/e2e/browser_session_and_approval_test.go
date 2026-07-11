@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -8,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -136,15 +139,40 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 	}
 	assertNoStore(t, me)
 	var profile struct {
-		Authenticated bool     `json:"authenticated"`
-		EnterpriseID  string   `json:"enterprise_id"`
-		UserID        string   `json:"enterprise_user_id"`
-		OrgVersion    int64    `json:"org_version"`
-		OrgUnitIDs    []string `json:"org_unit_ids"`
+		Authenticated       bool     `json:"authenticated"`
+		EnterpriseID        string   `json:"enterprise_id"`
+		UserID              string   `json:"enterprise_user_id"`
+		OrgVersion          int64    `json:"org_version"`
+		OrgUnitIDs          []string `json:"org_unit_ids"`
+		Permissions         []string `json:"permissions"`
+		AdvancedModeAllowed bool     `json:"advanced_mode_allowed"`
 	}
 	decodeJSON(t, me, &profile)
 	if !profile.Authenticated || profile.EnterpriseID != e2eEnterprise || profile.UserID != e2eUser || profile.OrgVersion != e2eOrgVersion || !contains(profile.OrgUnitIDs, e2eTeam) {
 		t.Fatalf("profile=%+v", profile)
+	}
+	if !profile.AdvancedModeAllowed || !equalStrings(profile.Permissions, []string{"approve_high_risk", "publish_low_risk", "service_mode"}) {
+		t.Fatalf("public profile permissions=%v advanced=%v", profile.Permissions, profile.AdvancedModeAllowed)
+	}
+
+	decisionBody := `{"org_unit_id":"team_research","org_version":1,"resource_type":"knowledge","resource_id":"knowledge-low","action":"knowledge.suggest"}`
+	decisionResponse := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/authorization/decisions", decisionBody, map[string]string{"Content-Type": "application/json"})
+	if decisionResponse.StatusCode != http.StatusOK {
+		t.Fatalf("decision status=%d body=%s", decisionResponse.StatusCode, readBody(t, decisionResponse))
+	}
+	assertNoStore(t, decisionResponse)
+	var decision struct {
+		Decision       string   `json:"decision"`
+		Permissions    []string `json:"permissions"`
+		OrgUnitIDs     []string `json:"org_unit_ids"`
+		MaskFields     []string `json:"mask_fields"`
+		RiskLevel      string   `json:"risk_level"`
+		FallbackAction string   `json:"fallback_action"`
+		OrgVersion     int64    `json:"org_version"`
+	}
+	decodeJSON(t, decisionResponse, &decision)
+	if decision.Decision != "allow" || decision.RiskLevel != "low" || decision.OrgVersion != e2eOrgVersion || decision.FallbackAction != "" || !equalStrings(decision.Permissions, []string{"suggest"}) || !equalStrings(decision.OrgUnitIDs, []string{e2eTeam}) || decision.MaskFields == nil || len(decision.MaskFields) != 0 {
+		t.Fatalf("low authorization decision=%+v", decision)
 	}
 
 	low := resolveApproval(t, client, gatewayURL, secret, "idem-low-1234567890", approvalFacts{ResourceID: "knowledge-low", RequestedRisk: approval.RiskLow})
@@ -195,8 +223,8 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 func TestPostgresContractSerializationAndRollback(t *testing.T) {
 	pool := openMigratedPostgres(t)
 	seedLockFixture(t, pool)
-	t.Run("task2 login-attempt quota lock", func(t *testing.T) {
-		assertSerialized(t, pool, "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", e2eEnterprise, "agentatlas")
+	t.Run("task2 production login-attempt quota serialization", func(t *testing.T) {
+		assertProductionLoginAttemptQuota(t, pool)
 	})
 	t.Run("task3 org publication trigger", func(t *testing.T) {
 		assertStatementSerialized(t, pool, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", []any{e2eEnterprise}, `INSERT INTO org_versions(id,enterprise_id,version_number,source_event_id) VALUES ('lock-version-2',$1,2,'lock-event-2')`, []any{e2eEnterprise})
@@ -393,7 +421,7 @@ func seedGatewayFixture(t *testing.T, pool *pgxpool.Pool, issuer string) {
 		{`INSERT INTO org_events(id,enterprise_id,event_type,source_hash) VALUES ('event-e2e',$1,'publish','sha256:e2e')`, []any{e2eEnterprise}},
 		{`INSERT INTO org_versions(id,enterprise_id,version_number,source_event_id) VALUES ('version-e2e',$1,1,'event-e2e')`, []any{e2eEnterprise}},
 		{`INSERT INTO org_policy_snapshot_units(enterprise_id,version_number,org_unit_id,parent_id) VALUES ($1,1,$2,NULL),($1,1,$3,$2)`, []any{e2eEnterprise, e2eRoot, e2eTeam}},
-		{`INSERT INTO org_policy_snapshot_memberships(enterprise_id,version_number,enterprise_user_id,org_unit_id,role) VALUES ($1,1,$2,$3,'member'),($1,1,$2,$3,'publish_low_risk'),($1,1,$2,$3,'approve_high_risk'),($1,1,$4,$5,'manager'),($1,1,$4,$5,'approve_high_risk')`, []any{e2eEnterprise, e2eUser, e2eTeam, e2eReviewer, e2eRoot}},
+		{`INSERT INTO org_policy_snapshot_memberships(enterprise_id,version_number,enterprise_user_id,org_unit_id,role) VALUES ($1,1,$2,$3,'member'),($1,1,$2,$3,'publish_low_risk'),($1,1,$2,$3,'approve_high_risk'),($1,1,$2,$3,'service_mode'),($1,1,$4,$5,'manager'),($1,1,$4,$5,'approve_high_risk')`, []any{e2eEnterprise, e2eUser, e2eTeam, e2eReviewer, e2eRoot}},
 		{`UPDATE org_versions SET policy_snapshot_sealed=true WHERE enterprise_id=$1 AND version_number=1`, []any{e2eEnterprise}},
 		{`INSERT INTO enterprise_approval_policies(enterprise_id,minimum_risk,max_low_impacted_users,max_low_impacted_org_units,policy_version) VALUES ($1,'low',25,1,1)`, []any{e2eEnterprise}},
 		{`INSERT INTO case_tickets(id,enterprise_id,actor_user_id,request_id,status,expires_at,token_hash) VALUES ('ticket-e2e',$1,$2,'request-e2e','active',now()+interval '30 minutes',$3)`, []any{e2eEnterprise, e2eUser, ticketHash}},
@@ -403,47 +431,6 @@ func seedGatewayFixture(t *testing.T, pool *pgxpool.Pool, issuer string) {
 		if _, err := pool.Exec(ctx, statement.sql, statement.args...); err != nil {
 			t.Fatalf("seed %s: %v", statement.sql, err)
 		}
-	}
-}
-
-func assertSerialized(t *testing.T, pool *pgxpool.Pool, query string, args ...any) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	first, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer first.Rollback(context.Background())
-	if _, err = first.Exec(ctx, query, args...); err != nil {
-		t.Fatal(err)
-	}
-	second, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer second.Rollback(context.Background())
-	blocked, stop := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	_, err = second.Exec(blocked, query, args...)
-	stop()
-	if err == nil {
-		t.Fatal("second connection acquired serialized lock")
-	}
-	_ = second.Rollback(context.Background())
-	if err = first.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	acquire, release := context.WithTimeout(context.Background(), 2*time.Second)
-	defer release()
-	third, err := pool.Begin(acquire)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = third.Exec(acquire, query, args...); err != nil {
-		t.Fatalf("lock did not release: %v", err)
-	}
-	if err = third.Rollback(acquire); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -466,8 +453,8 @@ func assertStatementSerialized(t *testing.T, pool *pgxpool.Pool, lockQuery strin
 	blocked, stop := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	_, err = second.Exec(blocked, statement, statementArgs...)
 	stop()
-	if err == nil {
-		t.Fatal("serialized database mutation did not block")
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("serialized database mutation returned non-timeout error: %v", err)
 	}
 	_ = second.Rollback(context.Background())
 	if err = first.Commit(ctx); err != nil {
@@ -510,6 +497,81 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func equalStrings(got, want []string) bool {
+	if got == nil || len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func assertProductionLoginAttemptQuota(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	limits, err := browserauth.NewLoginAttemptLimits(2, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := browserauth.NewService(browserauth.NewPostgresStore(pool), browserauth.WithLoginAttemptLimits(limits))
+	input := func(browser byte) browserauth.CreateLoginAttemptInput {
+		return browserauth.CreateLoginAttemptInput{EnterpriseID: e2eEnterprise, ClientID: "agentatlas-quota", BrowserID: opaqueBrowserID(browser), RedirectURI: "https://atlas.example/auth/callback", ConsoleState: "state", ConsoleNonce: "nonce", CodeChallenge: s256(e2eVerifier)}
+	}
+	var success, limited, unexpected atomic.Int32
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, _, _, createErr := service.CreateLoginAttempt(ctx, input('a'))
+			switch {
+			case createErr == nil:
+				success.Add(1)
+			case errors.Is(createErr, browserauth.ErrLoginAttemptLimited):
+				limited.Add(1)
+			default:
+				unexpected.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if pool.Stat().TotalConns() < 2 {
+		t.Fatalf("production quota concurrency used fewer than two PostgreSQL connections: %d", pool.Stat().TotalConns())
+	}
+	if success.Load() != 2 || limited.Load() != 2 || unexpected.Load() != 0 {
+		t.Fatalf("per-browser production quota success=%d limited=%d unexpected=%d", success.Load(), limited.Load(), unexpected.Load())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, _, _, err := service.CreateLoginAttempt(ctx, input('b')); err != nil {
+		t.Fatalf("independent browser within global quota: %v", err)
+	}
+	if _, _, _, err := service.CreateLoginAttempt(ctx, input('c')); !errors.Is(err, browserauth.ErrLoginAttemptLimited) {
+		t.Fatalf("global production quota err=%v", err)
+	}
+	var attempts, scopeCount, browserCount int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM oidc_login_attempts WHERE enterprise_id=$1 AND client_id='agentatlas-quota'`, e2eEnterprise).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(SUM(active_count),0) FROM oidc_login_attempt_scope_counters WHERE enterprise_id=$1 AND client_id='agentatlas-quota'`, e2eEnterprise).Scan(&scopeCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(SUM(active_count),0) FROM oidc_login_attempt_browser_counters WHERE enterprise_id=$1 AND client_id='agentatlas-quota'`, e2eEnterprise).Scan(&browserCount); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 3 || scopeCount != 3 || browserCount != 3 {
+		t.Fatalf("production quota persistence attempts=%d scope=%d browser=%d", attempts, scopeCount, browserCount)
+	}
+}
+
+func opaqueBrowserID(value byte) string {
+	return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{value}, 32))
 }
 
 func mustRequest(t *testing.T, client *http.Client, method, target, body string, headers map[string]string) *http.Response {

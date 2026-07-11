@@ -40,7 +40,7 @@ type fakeBrowserProfileTx struct {
 	rollbackHasDeadline bool
 	calls               []string
 	profile             db.GetBrowserProfileRow
-	units               []db.ListBrowserProfileOrgUnitsRow
+	units               []db.OrgPolicySnapshotMembership
 	unitArgs            db.ListBrowserProfileOrgUnitsParams
 	cancelOnUnits       context.CancelFunc
 	commitErr           error
@@ -54,7 +54,7 @@ func (f *fakeBrowserProfileTx) GetBrowserProfile(context.Context, db.GetBrowserP
 	return f.profile, f.queryErr
 }
 
-func (f *fakeBrowserProfileTx) ListBrowserProfileOrgUnits(_ context.Context, params db.ListBrowserProfileOrgUnitsParams) ([]db.ListBrowserProfileOrgUnitsRow, error) {
+func (f *fakeBrowserProfileTx) ListBrowserProfileOrgUnits(_ context.Context, params db.ListBrowserProfileOrgUnitsParams) ([]db.OrgPolicySnapshotMembership, error) {
 	f.calls = append(f.calls, "units")
 	f.unitArgs = params
 	if f.cancelOnUnits != nil {
@@ -73,32 +73,32 @@ func TestPostgresBrowserProfileUsesExactVersionAndValidatesBoundedRows(t *testin
 	t.Run("exact version sorted deduplicated", func(t *testing.T) {
 		tx := &fakeBrowserProfileTx{
 			profile: db.GetBrowserProfileRow{DisplayName: "User", OrgVersion: 17},
-			units: []db.ListBrowserProfileOrgUnitsRow{
-				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "z"},
-				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a"},
-				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a"},
+			units: []db.OrgPolicySnapshotMembership{
+				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "z", Role: "publish_low_risk"},
+				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a", Role: "service_mode"},
+				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a", Role: "publish_low_risk"},
 			},
 		}
 		profile, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(context.Background(), "enterprise-1", "user-1")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if tx.unitArgs.VersionNumber != 17 || !reflect.DeepEqual(profile.OrgUnitIDs, []string{"a", "z"}) || profile.Permissions == nil {
+		if tx.unitArgs.VersionNumber != 17 || !reflect.DeepEqual(profile.OrgUnitIDs, []string{"a", "z"}) || !reflect.DeepEqual(profile.Permissions, []string{"publish_low_risk", "service_mode"}) || !profile.AdvancedModeAllowed {
 			t.Fatalf("args=%#v profile=%#v", tx.unitArgs, profile)
 		}
 	})
 
 	for _, test := range []struct {
 		name string
-		row  db.ListBrowserProfileOrgUnitsRow
+		row  db.OrgPolicySnapshotMembership
 	}{
-		{name: "cross enterprise", row: db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-2", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a"}},
-		{name: "cross version", row: db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-1", VersionNumber: 18, EnterpriseUserID: "user-1", OrgUnitID: "a"}},
-		{name: "cross user", row: db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-2", OrgUnitID: "a"}},
-		{name: "noncanonical unit", row: db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: " a"}},
+		{name: "cross enterprise", row: db.OrgPolicySnapshotMembership{EnterpriseID: "enterprise-2", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a", Role: "member"}},
+		{name: "cross version", row: db.OrgPolicySnapshotMembership{EnterpriseID: "enterprise-1", VersionNumber: 18, EnterpriseUserID: "user-1", OrgUnitID: "a", Role: "member"}},
+		{name: "cross user", row: db.OrgPolicySnapshotMembership{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-2", OrgUnitID: "a", Role: "member"}},
+		{name: "noncanonical unit", row: db.OrgPolicySnapshotMembership{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: " a", Role: "member"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, units: []db.ListBrowserProfileOrgUnitsRow{test.row}}
+			tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, units: []db.OrgPolicySnapshotMembership{test.row}}
 			if _, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(context.Background(), "enterprise-1", "user-1"); err == nil {
 				t.Fatal("malformed profile row was accepted")
 			}
@@ -106,9 +106,9 @@ func TestPostgresBrowserProfileUsesExactVersionAndValidatesBoundedRows(t *testin
 	}
 
 	t.Run("limit plus one", func(t *testing.T) {
-		rows := make([]db.ListBrowserProfileOrgUnitsRow, policy.MaxAtlasMemberships+1)
+		rows := make([]db.OrgPolicySnapshotMembership, policy.MaxAtlasMemberships+1)
 		for i := range rows {
-			rows[i] = db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "unit"}
+			rows[i] = db.OrgPolicySnapshotMembership{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "unit", Role: "member"}
 		}
 		tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, units: rows}
 		if _, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(context.Background(), "enterprise-1", "user-1"); err == nil {
@@ -117,9 +117,9 @@ func TestPostgresBrowserProfileUsesExactVersionAndValidatesBoundedRows(t *testin
 	})
 
 	t.Run("exact limit", func(t *testing.T) {
-		rows := make([]db.ListBrowserProfileOrgUnitsRow, policy.MaxAtlasMemberships)
+		rows := make([]db.OrgPolicySnapshotMembership, policy.MaxAtlasMemberships)
 		for i := range rows {
-			rows[i] = db.ListBrowserProfileOrgUnitsRow{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "unit"}
+			rows[i] = db.OrgPolicySnapshotMembership{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "unit", Role: "member"}
 		}
 		tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, units: rows}
 		profile, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(context.Background(), "enterprise-1", "user-1")
@@ -130,7 +130,7 @@ func TestPostgresBrowserProfileUsesExactVersionAndValidatesBoundedRows(t *testin
 
 	t.Run("cancellation before conversion", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, units: []db.ListBrowserProfileOrgUnitsRow{{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a"}}, cancelOnUnits: cancel}
+		tx := &fakeBrowserProfileTx{profile: db.GetBrowserProfileRow{OrgVersion: 17}, units: []db.OrgPolicySnapshotMembership{{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a", Role: "member"}}, cancelOnUnits: cancel}
 		if _, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(ctx, "enterprise-1", "user-1"); !errors.Is(err, context.Canceled) {
 			t.Fatalf("cancellation error = %v", err)
 		}
@@ -265,7 +265,7 @@ func TestBrowserDirectoryAndAuditSQLAreQuerySpecificAndSerialized(t *testing.T) 
 	if !strings.Contains(normalized, "join org_versions as v on v.enterprise_id = m.enterprise_id and v.version_number = m.version_number and v.policy_snapshot_sealed = true") {
 		t.Error("profile memberships are not bound to a sealed enterprise/version snapshot")
 	}
-	for _, required := range []string{"select m.enterprise_id, m.version_number, m.enterprise_user_id, m.org_unit_id", "m.version_number = $3", "limit 100001"} {
+	for _, required := range []string{"select m.enterprise_id, m.version_number, m.enterprise_user_id, m.org_unit_id, m.role", "m.version_number = $3", "limit 100001"} {
 		if !strings.Contains(normalized, required) {
 			t.Errorf("profile membership query missing exact bounded row contract %q", required)
 		}

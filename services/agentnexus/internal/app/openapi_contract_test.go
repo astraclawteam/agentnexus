@@ -22,6 +22,10 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 	}
 	schemas := nestedMap(t, document, "components", "schemas")
 	paths := nestedMap(t, document, "paths")
+	caseTicket := nestedMap(t, document, "components", "securitySchemes", "caseTicket")
+	if description, _ := caseTicket["description"].(string); description != "Use the exact header format: Authorization: CaseTicket <opaque>" {
+		t.Fatalf("CaseTicket security description=%q", description)
+	}
 	approvalPath := nestedMap(t, paths, "/v1/approvals/resolve", "post")
 	if approvalPath["operationId"] != "resolveApprovalRoute" {
 		t.Fatalf("approval operationId=%v", approvalPath["operationId"])

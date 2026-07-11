@@ -589,7 +589,7 @@ func (q *Queries) IncrementOIDCLoginAttemptScopeCounter(ctx context.Context, arg
 }
 
 const listBrowserProfileOrgUnits = `-- name: ListBrowserProfileOrgUnits :many
-SELECT m.enterprise_id, m.version_number, m.enterprise_user_id, m.org_unit_id
+SELECT m.enterprise_id, m.version_number, m.enterprise_user_id, m.org_unit_id, m.role
 FROM org_policy_snapshot_memberships AS m
 JOIN org_versions AS v
   ON v.enterprise_id = m.enterprise_id
@@ -608,27 +608,21 @@ type ListBrowserProfileOrgUnitsParams struct {
 	VersionNumber    int64
 }
 
-type ListBrowserProfileOrgUnitsRow struct {
-	EnterpriseID     string
-	VersionNumber    int64
-	EnterpriseUserID string
-	OrgUnitID        string
-}
-
-func (q *Queries) ListBrowserProfileOrgUnits(ctx context.Context, arg ListBrowserProfileOrgUnitsParams) ([]ListBrowserProfileOrgUnitsRow, error) {
+func (q *Queries) ListBrowserProfileOrgUnits(ctx context.Context, arg ListBrowserProfileOrgUnitsParams) ([]OrgPolicySnapshotMembership, error) {
 	rows, err := q.db.Query(ctx, listBrowserProfileOrgUnits, arg.EnterpriseID, arg.EnterpriseUserID, arg.VersionNumber)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListBrowserProfileOrgUnitsRow
+	var items []OrgPolicySnapshotMembership
 	for rows.Next() {
-		var i ListBrowserProfileOrgUnitsRow
+		var i OrgPolicySnapshotMembership
 		if err := rows.Scan(
 			&i.EnterpriseID,
 			&i.VersionNumber,
 			&i.EnterpriseUserID,
 			&i.OrgUnitID,
+			&i.Role,
 		); err != nil {
 			return nil, err
 		}

@@ -230,7 +230,7 @@ JOIN LATERAL (
 WHERE u.enterprise_id = $1 AND u.id = $2;
 
 -- name: ListBrowserProfileOrgUnits :many
-SELECT m.enterprise_id, m.version_number, m.enterprise_user_id, m.org_unit_id
+SELECT m.enterprise_id, m.version_number, m.enterprise_user_id, m.org_unit_id, m.role
 FROM org_policy_snapshot_memberships AS m
 JOIN org_versions AS v
   ON v.enterprise_id = m.enterprise_id

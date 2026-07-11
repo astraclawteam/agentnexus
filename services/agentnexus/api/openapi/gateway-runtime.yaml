@@ -249,6 +249,7 @@ components:
       type: apiKey
       in: header
       name: Authorization
+      description: 'Use the exact header format: Authorization: CaseTicket <opaque>'
   schemas:
     BrowserTokenRequest:
       type: object

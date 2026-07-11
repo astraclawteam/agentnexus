@@ -23,7 +23,7 @@ type PostgresBrowserDirectory struct {
 
 type browserProfileTx interface {
 	GetBrowserProfile(context.Context, db.GetBrowserProfileParams) (db.GetBrowserProfileRow, error)
-	ListBrowserProfileOrgUnits(context.Context, db.ListBrowserProfileOrgUnitsParams) ([]db.ListBrowserProfileOrgUnitsRow, error)
+	ListBrowserProfileOrgUnits(context.Context, db.ListBrowserProfileOrgUnitsParams) ([]db.OrgPolicySnapshotMembership, error)
 	Commit(context.Context) error
 	Rollback(context.Context) error
 }
@@ -51,7 +51,7 @@ func (t *postgresBrowserProfileTx) GetBrowserProfile(ctx context.Context, params
 	return t.queries.GetBrowserProfile(ctx, params)
 }
 
-func (t *postgresBrowserProfileTx) ListBrowserProfileOrgUnits(ctx context.Context, params db.ListBrowserProfileOrgUnitsParams) ([]db.ListBrowserProfileOrgUnitsRow, error) {
+func (t *postgresBrowserProfileTx) ListBrowserProfileOrgUnits(ctx context.Context, params db.ListBrowserProfileOrgUnitsParams) ([]db.OrgPolicySnapshotMembership, error) {
 	return t.queries.ListBrowserProfileOrgUnits(ctx, params)
 }
 
@@ -111,24 +111,51 @@ func (d *PostgresBrowserDirectory) ResolveBrowserProfile(ctx context.Context, en
 		return BrowserProfile{}, errors.New("profile membership limit exceeded")
 	}
 	unitSet := make(map[string]struct{}, len(rows))
+	permissionSet := make(map[string]struct{}, len(rows))
+	advancedModeAllowed := false
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
 			return BrowserProfile{}, err
 		}
-		if row.EnterpriseID != enterpriseID || row.VersionNumber != record.OrgVersion || row.EnterpriseUserID != userID || !canonicalAuthorizationValue(row.OrgUnitID) {
+		permission, known := publicBrowserProfilePermission(row.Role)
+		if row.EnterpriseID != enterpriseID || row.VersionNumber != record.OrgVersion || row.EnterpriseUserID != userID || !canonicalAuthorizationValue(row.OrgUnitID) || !known {
 			return BrowserProfile{}, errors.New("invalid profile membership row")
 		}
 		unitSet[row.OrgUnitID] = struct{}{}
+		if permission != "" {
+			permissionSet[permission] = struct{}{}
+		}
+		if permission == string(policy.PermissionWorkflowAdvanced) || permission == string(policy.PermissionServiceMode) {
+			advancedModeAllowed = true
+		}
 	}
 	units := make([]string, 0, len(unitSet))
 	for unitID := range unitSet {
 		units = append(units, unitID)
 	}
 	sort.Strings(units)
+	permissions := make([]string, 0, len(permissionSet))
+	for permission := range permissionSet {
+		permissions = append(permissions, permission)
+	}
+	sort.Strings(permissions)
 	if err := tx.Commit(ctx); err != nil {
 		return BrowserProfile{}, err
 	}
-	return BrowserProfile{EnterpriseID: enterpriseID, EnterpriseUserID: userID, DisplayName: record.DisplayName, OrgVersion: record.OrgVersion, OrgUnitIDs: units, Permissions: []string{}, AdvancedModeAllowed: false}, nil
+	return BrowserProfile{EnterpriseID: enterpriseID, EnterpriseUserID: userID, DisplayName: record.DisplayName, OrgVersion: record.OrgVersion, OrgUnitIDs: units, Permissions: permissions, AdvancedModeAllowed: advancedModeAllowed}, nil
+}
+
+func publicBrowserProfilePermission(role string) (string, bool) {
+	switch policy.AtlasPermission(role) {
+	case policy.PermissionSuggest, policy.PermissionEdit, policy.PermissionPublishLowRisk, policy.PermissionApproveHighRisk, policy.PermissionWorkflowEdit, policy.PermissionWorkflowAdvanced, policy.PermissionServiceMode:
+		return role, true
+	}
+	switch role {
+	case "member", "manager", "admin":
+		return "", true
+	default:
+		return "", false
+	}
 }
 
 type PostgresBrowserAuditSink struct {
