@@ -44,6 +44,17 @@ func TestAuditEvidenceRecordsDreamPolicyCreateRequest(t *testing.T) {
 	}
 }
 
+func TestAuditEvidenceRejectsUnpersistedWorkflowRunID(t *testing.T) {
+	h, _ := newAuditEvidenceHandler("ent-1", &stubTicketActors{actor: AuthorizationActor{EnterpriseID: "ent-1", UserID: "u", CaseTicketID: "case"}}, &recordingAuditEvidenceSink{}, stubServiceAuthenticator{allow: true})
+	req := httptest.NewRequest(http.MethodPost, "/v1/audit/evidence", strings.NewReader(`{"ticket_id":"opaque","enterprise_id":"ent-1","action":"dream_policy_create_requested","resource_type":"dream_policy","resource_id":"pol-1","workflow_run_id":"run-1"}`))
+	req.SetBasicAuth("agentatlas", "secret")
+	rr := httptest.NewRecorder()
+	h.append(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestAuditActionValidationKeepsLegacyAndRejectsUnknown(t *testing.T) {
 	if !ValidAuditEvidenceAction(AuditActionDreamPolicyCreated) {
 		t.Fatal("legacy dream_policy_created rejected")

@@ -31,15 +31,14 @@ const (
 func ValidAuditEvidenceAction(action AuditEvidenceAction) bool { return audit.ValidAction(action) }
 
 type AuditEvidenceInput struct {
-	EnterpriseID  string
-	ActorUserID   string
-	CaseTicketID  string
-	Action        AuditEvidenceAction
-	ResourceType  string
-	ResourceID    string
-	TraceID       string
-	WorkflowRunID string
-	Details       map[string]any
+	EnterpriseID string
+	ActorUserID  string
+	CaseTicketID string
+	Action       AuditEvidenceAction
+	ResourceType string
+	ResourceID   string
+	TraceID      string
+	Details      map[string]any
 }
 
 type ServiceAuthenticator interface {
@@ -76,14 +75,13 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		TicketID      string              `json:"ticket_id"`
-		EnterpriseID  string              `json:"enterprise_id"`
-		Action        AuditEvidenceAction `json:"action"`
-		ResourceType  string              `json:"resource_type"`
-		ResourceID    string              `json:"resource_id"`
-		TraceID       string              `json:"trace_id"`
-		WorkflowRunID string              `json:"workflow_run_id"`
-		Details       map[string]any      `json:"details"`
+		TicketID     string              `json:"ticket_id"`
+		EnterpriseID string              `json:"enterprise_id"`
+		Action       AuditEvidenceAction `json:"action"`
+		ResourceType string              `json:"resource_type"`
+		ResourceID   string              `json:"resource_id"`
+		TraceID      string              `json:"trace_id"`
+		Details      map[string]any      `json:"details"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
 	decoder.DisallowUnknownFields()
@@ -91,7 +89,7 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF || !validAuditEvidenceRequest(request.TicketID, request.EnterpriseID, request.ResourceType, request.ResourceID, request.TraceID, request.WorkflowRunID, request.Action, request.Details, h.enterpriseID) {
+	if err := decoder.Decode(&struct{}{}); err != io.EOF || !validAuditEvidenceRequest(request.TicketID, request.EnterpriseID, request.ResourceType, request.ResourceID, request.TraceID, request.Action, request.Details, h.enterpriseID) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
@@ -104,7 +102,7 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_ticket"})
 		return
 	}
-	id, err := h.sink.AppendAuditEvidence(r.Context(), AuditEvidenceInput{EnterpriseID: actor.EnterpriseID, ActorUserID: actor.UserID, CaseTicketID: actor.CaseTicketID, Action: request.Action, ResourceType: request.ResourceType, ResourceID: request.ResourceID, TraceID: request.TraceID, WorkflowRunID: request.WorkflowRunID, Details: request.Details})
+	id, err := h.sink.AppendAuditEvidence(r.Context(), AuditEvidenceInput{EnterpriseID: actor.EnterpriseID, ActorUserID: actor.UserID, CaseTicketID: actor.CaseTicketID, Action: request.Action, ResourceType: request.ResourceType, ResourceID: request.ResourceID, TraceID: request.TraceID, Details: request.Details})
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit_unavailable"})
 		return
@@ -112,8 +110,8 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"audit_ref_id": id})
 }
 
-func validAuditEvidenceRequest(ticketID, enterpriseID, resourceType, resourceID, traceID, workflowRunID string, action AuditEvidenceAction, details map[string]any, expectedEnterprise string) bool {
-	if !boundedText(ticketID, 4096, false) || enterpriseID != expectedEnterprise || !boundedText(resourceType, 64, false) || !boundedText(resourceID, 128, false) || !boundedText(traceID, 128, true) || !boundedText(workflowRunID, 128, true) || !ValidAuditEvidenceAction(action) || len(details) > 100 {
+func validAuditEvidenceRequest(ticketID, enterpriseID, resourceType, resourceID, traceID string, action AuditEvidenceAction, details map[string]any, expectedEnterprise string) bool {
+	if !boundedText(ticketID, 4096, false) || enterpriseID != expectedEnterprise || !boundedText(resourceType, 64, false) || !boundedText(resourceID, 128, false) || !boundedText(traceID, 128, true) || !ValidAuditEvidenceAction(action) || len(details) > 100 {
 		return false
 	}
 	if action == AuditActionDreamPolicyCreateRequested && resourceType != "dream_policy" {

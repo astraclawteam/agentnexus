@@ -190,7 +190,7 @@ func newPostgresAuditEvidenceSinkWithDB(database auditEvidenceTxBeginner, random
 	return &PostgresBrowserAuditSink{evidenceDB: database, random: random}
 }
 
-func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, input AuditEvidenceInput) (string, error) {
+func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, input AuditEvidenceInput) (id string, resultErr error) {
 	if s == nil || s.evidenceDB == nil || s.random == nil || input.EnterpriseID == "" || input.ActorUserID == "" || input.CaseTicketID == "" || input.ResourceType == "" || input.ResourceID == "" || !ValidAuditEvidenceAction(input.Action) {
 		return "", errors.New("invalid audit evidence")
 	}
@@ -198,7 +198,13 @@ func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, inpu
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
+		defer cancel()
+		if rollbackErr := tx.Rollback(cleanupCtx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			resultErr = errors.Join(resultErr, rollbackErr)
+		}
+	}()
 	if _, err := tx.AcquireEnterpriseAuditLock(ctx, input.EnterpriseID); err != nil {
 		return "", err
 	}
@@ -206,7 +212,7 @@ func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, inpu
 	if err != nil {
 		return "", err
 	}
-	id, err := randomAuditID(s.random)
+	id, err = randomAuditID(s.random)
 	if err != nil {
 		return "", err
 	}

@@ -244,7 +244,7 @@ paths:
     post:
       operationId: appendAuditEvidence
       summary: Record a trusted AgentAtlas service request in the audit chain.
-      security: [{consoleClientSecret: []}]
+      security: [{agentAtlasServiceSecret: []}]
       requestBody:
         required: true
         content:
@@ -261,6 +261,10 @@ paths:
         '503': {description: Ticket or audit persistence unavailable.}
 components:
   securitySchemes:
+    agentAtlasServiceSecret:
+      type: http
+      scheme: basic
+      description: AgentAtlas service credentials using client_id=agentatlas and its confidential client secret.
     consoleClientSecret:
       type: http
       scheme: basic
@@ -300,7 +304,6 @@ components:
         resource_type: {type: string, minLength: 1, maxLength: 64}
         resource_id: {type: string, minLength: 1, maxLength: 128, description: Preallocated resource identifier bound into the audit lineage.}
         trace_id: {type: string, maxLength: 128}
-        workflow_run_id: {type: string, maxLength: 128}
         details: {type: object, maxProperties: 100, additionalProperties: true, description: Keys are at most 128 Unicode code points; string values at most 1024; arrays/maps at most 100 entries; nesting depth at most 4.}
       oneOf:
         - properties:
