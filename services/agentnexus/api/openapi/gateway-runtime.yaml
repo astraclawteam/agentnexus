@@ -103,6 +103,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApprovalRoute'
+  /v1/step-grants:
+    post:
+      operationId: createStepGrant
+      summary: Issue an audited short-lived grant for one exact sensitive action.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StepGrantRequest'
+      responses:
+        '201':
+          description: Opaque Step Grant returned once after durable audit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StepGrantResponse'
+  /v1/tickets/verify:
+    post:
+      operationId: verifyStepGrant
+      summary: Verify an opaque Step Grant against one exact operation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StepGrantVerifyRequest'
+      responses:
+        '200':
+          description: The grant is active and exactly bound.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StepGrantVerifyResponse'
 components:
   schemas:
     RequestEnvelope:
@@ -435,3 +469,45 @@ components:
           type: string
           minLength: 16
           maxLength: 128
+    StepGrantRequest:
+      type: object
+      additionalProperties: false
+      required: [case_ticket_id, org_unit_id, org_version, resource_type, resource_id, action, ttl_seconds]
+      properties:
+        case_ticket_id: {type: string}
+        org_unit_id: {type: string}
+        org_version: {type: integer, minimum: 1}
+        resource_type: {type: string, enum: [dream_evidence]}
+        resource_id: {type: string}
+        action: {type: string, enum: [read]}
+        ttl_seconds: {type: integer, minimum: 1, maximum: 86400}
+    StepGrantResponse:
+      type: object
+      additionalProperties: false
+      required: [token, expires_at, resource_type, resource_id, action, scopes]
+      properties:
+        token: {type: string}
+        expires_at: {type: string, format: date-time}
+        resource_type: {type: string}
+        resource_id: {type: string}
+        action: {type: string}
+        scopes: {type: array, items: {type: string}}
+    StepGrantVerifyRequest:
+      type: object
+      additionalProperties: false
+      required: [token, resource_type, resource_id, action, scope]
+      properties:
+        token: {type: string}
+        resource_type: {type: string, enum: [dream_evidence]}
+        resource_id: {type: string}
+        action: {type: string, enum: [read]}
+        scope: {type: string, enum: ['dream:evidence:read']}
+    StepGrantVerifyResponse:
+      type: object
+      additionalProperties: false
+      required: [valid, step_grant_id, expires_at, scopes]
+      properties:
+        valid: {type: boolean, enum: [true]}
+        step_grant_id: {type: string}
+        expires_at: {type: string, format: date-time}
+        scopes: {type: array, items: {type: string}}

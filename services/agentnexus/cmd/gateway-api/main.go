@@ -12,6 +12,7 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -64,6 +65,8 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 	}
 	authorizationPolicy, ticketActors := productionAuthorizationDependencies(browserConfig.OIDC.EnterpriseID, pool)
 	approvalSource, approvalStore := productionApprovalDependencies(pool)
+	grantStore := app.NewPostgresGrantStore(pool)
+	grantService := tickets.NewService(grantStore, tickets.WithGrantAuthorizer(app.NewScopedGrantAuthorizer(grantStore, policy.NewAgentAtlasEvaluator(authorizationPolicy))))
 	approvalFactsVerifier, err := app.LoadChangeFactsVerifierFromFile(os.Getenv("AGENTNEXUS_APPROVAL_FACTS_SECRET_FILE"), time.Now)
 	if err != nil {
 		cleanup()
@@ -83,6 +86,7 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		ApprovalSource:          approvalSource,
 		ApprovalStore:           approvalStore,
 		ApprovalFactsVerifier:   approvalFactsVerifier,
+		Grants:                  grantService,
 	})
 	if err != nil {
 		cleanup()

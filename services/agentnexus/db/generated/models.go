@@ -118,6 +118,7 @@ type CaseTicket struct {
 	Status       string
 	ExpiresAt    pgtype.Timestamptz
 	CreatedAt    pgtype.Timestamptz
+	TokenHash    string
 }
 
 type ConfirmationCheckpoint struct {
@@ -334,6 +335,15 @@ type OrgVersion struct {
 	PolicySnapshotPublishable bool
 }
 
+type SensitiveResourceOwnership struct {
+	EnterpriseID string
+	ResourceType string
+	ResourceID   string
+	OrgVersion   int64
+	OrgUnitID    string
+	UpdatedAt    pgtype.Timestamptz
+}
+
 type StepGrant struct {
 	ID           string
 	EnterpriseID string
@@ -343,6 +353,17 @@ type StepGrant struct {
 	Action       string
 	Scopes       []byte
 	ExpiresAt    pgtype.Timestamptz
+	CreatedAt    pgtype.Timestamptz
+}
+
+type StepGrantIssuance struct {
+	EnterpriseID string
+	StepGrantID  string
+	TokenHash    string
+	ActorUserID  string
+	OrgVersion   int64
+	OrgUnitID    string
+	AuditEventID string
 	CreatedAt    pgtype.Timestamptz
 }
 

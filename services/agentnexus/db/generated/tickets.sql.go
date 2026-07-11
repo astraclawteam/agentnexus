@@ -12,9 +12,9 @@ import (
 )
 
 const createCaseTicket = `-- name: CreateCaseTicket :one
-INSERT INTO case_tickets (id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, created_at
+INSERT INTO case_tickets (id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, token_hash)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, created_at, token_hash
 `
 
 type CreateCaseTicketParams struct {
@@ -25,6 +25,7 @@ type CreateCaseTicketParams struct {
 	TraceID      pgtype.Text
 	Status       string
 	ExpiresAt    pgtype.Timestamptz
+	TokenHash    string
 }
 
 func (q *Queries) CreateCaseTicket(ctx context.Context, arg CreateCaseTicketParams) (CaseTicket, error) {
@@ -36,6 +37,7 @@ func (q *Queries) CreateCaseTicket(ctx context.Context, arg CreateCaseTicketPara
 		arg.TraceID,
 		arg.Status,
 		arg.ExpiresAt,
+		arg.TokenHash,
 	)
 	var i CaseTicket
 	err := row.Scan(
@@ -47,6 +49,7 @@ func (q *Queries) CreateCaseTicket(ctx context.Context, arg CreateCaseTicketPara
 		&i.Status,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.TokenHash,
 	)
 	return i, err
 }
@@ -96,21 +99,21 @@ func (q *Queries) CreateStepGrant(ctx context.Context, arg CreateStepGrantParams
 
 const getCaseTicket = `-- name: GetCaseTicket :one
 SELECT tickets.id, tickets.enterprise_id, tickets.actor_user_id, tickets.request_id,
-       tickets.trace_id, tickets.status, tickets.expires_at, tickets.created_at
+       tickets.trace_id, tickets.status, tickets.expires_at, tickets.created_at, tickets.token_hash
 FROM case_tickets AS tickets
 JOIN enterprise_users AS users
   ON users.enterprise_id = tickets.enterprise_id
  AND users.id = tickets.actor_user_id
-WHERE tickets.enterprise_id = $1 AND tickets.id = $2
+WHERE tickets.enterprise_id = $1 AND tickets.token_hash = $2
 `
 
 type GetCaseTicketParams struct {
 	EnterpriseID string
-	ID           string
+	TokenHash    string
 }
 
 func (q *Queries) GetCaseTicket(ctx context.Context, arg GetCaseTicketParams) (CaseTicket, error) {
-	row := q.db.QueryRow(ctx, getCaseTicket, arg.EnterpriseID, arg.ID)
+	row := q.db.QueryRow(ctx, getCaseTicket, arg.EnterpriseID, arg.TokenHash)
 	var i CaseTicket
 	err := row.Scan(
 		&i.ID,
@@ -121,12 +124,13 @@ func (q *Queries) GetCaseTicket(ctx context.Context, arg GetCaseTicketParams) (C
 		&i.Status,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.TokenHash,
 	)
 	return i, err
 }
 
 const listCaseTickets = `-- name: ListCaseTickets :many
-SELECT id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, created_at
+SELECT id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, created_at, token_hash
 FROM case_tickets
 WHERE enterprise_id = $1
 ORDER BY created_at DESC
@@ -150,6 +154,7 @@ func (q *Queries) ListCaseTickets(ctx context.Context, enterpriseID string) ([]C
 			&i.Status,
 			&i.ExpiresAt,
 			&i.CreatedAt,
+			&i.TokenHash,
 		); err != nil {
 			return nil, err
 		}

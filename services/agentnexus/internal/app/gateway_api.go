@@ -37,12 +37,12 @@ func browserRequestDeadline(next http.Handler, timeout time.Duration) http.Handl
 	})
 }
 func isBrowserAuthPath(path string) bool {
-	return path == "/.well-known/openid-configuration" || path == "/v1/authorization/decisions" || path == "/v1/approvals/resolve" || strings.HasPrefix(path, "/oauth2/") || strings.HasPrefix(path, "/v1/browser-sessions/")
+	return path == "/.well-known/openid-configuration" || path == "/v1/authorization/decisions" || path == "/v1/approvals/resolve" || path == "/v1/step-grants" || path == "/v1/tickets/verify" || strings.HasPrefix(path, "/oauth2/") || strings.HasPrefix(path, "/v1/browser-sessions/")
 }
 
 func browserResponseHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/oauth2/") || r.URL.Path == "/v1/authorization/decisions" || r.URL.Path == "/v1/approvals/resolve" {
+		if strings.HasPrefix(r.URL.Path, "/oauth2/") || r.URL.Path == "/v1/authorization/decisions" || r.URL.Path == "/v1/approvals/resolve" || r.URL.Path == "/v1/step-grants" || r.URL.Path == "/v1/tickets/verify" {
 			setNoStore(w)
 		}
 		next.ServeHTTP(w, r)

@@ -49,22 +49,23 @@ func (r ticketActorRow) Scan(dest ...any) error {
 	*(dest[5].(*string)) = r.ticket.Status
 	*(dest[6].(*pgtype.Timestamptz)) = r.ticket.ExpiresAt
 	*(dest[7].(*pgtype.Timestamptz)) = r.ticket.CreatedAt
+	*(dest[8].(*string)) = r.ticket.TokenHash
 	return nil
 }
 
 func TestPostgresTicketActorAuthenticatorValidatesEnterpriseStatusAndExpiry(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
-	valid := db.CaseTicket{ID: "opaque-ticket", EnterpriseID: "enterprise-1", ActorUserID: "user-1", RequestID: "request-1", Status: "active", ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true}}
+	valid := db.CaseTicket{ID: "ticket-internal", TokenHash: "f13ee9b2677f32949e09f039d588b7b401291659f611ee9a1881283f5a3ba481", EnterpriseID: "enterprise-1", ActorUserID: "user-1", RequestID: "request-1", Status: "active", ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true}}
 
 	t.Run("active", func(t *testing.T) {
 		database := &ticketActorDB{row: ticketActorRow{ticket: valid}}
 		authenticator := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", database, func() time.Time { return now })
 		actor, err := authenticator.AuthenticateTicketActor(context.Background(), "opaque-ticket")
-		if err != nil || actor != (AuthorizationActor{EnterpriseID: "enterprise-1", UserID: "user-1"}) {
+		if err != nil || actor != (AuthorizationActor{EnterpriseID: "enterprise-1", UserID: "user-1", CaseTicketID: "ticket-internal"}) {
 			t.Fatalf("actor=%#v error=%v", actor, err)
 		}
-		if len(database.args) != 2 || database.args[0] != "enterprise-1" || database.args[1] != "opaque-ticket" {
+		if len(database.args) != 2 || database.args[0] != "enterprise-1" || database.args[1] != "f13ee9b2677f32949e09f039d588b7b401291659f611ee9a1881283f5a3ba481" {
 			t.Fatalf("query args = %#v", database.args)
 		}
 	})
@@ -117,7 +118,7 @@ func TestCaseTicketActorQueryIsEnterpriseScopedAndUserBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := strings.ToLower(strings.Join(strings.Fields(string(raw)), " "))
-	for _, required := range []string{"from case_tickets as tickets", "join enterprise_users as users on users.enterprise_id = tickets.enterprise_id and users.id = tickets.actor_user_id", "where tickets.enterprise_id = $1 and tickets.id = $2"} {
+	for _, required := range []string{"from case_tickets as tickets", "join enterprise_users as users on users.enterprise_id = tickets.enterprise_id and users.id = tickets.actor_user_id", "where tickets.enterprise_id = $1 and tickets.token_hash = sqlc.arg(token_hash)"} {
 		if !strings.Contains(query, required) {
 			t.Errorf("ticket actor query missing %q", required)
 		}

@@ -29,9 +29,10 @@ const (
 type ResourceType string
 
 const (
-	ResourceKnowledge ResourceType = "knowledge"
-	ResourceWorkflow  ResourceType = "workflow"
-	ResourceService   ResourceType = "service"
+	ResourceKnowledge     ResourceType = "knowledge"
+	ResourceWorkflow      ResourceType = "workflow"
+	ResourceService       ResourceType = "service"
+	ResourceDreamEvidence ResourceType = "dream_evidence"
 )
 
 type AtlasAction string
@@ -47,6 +48,7 @@ const (
 	ActionWorkflowPublishLowRisk   AtlasAction = "workflow.publish_low_risk"
 	ActionWorkflowApproveHighRisk  AtlasAction = "workflow.approve_high_risk"
 	ActionServiceMode              AtlasAction = "service.mode"
+	ActionDreamEvidenceRead        AtlasAction = "read"
 )
 
 type AtlasRiskLevel string
@@ -74,6 +76,7 @@ var actionRequirements = map[AtlasAction]actionRequirement{
 	ActionWorkflowPublishLowRisk:   {resourceType: ResourceWorkflow, permission: PermissionPublishLowRisk, baselineRisk: AtlasRiskLow},
 	ActionWorkflowApproveHighRisk:  {resourceType: ResourceWorkflow, permission: PermissionApproveHighRisk, baselineRisk: AtlasRiskHigh},
 	ActionServiceMode:              {resourceType: ResourceService, permission: PermissionServiceMode, baselineRisk: AtlasRiskHigh},
+	ActionDreamEvidenceRead:        {resourceType: ResourceDreamEvidence, permission: PermissionApproveHighRisk, baselineRisk: AtlasRiskHigh},
 }
 
 func RequiredPermission(resourceType ResourceType, action AtlasAction) (AtlasPermission, AtlasRiskLevel, bool) {

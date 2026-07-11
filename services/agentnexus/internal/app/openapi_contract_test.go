@@ -30,6 +30,12 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 	if !ok || len(parameters) != 2 {
 		t.Fatalf("approval parameters=%v", approvalPath["parameters"])
 	}
+	for path, operationID := range map[string]string{"/v1/step-grants": "createStepGrant", "/v1/tickets/verify": "verifyStepGrant"} {
+		operation := nestedMap(t, paths, path, "post")
+		if operation["operationId"] != operationID {
+			t.Fatalf("%s operationId=%v", path, operation["operationId"])
+		}
+	}
 
 	t.Run("BrowserSession", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "BrowserSession")
@@ -92,6 +98,13 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 		assertObjectProperties(t, schema, []string{"org_version", "org_unit_id", "resource_type", "resource_id", "action", "changed_fields", "impacted_org_unit_ids", "impacted_user_count", "published_behavior_change", "external_side_effect", "requested_risk", "facts_issued_at", "facts_expires_at", "facts_nonce"}, nil)
 		if _, exists := nestedMap(t, schema, "properties")["requester_user_id"]; exists {
 			t.Fatal("request body must not contain requester_user_id")
+		}
+	})
+	t.Run("StepGrantRequest", func(t *testing.T) {
+		schema := namedSchema(t, schemas, "StepGrantRequest")
+		assertObjectProperties(t, schema, []string{"case_ticket_id", "org_unit_id", "org_version", "resource_type", "resource_id", "action", "ttl_seconds"}, nil)
+		if _, exists := nestedMap(t, schema, "properties")["enterprise_id"]; exists {
+			t.Fatal("request must not trust enterprise_id")
 		}
 	})
 }

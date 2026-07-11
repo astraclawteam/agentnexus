@@ -1,19 +1,19 @@
 -- name: CreateCaseTicket :one
-INSERT INTO case_tickets (id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, created_at;
+INSERT INTO case_tickets (id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, token_hash)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, created_at, token_hash;
 
 -- name: GetCaseTicket :one
 SELECT tickets.id, tickets.enterprise_id, tickets.actor_user_id, tickets.request_id,
-       tickets.trace_id, tickets.status, tickets.expires_at, tickets.created_at
+       tickets.trace_id, tickets.status, tickets.expires_at, tickets.created_at, tickets.token_hash
 FROM case_tickets AS tickets
 JOIN enterprise_users AS users
   ON users.enterprise_id = tickets.enterprise_id
  AND users.id = tickets.actor_user_id
-WHERE tickets.enterprise_id = $1 AND tickets.id = $2;
+WHERE tickets.enterprise_id = $1 AND tickets.token_hash = sqlc.arg(token_hash);
 
 -- name: ListCaseTickets :many
-SELECT id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, created_at
+SELECT id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, created_at, token_hash
 FROM case_tickets
 WHERE enterprise_id = $1
 ORDER BY created_at DESC;

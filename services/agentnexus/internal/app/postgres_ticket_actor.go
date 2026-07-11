@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -37,15 +39,17 @@ func (a *PostgresTicketActorAuthenticator) AuthenticateTicketActor(ctx context.C
 	if !canonicalAuthorizationValue(opaqueID) {
 		return AuthorizationActor{}, ErrInvalidTicketActor
 	}
-	ticket, err := db.New(a.database).GetCaseTicket(ctx, db.GetCaseTicketParams{EnterpriseID: a.enterpriseID, ID: opaqueID})
+	hash := sha256.Sum256([]byte(opaqueID))
+	ticket, err := db.New(a.database).GetCaseTicket(ctx, db.GetCaseTicketParams{EnterpriseID: a.enterpriseID, TokenHash: hex.EncodeToString(hash[:])})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AuthorizationActor{}, ErrInvalidTicketActor
 	}
 	if err != nil {
 		return AuthorizationActor{}, ErrTicketActorUnavailable
 	}
-	if ticket.ID != opaqueID || ticket.EnterpriseID != a.enterpriseID || !canonicalAuthorizationValue(ticket.ID) || !canonicalAuthorizationValue(ticket.EnterpriseID) || !canonicalAuthorizationValue(ticket.ActorUserID) || !canonicalAuthorizationValue(ticket.RequestID) || (ticket.TraceID.Valid && !canonicalAuthorizationValue(ticket.TraceID.String)) || ticket.Status != "active" || !ticket.ExpiresAt.Valid || !ticket.ExpiresAt.Time.After(a.now().UTC()) {
+	expectedHash := hex.EncodeToString(hash[:])
+	if ticket.TokenHash != expectedHash || ticket.EnterpriseID != a.enterpriseID || !canonicalAuthorizationValue(ticket.ID) || !canonicalAuthorizationValue(ticket.EnterpriseID) || !canonicalAuthorizationValue(ticket.ActorUserID) || !canonicalAuthorizationValue(ticket.RequestID) || (ticket.TraceID.Valid && !canonicalAuthorizationValue(ticket.TraceID.String)) || ticket.Status != "active" || !ticket.ExpiresAt.Valid || !ticket.ExpiresAt.Time.After(a.now().UTC()) {
 		return AuthorizationActor{}, ErrInvalidTicketActor
 	}
-	return AuthorizationActor{EnterpriseID: ticket.EnterpriseID, UserID: ticket.ActorUserID}, nil
+	return AuthorizationActor{EnterpriseID: ticket.EnterpriseID, UserID: ticket.ActorUserID, CaseTicketID: ticket.ID}, nil
 }

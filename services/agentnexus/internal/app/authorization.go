@@ -23,6 +23,7 @@ var (
 type AuthorizationActor struct {
 	EnterpriseID string
 	UserID       string
+	CaseTicketID string
 }
 
 type TicketActorAuthenticator interface {

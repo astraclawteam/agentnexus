@@ -106,6 +106,7 @@ type BrowserAuthDependencies struct {
 	ApprovalSource          ApprovalSnapshotSource
 	ApprovalStore           ApprovalRouteStore
 	ApprovalFactsVerifier   ChangeFactsVerifier
+	Grants                  grantService
 }
 
 type browserAuthHandler struct {
@@ -120,6 +121,7 @@ type browserAuthHandler struct {
 	authorizeSourceResolver AuthorizeSourceResolver
 	authorization           *authorizationHandler
 	approval                *approvalHandler
+	grants                  *grantHandler
 }
 
 func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, error) {
@@ -140,6 +142,13 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
+	var grants *grantHandler
+	if deps.Grants != nil {
+		grants, err = newGrantHandler(authorization, deps.Grants)
+		if err != nil {
+			return nil, err
+		}
+	}
 	issuer := deps.TokenIssuer
 	if issuer == nil {
 		var err error
@@ -148,7 +157,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
-	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, authorization: authorization, approval: approvalRoutes}, nil
+	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, authorization: authorization, approval: approvalRoutes, grants: grants}, nil
 }
 
 func browserRequestTimeout(value time.Duration) (time.Duration, error) {
@@ -172,6 +181,9 @@ func (h *browserAuthHandler) register(mux *http.ServeMux) {
 	h.authorization.register(mux)
 	if h.approval != nil {
 		h.approval.register(mux)
+	}
+	if h.grants != nil {
+		h.grants.register(mux)
 	}
 }
 
