@@ -73,21 +73,20 @@ func (q *Queries) GetGrantResourceOwner(ctx context.Context, arg GetGrantResourc
 	return i, err
 }
 
-const getGrantResourceOwnerForUpdate = `-- name: GetGrantResourceOwnerForUpdate :one
+const getGrantResourceOwnerForGrant = `-- name: GetGrantResourceOwnerForGrant :one
 SELECT enterprise_id, resource_type, resource_id, org_version, org_unit_id, updated_at
 FROM sensitive_resource_ownerships
 WHERE enterprise_id = $1 AND resource_type = $2 AND resource_id = $3
-FOR UPDATE
 `
 
-type GetGrantResourceOwnerForUpdateParams struct {
+type GetGrantResourceOwnerForGrantParams struct {
 	EnterpriseID string
 	ResourceType string
 	ResourceID   string
 }
 
-func (q *Queries) GetGrantResourceOwnerForUpdate(ctx context.Context, arg GetGrantResourceOwnerForUpdateParams) (SensitiveResourceOwnership, error) {
-	row := q.db.QueryRow(ctx, getGrantResourceOwnerForUpdate, arg.EnterpriseID, arg.ResourceType, arg.ResourceID)
+func (q *Queries) GetGrantResourceOwnerForGrant(ctx context.Context, arg GetGrantResourceOwnerForGrantParams) (SensitiveResourceOwnership, error) {
+	row := q.db.QueryRow(ctx, getGrantResourceOwnerForGrant, arg.EnterpriseID, arg.ResourceType, arg.ResourceID)
 	var i SensitiveResourceOwnership
 	err := row.Scan(
 		&i.EnterpriseID,
@@ -168,20 +167,23 @@ func (q *Queries) GetStepGrantByTokenHash(ctx context.Context, arg GetStepGrantB
 const insertStepGrantIssuance = `-- name: InsertStepGrantIssuance :one
 INSERT INTO step_grant_issuances (
     enterprise_id, step_grant_id, token_hash, actor_user_id,
-    org_version, org_unit_id, audit_event_id, created_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-RETURNING enterprise_id, step_grant_id, token_hash, actor_user_id, org_version, org_unit_id, audit_event_id, created_at
+    org_version, org_unit_id, audit_event_id, expected_audit_input_hash,
+    expected_audit_output_hash, created_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+RETURNING enterprise_id, step_grant_id, token_hash, actor_user_id, org_version, org_unit_id, audit_event_id, expected_audit_input_hash, expected_audit_output_hash, created_at
 `
 
 type InsertStepGrantIssuanceParams struct {
-	EnterpriseID string
-	StepGrantID  string
-	TokenHash    string
-	ActorUserID  string
-	OrgVersion   int64
-	OrgUnitID    string
-	AuditEventID string
-	CreatedAt    pgtype.Timestamptz
+	EnterpriseID            string
+	StepGrantID             string
+	TokenHash               string
+	ActorUserID             string
+	OrgVersion              int64
+	OrgUnitID               string
+	AuditEventID            string
+	ExpectedAuditInputHash  string
+	ExpectedAuditOutputHash string
+	CreatedAt               pgtype.Timestamptz
 }
 
 func (q *Queries) InsertStepGrantIssuance(ctx context.Context, arg InsertStepGrantIssuanceParams) (StepGrantIssuance, error) {
@@ -193,6 +195,8 @@ func (q *Queries) InsertStepGrantIssuance(ctx context.Context, arg InsertStepGra
 		arg.OrgVersion,
 		arg.OrgUnitID,
 		arg.AuditEventID,
+		arg.ExpectedAuditInputHash,
+		arg.ExpectedAuditOutputHash,
 		arg.CreatedAt,
 	)
 	var i StepGrantIssuance
@@ -204,6 +208,8 @@ func (q *Queries) InsertStepGrantIssuance(ctx context.Context, arg InsertStepGra
 		&i.OrgVersion,
 		&i.OrgUnitID,
 		&i.AuditEventID,
+		&i.ExpectedAuditInputHash,
+		&i.ExpectedAuditOutputHash,
 		&i.CreatedAt,
 	)
 	return i, err

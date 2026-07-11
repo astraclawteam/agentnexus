@@ -30,7 +30,7 @@ func (f *fakeGrantEvaluator) Evaluate(_ context.Context, request policy.ScopedRe
 }
 
 func TestScopedGrantAuthorizerUsesCurrentDreamEvidenceDecisionAndOwnership(t *testing.T) {
-	evaluator := &fakeGrantEvaluator{decision: policy.PermissionDecision{Decision: policy.DecisionAllow, OrgVersion: 7, OrgUnitIDs: []string{"research"}}}
+	evaluator := &fakeGrantEvaluator{decision: policy.PermissionDecision{Decision: policy.DecisionAllow, Permissions: []policy.AtlasPermission{policy.PermissionApproveHighRisk}, OrgVersion: 7, OrgUnitIDs: []string{"research"}, MaskFields: []string{}, RiskLevel: policy.AtlasRiskHigh}}
 	authorizer := NewScopedGrantAuthorizer(fakeGrantOwner{owner: GrantResourceOwner{EnterpriseID: "ent_1", ResourceType: "dream_evidence", ResourceID: "ev-1", OrgUnitID: "research", OrgVersion: 7}}, evaluator)
 	decision, err := authorizer.AuthorizeGrant(context.Background(), tickets.Actor{EnterpriseID: "ent_1", UserID: "user_1"}, tickets.CreateStepGrantInput{OrgUnitID: "research", OrgVersion: 7, ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read"})
 	if err != nil {
@@ -62,6 +62,38 @@ func TestScopedGrantAuthorizerFailsClosedOnOwnershipOrPolicyMismatch(t *testing.
 			decision, err := authorizer.AuthorizeGrant(context.Background(), tickets.Actor{EnterpriseID: "ent_1", UserID: "user_1"}, input)
 			if err == nil && decision.Allowed {
 				t.Fatalf("allowed=%+v err=%v", decision, err)
+			}
+		})
+	}
+}
+
+func TestScopedGrantAuthorizerRejectsMalformedAllowDecision(t *testing.T) {
+	owner := fakeGrantOwner{owner: GrantResourceOwner{EnterpriseID: "ent_1", ResourceType: "dream_evidence", ResourceID: "ev-1", OrgUnitID: "research", OrgVersion: 7}}
+	input := tickets.CreateStepGrantInput{OrgUnitID: "research", OrgVersion: 7, ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read"}
+	actor := tickets.Actor{EnterpriseID: "ent_1", UserID: "user_1"}
+	base := policy.PermissionDecision{Decision: policy.DecisionAllow, Permissions: []policy.AtlasPermission{policy.PermissionApproveHighRisk}, OrgUnitIDs: []string{"research"}, MaskFields: []string{}, RiskLevel: policy.AtlasRiskHigh, OrgVersion: 7}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*policy.PermissionDecision)
+	}{
+		{"empty permission", func(d *policy.PermissionDecision) { d.Permissions = []policy.AtlasPermission{} }},
+		{"wrong permission", func(d *policy.PermissionDecision) { d.Permissions = []policy.AtlasPermission{policy.PermissionEdit} }},
+		{"extra permission", func(d *policy.PermissionDecision) { d.Permissions = append(d.Permissions, policy.PermissionEdit) }},
+		{"wrong risk", func(d *policy.PermissionDecision) { d.RiskLevel = policy.AtlasRiskLow }},
+		{"fallback", func(d *policy.PermissionDecision) { d.FallbackAction = policy.ActionKnowledgeSuggest }},
+		{"masking", func(d *policy.PermissionDecision) { d.MaskFields = []string{"secret"} }},
+		{"extra scope", func(d *policy.PermissionDecision) { d.OrgUnitIDs = []string{"research", "root"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decision := base
+			decision.Permissions = append([]policy.AtlasPermission(nil), base.Permissions...)
+			decision.OrgUnitIDs = append([]string(nil), base.OrgUnitIDs...)
+			decision.MaskFields = append([]string(nil), base.MaskFields...)
+			tc.mutate(&decision)
+			auth := NewScopedGrantAuthorizer(owner, &fakeGrantEvaluator{decision: decision})
+			got, err := auth.AuthorizeGrant(context.Background(), actor, input)
+			if err == nil && got.Allowed {
+				t.Fatalf("allowed malformed decision=%+v", decision)
 			}
 		})
 	}

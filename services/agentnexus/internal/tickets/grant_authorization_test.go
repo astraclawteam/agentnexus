@@ -127,6 +127,28 @@ func TestGrantVerificationEnforcesExactBindingAndExpiry(t *testing.T) {
 	}
 }
 
+func TestCredentialHashesAreDomainSeparated(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	store := NewMemoryStore()
+	tokens := []string{"same-opaque-credential", "same-opaque-credential"}
+	i := 0
+	svc := NewService(store, WithClock(func() time.Time { return now }), WithIDGenerator(sequenceIDs("ticket_1", "grant_1", "audit_1")), WithTokenGenerator(func() (string, error) { v := tokens[i]; i++; return v, nil }), WithGrantAuthorizer(allowGrantAuthorizer()))
+	ticket, err := svc.CreateCaseTicket(CreateCaseTicketInput{EnterpriseID: "ent_1", ActorUserID: "user_1", RequestID: "req_1", TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := svc.AuthorizeAndCreateGrant(context.Background(), Actor{EnterpriseID: "ent_1", UserID: "user_1"}, CreateStepGrantInput{CaseTicketID: ticket.ID, OrgUnitID: "research", OrgVersion: 7, ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", TTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.TokenHash == grant.TokenHash {
+		t.Fatalf("cross-type credential hashes collide: %s", ticket.TokenHash)
+	}
+	if ticket.TokenHash != HashCaseTicketToken(ticket.Token) || grant.TokenHash != HashStepGrantToken(grant.Token) {
+		t.Fatal("stored hashes are not canonical domain hashes")
+	}
+}
+
 func allowGrantAuthorizer() GrantAuthorizer {
 	return GrantAuthorizerFunc(func(_ context.Context, actor Actor, _ CreateStepGrantInput) (GrantAuthorization, error) {
 		return GrantAuthorization{Allowed: true, EnterpriseID: actor.EnterpriseID, OrgVersion: 7, OrgUnitIDs: []string{"research"}}, nil

@@ -118,7 +118,8 @@ type CaseTicket struct {
 	Status       string
 	ExpiresAt    pgtype.Timestamptz
 	CreatedAt    pgtype.Timestamptz
-	TokenHash    string
+	// SHA-256(agentnexus:case-ticket:v1: || opaque credential); legacy ids are revoked
+	TokenHash string
 }
 
 type ConfirmationCheckpoint struct {
@@ -359,12 +360,15 @@ type StepGrant struct {
 type StepGrantIssuance struct {
 	EnterpriseID string
 	StepGrantID  string
-	TokenHash    string
-	ActorUserID  string
-	OrgVersion   int64
-	OrgUnitID    string
-	AuditEventID string
-	CreatedAt    pgtype.Timestamptz
+	// SHA-256(agentnexus:step-grant:v1: || opaque credential)
+	TokenHash               string
+	ActorUserID             string
+	OrgVersion              int64
+	OrgUnitID               string
+	AuditEventID            string
+	ExpectedAuditInputHash  string
+	ExpectedAuditOutputHash string
+	CreatedAt               pgtype.Timestamptz
 }
 
 type TaskRun struct {

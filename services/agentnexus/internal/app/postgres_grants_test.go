@@ -20,6 +20,8 @@ type fakeGrantWriteTx struct {
 	steps                 []string
 	fail                  string
 	committed, rolledBack bool
+	issuance              db.InsertStepGrantIssuanceParams
+	audit                 db.AppendAuditEventParams
 }
 
 func (f *fakeGrantWriteTx) mark(step string) error {
@@ -35,7 +37,7 @@ func (f *fakeGrantWriteTx) AcquireEnterpriseOrgPublicationLock(context.Context, 
 func (f *fakeGrantWriteTx) GetActiveCaseTicketForGrant(context.Context, db.GetActiveCaseTicketForGrantParams) (db.CaseTicket, error) {
 	return f.ticket, f.mark("ticket")
 }
-func (f *fakeGrantWriteTx) GetGrantResourceOwnerForUpdate(context.Context, db.GetGrantResourceOwnerForUpdateParams) (db.SensitiveResourceOwnership, error) {
+func (f *fakeGrantWriteTx) GetGrantResourceOwnerForGrant(context.Context, db.GetGrantResourceOwnerForGrantParams) (db.SensitiveResourceOwnership, error) {
 	return f.owner, f.mark("owner")
 }
 func (f *fakeGrantWriteTx) GetLatestGrantOrgVersion(context.Context, string) (int64, error) {
@@ -50,10 +52,12 @@ func (f *fakeGrantWriteTx) GetLatestEnterpriseAuditHash(context.Context, string)
 func (f *fakeGrantWriteTx) CreateStepGrant(context.Context, db.CreateStepGrantParams) (db.StepGrant, error) {
 	return db.StepGrant{}, f.mark("grant")
 }
-func (f *fakeGrantWriteTx) InsertStepGrantIssuance(context.Context, db.InsertStepGrantIssuanceParams) (db.StepGrantIssuance, error) {
+func (f *fakeGrantWriteTx) InsertStepGrantIssuance(_ context.Context, p db.InsertStepGrantIssuanceParams) (db.StepGrantIssuance, error) {
+	f.issuance = p
 	return db.StepGrantIssuance{}, f.mark("issuance")
 }
-func (f *fakeGrantWriteTx) AppendAuditEvent(context.Context, db.AppendAuditEventParams) error {
+func (f *fakeGrantWriteTx) AppendAuditEvent(_ context.Context, p db.AppendAuditEventParams) error {
+	f.audit = p
 	return f.mark("audit")
 }
 func (f *fakeGrantWriteTx) Commit(context.Context) error   { f.committed = true; return f.mark("commit") }
@@ -89,6 +93,12 @@ func TestPostgresGrantStorePersistsGrantAndAuditAtomicallyAfterRevalidation(t *t
 	if !tx.committed {
 		t.Fatal("not committed")
 	}
+	if tx.issuance.ExpectedAuditInputHash != tx.audit.InputHash.String || tx.issuance.ExpectedAuditOutputHash != tx.audit.OutputHash.String || !tx.audit.InputHash.Valid || !tx.audit.OutputHash.Valid {
+		t.Fatalf("issuance/audit hashes not durably bound: issuance=%+v audit=%+v", tx.issuance, tx.audit)
+	}
+	if !tx.audit.EvidencePointer.Valid || tx.audit.EvidencePointer.String != "grant_1" {
+		t.Fatalf("audit pointer=%+v", tx.audit.EvidencePointer)
+	}
 }
 
 func TestPostgresGrantStoreRollsBackAuditFailureAndRejectsStaleOwnership(t *testing.T) {
@@ -97,7 +107,7 @@ func TestPostgresGrantStoreRollsBackAuditFailureAndRejectsStaleOwnership(t *test
 	for _, tc := range []struct {
 		name   string
 		mutate func(*fakeGrantWriteTx)
-	}{{"audit", func(tx *fakeGrantWriteTx) { tx.fail = "audit" }}, {"stale", func(tx *fakeGrantWriteTx) { tx.latest = 8 }}} {
+	}{{"issuance", func(tx *fakeGrantWriteTx) { tx.fail = "issuance" }}, {"audit", func(tx *fakeGrantWriteTx) { tx.fail = "audit" }}, {"stale", func(tx *fakeGrantWriteTx) { tx.latest = 8 }}} {
 		t.Run(tc.name, func(t *testing.T) {
 			copy := *base
 			copy.steps = nil

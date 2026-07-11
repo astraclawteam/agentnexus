@@ -1,7 +1,16 @@
 -- +goose Up
 -- +goose StatementBegin
 ALTER TABLE case_tickets ADD COLUMN token_hash TEXT;
-UPDATE case_tickets SET token_hash=encode(sha256(convert_to(id,'UTF8')),'hex') WHERE token_hash IS NULL;
+-- Pre-hash CaseTickets used their database id as the bearer. They are deliberately
+-- revoked instead of being silently admitted to the new domain-separated format.
+UPDATE case_tickets SET
+    status='revoked',
+    expires_at=LEAST(expires_at, clock_timestamp()),
+    token_hash=encode(sha256(convert_to(
+        'agentnexus:invalidated-legacy-case-ticket:v1:' || enterprise_id || ':' || id,
+        'UTF8'
+    )),'hex')
+WHERE token_hash IS NULL;
 ALTER TABLE case_tickets ALTER COLUMN token_hash SET NOT NULL;
 ALTER TABLE case_tickets ADD CONSTRAINT chk_case_ticket_token_hash CHECK (token_hash ~ '^[0-9a-f]{64}$');
 ALTER TABLE case_tickets ADD CONSTRAINT uq_case_ticket_token_hash UNIQUE (enterprise_id, token_hash);
@@ -47,6 +56,8 @@ CREATE TABLE step_grant_issuances (
     org_version BIGINT NOT NULL CHECK (org_version > 0),
     org_unit_id TEXT NOT NULL,
     audit_event_id TEXT NOT NULL,
+    expected_audit_input_hash TEXT NOT NULL CHECK (expected_audit_input_hash ~ '^[0-9a-f]{64}$'),
+    expected_audit_output_hash TEXT NOT NULL CHECK (expected_audit_output_hash ~ '^[0-9a-f]{64}$'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (enterprise_id, step_grant_id),
     UNIQUE (enterprise_id, token_hash),
@@ -60,7 +71,10 @@ CREATE TABLE step_grant_issuances (
         REFERENCES audit_events(enterprise_id, id) DEFERRABLE INITIALLY DEFERRED
 );
 
-CREATE INDEX idx_step_grant_issuances_expiry
+COMMENT ON COLUMN case_tickets.token_hash IS 'SHA-256(agentnexus:case-ticket:v1: || opaque credential); legacy ids are revoked';
+COMMENT ON COLUMN step_grant_issuances.token_hash IS 'SHA-256(agentnexus:step-grant:v1: || opaque credential)';
+
+CREATE INDEX idx_step_grants_enterprise_expiry
     ON step_grants(enterprise_id, expires_at);
 
 CREATE FUNCTION guard_step_grant_issuance_evidence() RETURNS trigger
@@ -102,7 +116,7 @@ BEGIN
         RAISE EXCEPTION 'step grant resource ownership is stale';
     END IF;
     SELECT * INTO audit_row FROM audit_events WHERE enterprise_id=NEW.enterprise_id AND id=NEW.audit_event_id;
-    IF NOT FOUND OR audit_row.step_grant_id IS DISTINCT FROM NEW.step_grant_id OR audit_row.actor_user_id IS DISTINCT FROM NEW.actor_user_id OR audit_row.resource_type IS DISTINCT FROM grant_row.resource_type OR audit_row.resource_id IS DISTINCT FROM grant_row.resource_id OR audit_row.action <> 'step_grant.issue' OR audit_row.decision <> 'allow' THEN
+    IF NOT FOUND OR audit_row.step_grant_id IS DISTINCT FROM NEW.step_grant_id OR audit_row.case_ticket_id IS DISTINCT FROM grant_row.case_ticket_id OR audit_row.actor_user_id IS DISTINCT FROM NEW.actor_user_id OR audit_row.resource_type IS DISTINCT FROM grant_row.resource_type OR audit_row.resource_id IS DISTINCT FROM grant_row.resource_id OR audit_row.action <> 'step_grant.issue' OR audit_row.decision <> 'allow' OR audit_row.evidence_pointer IS DISTINCT FROM NEW.step_grant_id OR audit_row.input_hash IS DISTINCT FROM NEW.expected_audit_input_hash OR audit_row.output_hash IS DISTINCT FROM NEW.expected_audit_output_hash THEN
         RAISE EXCEPTION 'step grant audit evidence mismatch';
     END IF;
     RETURN NULL;
@@ -123,7 +137,7 @@ DROP FUNCTION IF EXISTS validate_step_grant_issuance();
 DROP FUNCTION IF EXISTS guard_governed_step_grant_scope();
 DROP FUNCTION IF EXISTS guard_step_grant_issuance_evidence();
 DROP FUNCTION IF EXISTS serialize_sensitive_resource_ownership();
-DROP INDEX IF EXISTS idx_step_grant_issuances_expiry;
+DROP INDEX IF EXISTS idx_step_grants_enterprise_expiry;
 DROP TABLE IF EXISTS step_grant_issuances;
 DROP TABLE IF EXISTS sensitive_resource_ownerships;
 ALTER TABLE step_grants DROP CONSTRAINT IF EXISTS fk_step_grants_enterprise_ticket;

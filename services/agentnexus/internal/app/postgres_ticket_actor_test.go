@@ -11,6 +11,7 @@ import (
 	"time"
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -56,7 +57,7 @@ func (r ticketActorRow) Scan(dest ...any) error {
 func TestPostgresTicketActorAuthenticatorValidatesEnterpriseStatusAndExpiry(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
-	valid := db.CaseTicket{ID: "ticket-internal", TokenHash: "f13ee9b2677f32949e09f039d588b7b401291659f611ee9a1881283f5a3ba481", EnterpriseID: "enterprise-1", ActorUserID: "user-1", RequestID: "request-1", Status: "active", ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true}}
+	valid := db.CaseTicket{ID: "ticket-internal", TokenHash: tickets.HashCaseTicketToken("opaque-ticket"), EnterpriseID: "enterprise-1", ActorUserID: "user-1", RequestID: "request-1", Status: "active", ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true}}
 
 	t.Run("active", func(t *testing.T) {
 		database := &ticketActorDB{row: ticketActorRow{ticket: valid}}
@@ -65,8 +66,19 @@ func TestPostgresTicketActorAuthenticatorValidatesEnterpriseStatusAndExpiry(t *t
 		if err != nil || actor != (AuthorizationActor{EnterpriseID: "enterprise-1", UserID: "user-1", CaseTicketID: "ticket-internal"}) {
 			t.Fatalf("actor=%#v error=%v", actor, err)
 		}
-		if len(database.args) != 2 || database.args[0] != "enterprise-1" || database.args[1] != "f13ee9b2677f32949e09f039d588b7b401291659f611ee9a1881283f5a3ba481" {
+		if len(database.args) != 2 || database.args[0] != "enterprise-1" || database.args[1] != tickets.HashCaseTicketToken("opaque-ticket") {
 			t.Fatalf("query args = %#v", database.args)
+		}
+	})
+
+	t.Run("legacy database id is not a bearer", func(t *testing.T) {
+		database := &ticketActorDB{row: ticketActorRow{err: pgx.ErrNoRows}}
+		_, err := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", database, func() time.Time { return now }).AuthenticateTicketActor(context.Background(), "ticket-internal")
+		if !errors.Is(err, ErrInvalidTicketActor) {
+			t.Fatalf("err=%v", err)
+		}
+		if database.args[1] == "ticket-internal" {
+			t.Fatal("raw database id used as credential lookup")
 		}
 	})
 

@@ -2,12 +2,11 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"time"
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -39,15 +38,14 @@ func (a *PostgresTicketActorAuthenticator) AuthenticateTicketActor(ctx context.C
 	if !canonicalAuthorizationValue(opaqueID) {
 		return AuthorizationActor{}, ErrInvalidTicketActor
 	}
-	hash := sha256.Sum256([]byte(opaqueID))
-	ticket, err := db.New(a.database).GetCaseTicket(ctx, db.GetCaseTicketParams{EnterpriseID: a.enterpriseID, TokenHash: hex.EncodeToString(hash[:])})
+	expectedHash := tickets.HashCaseTicketToken(opaqueID)
+	ticket, err := db.New(a.database).GetCaseTicket(ctx, db.GetCaseTicketParams{EnterpriseID: a.enterpriseID, TokenHash: expectedHash})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AuthorizationActor{}, ErrInvalidTicketActor
 	}
 	if err != nil {
 		return AuthorizationActor{}, ErrTicketActorUnavailable
 	}
-	expectedHash := hex.EncodeToString(hash[:])
 	if ticket.TokenHash != expectedHash || ticket.EnterpriseID != a.enterpriseID || !canonicalAuthorizationValue(ticket.ID) || !canonicalAuthorizationValue(ticket.EnterpriseID) || !canonicalAuthorizationValue(ticket.ActorUserID) || !canonicalAuthorizationValue(ticket.RequestID) || (ticket.TraceID.Valid && !canonicalAuthorizationValue(ticket.TraceID.String)) || ticket.Status != "active" || !ticket.ExpiresAt.Valid || !ticket.ExpiresAt.Time.After(a.now().UTC()) {
 		return AuthorizationActor{}, ErrInvalidTicketActor
 	}

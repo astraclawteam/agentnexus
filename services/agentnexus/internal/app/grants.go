@@ -50,7 +50,13 @@ func (a *ScopedGrantAuthorizer) AuthorizeGrant(ctx context.Context, actor ticket
 	if err != nil {
 		return tickets.GrantAuthorization{}, tickets.ErrGrantUnavailable
 	}
-	allowed := decision.Decision == policy.DecisionAllow && decision.OrgVersion == input.OrgVersion
+	allowed := decision.Decision == policy.DecisionAllow &&
+		decision.OrgVersion == input.OrgVersion &&
+		decision.RiskLevel == policy.AtlasRiskHigh &&
+		decision.FallbackAction == "" &&
+		len(decision.MaskFields) == 0 &&
+		len(decision.Permissions) == 1 && decision.Permissions[0] == policy.PermissionApproveHighRisk &&
+		len(decision.OrgUnitIDs) == 1 && decision.OrgUnitIDs[0] == input.OrgUnitID
 	return tickets.GrantAuthorization{Allowed: allowed, EnterpriseID: actor.EnterpriseID, OrgVersion: decision.OrgVersion, OrgUnitIDs: append([]string(nil), decision.OrgUnitIDs...)}, nil
 }
 

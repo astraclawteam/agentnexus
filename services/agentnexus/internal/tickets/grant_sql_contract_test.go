@@ -17,6 +17,11 @@ func TestStepGrantMigrationStoresOnlyHashAndImmutableExactScope(t *testing.T) {
 		"create table step_grant_issuances",
 		"alter table case_tickets add column token_hash text",
 		"uq_case_ticket_token_hash",
+		"agentnexus:invalidated-legacy-case-ticket:v1:",
+		"status='revoked'",
+		"expires_at=least(expires_at, clock_timestamp())",
+		"agentnexus:case-ticket:v1:",
+		"agentnexus:step-grant:v1:",
 		"token_hash text not null",
 		"unique (enterprise_id, token_hash)",
 		"foreign key (enterprise_id, org_version, org_unit_id)",
@@ -25,6 +30,12 @@ func TestStepGrantMigrationStoresOnlyHashAndImmutableExactScope(t *testing.T) {
 		"before update or delete on step_grant_issuances",
 		"before truncate on step_grant_issuances",
 		"step grant scope is immutable",
+		"expected_audit_input_hash text not null",
+		"expected_audit_output_hash text not null",
+		"audit_row.input_hash is distinct from new.expected_audit_input_hash",
+		"audit_row.output_hash is distinct from new.expected_audit_output_hash",
+		"audit_row.case_ticket_id is distinct from grant_row.case_ticket_id",
+		"idx_step_grants_enterprise_expiry",
 	} {
 		if !strings.Contains(sql, fragment) {
 			t.Errorf("migration missing %q", fragment)
@@ -32,6 +43,9 @@ func TestStepGrantMigrationStoresOnlyHashAndImmutableExactScope(t *testing.T) {
 	}
 	if strings.Contains(sql, "raw_token") {
 		t.Fatal("migration must not persist raw tokens")
+	}
+	if strings.Contains(sql, "sha256(convert_to(id") {
+		t.Fatal("legacy database-visible id must not remain an accepted bearer")
 	}
 }
 
@@ -41,10 +55,13 @@ func TestStepGrantQueriesAreTenantHashAndVersionScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	sql := strings.ToLower(string(raw))
-	for _, fragment := range []string{"getgrantresourceowner", "getgrantresourceownerforupdate", "insertstepgrantissuance", "getstepgrantbytokenhash", "enterprise_id = $1", "token_hash = $2", "getlatestgrantorgversion"} {
+	for _, fragment := range []string{"getgrantresourceowner", "getgrantresourceownerforgrant", "insertstepgrantissuance", "getstepgrantbytokenhash", "enterprise_id = $1", "token_hash = $2", "getlatestgrantorgversion"} {
 		if !strings.Contains(sql, fragment) {
 			t.Errorf("queries missing %q", fragment)
 		}
+	}
+	if strings.Contains(sql, "getgrantresourceownerforgrant :one\nselect") && strings.Contains(sql[strings.Index(sql, "getgrantresourceownerforgrant"):], "for update") {
+		t.Fatal("issuance ownership read must not reverse org-lock then row-lock ordering")
 	}
 }
 

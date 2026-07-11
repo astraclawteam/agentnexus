@@ -11,6 +11,18 @@ import (
 )
 
 const (
+	caseTicketHashDomain = "agentnexus:case-ticket:v1:"
+	stepGrantHashDomain  = "agentnexus:step-grant:v1:"
+)
+
+func HashCaseTicketToken(token string) string { return credentialHash(caseTicketHashDomain, token) }
+func HashStepGrantToken(token string) string  { return credentialHash(stepGrantHashDomain, token) }
+func credentialHash(domain, token string) string {
+	sum := sha256.Sum256([]byte(domain + token))
+	return hex.EncodeToString(sum[:])
+}
+
+const (
 	TicketStatusActive = "active"
 	GrantStatusActive  = "active"
 )
@@ -169,10 +181,9 @@ func (s *Service) CreateCaseTicket(input CreateCaseTicketInput) (CaseTicket, err
 	if err != nil || !canonical(token) {
 		return CaseTicket{}, ErrGrantUnavailable
 	}
-	hash := sha256.Sum256([]byte(token))
 	ticket := CaseTicket{
 		ID:           s.newID(),
-		TokenHash:    hex.EncodeToString(hash[:]),
+		TokenHash:    HashCaseTicketToken(token),
 		EnterpriseID: input.EnterpriseID,
 		ActorUserID:  input.ActorUserID,
 		RequestID:    input.RequestID,

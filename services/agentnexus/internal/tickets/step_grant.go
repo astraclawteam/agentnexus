@@ -2,8 +2,6 @@ package tickets
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"slices"
 	"strings"
@@ -72,13 +70,12 @@ func (s *Service) AuthorizeAndCreateGrant(ctx context.Context, actor Actor, inpu
 		return StepGrant{}, ErrGrantUnavailable
 	}
 	now := s.now()
-	sum := sha256.Sum256([]byte(token))
 	grantID := s.newID()
 	auditID := s.newID()
 	if !canonical(grantID) || !canonical(auditID) {
 		return StepGrant{}, ErrGrantUnavailable
 	}
-	grant := StepGrant{ID: grantID, Token: token, TokenHash: hex.EncodeToString(sum[:]), EnterpriseID: actor.EnterpriseID, ActorUserID: actor.UserID, CaseTicketID: input.CaseTicketID, OrgUnitID: input.OrgUnitID, OrgVersion: input.OrgVersion, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, Scopes: []string{scope}, ExpiresAt: now.Add(ttl), CreatedAt: now}
+	grant := StepGrant{ID: grantID, Token: token, TokenHash: HashStepGrantToken(token), EnterpriseID: actor.EnterpriseID, ActorUserID: actor.UserID, CaseTicketID: input.CaseTicketID, OrgUnitID: input.OrgUnitID, OrgVersion: input.OrgVersion, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, Scopes: []string{scope}, ExpiresAt: now.Add(ttl), CreatedAt: now}
 	governedStore, ok := s.store.(GovernedGrantStore)
 	if !ok {
 		return StepGrant{}, ErrGrantUnavailable
@@ -104,8 +101,7 @@ func (s *Service) VerifyGrant(ctx context.Context, input VerifyStepGrantInput) (
 	if !ok {
 		return StepGrant{}, ErrGrantUnavailable
 	}
-	sum := sha256.Sum256([]byte(input.Token))
-	grant, err := store.GetStepGrantByTokenHash(ctx, input.EnterpriseID, hex.EncodeToString(sum[:]))
+	grant, err := store.GetStepGrantByTokenHash(ctx, input.EnterpriseID, HashStepGrantToken(input.Token))
 	if err != nil {
 		if errors.Is(err, ErrGrantUnavailable) {
 			return StepGrant{}, ErrGrantUnavailable

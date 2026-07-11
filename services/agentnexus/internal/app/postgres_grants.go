@@ -18,7 +18,7 @@ import (
 type grantWriteTx interface {
 	AcquireEnterpriseOrgPublicationLock(context.Context, string) (any, error)
 	GetActiveCaseTicketForGrant(context.Context, db.GetActiveCaseTicketForGrantParams) (db.CaseTicket, error)
-	GetGrantResourceOwnerForUpdate(context.Context, db.GetGrantResourceOwnerForUpdateParams) (db.SensitiveResourceOwnership, error)
+	GetGrantResourceOwnerForGrant(context.Context, db.GetGrantResourceOwnerForGrantParams) (db.SensitiveResourceOwnership, error)
 	GetLatestGrantOrgVersion(context.Context, string) (int64, error)
 	AcquireEnterpriseAuditLock(context.Context, string) (any, error)
 	GetLatestEnterpriseAuditHash(context.Context, string) (string, error)
@@ -67,8 +67,8 @@ func (t *postgresGrantTx) AcquireEnterpriseOrgPublicationLock(ctx context.Contex
 func (t *postgresGrantTx) GetActiveCaseTicketForGrant(ctx context.Context, p db.GetActiveCaseTicketForGrantParams) (db.CaseTicket, error) {
 	return t.queries.GetActiveCaseTicketForGrant(ctx, p)
 }
-func (t *postgresGrantTx) GetGrantResourceOwnerForUpdate(ctx context.Context, p db.GetGrantResourceOwnerForUpdateParams) (db.SensitiveResourceOwnership, error) {
-	return t.queries.GetGrantResourceOwnerForUpdate(ctx, p)
+func (t *postgresGrantTx) GetGrantResourceOwnerForGrant(ctx context.Context, p db.GetGrantResourceOwnerForGrantParams) (db.SensitiveResourceOwnership, error) {
+	return t.queries.GetGrantResourceOwnerForGrant(ctx, p)
 }
 func (t *postgresGrantTx) GetLatestGrantOrgVersion(ctx context.Context, id string) (int64, error) {
 	return t.queries.GetLatestGrantOrgVersion(ctx, id)
@@ -149,7 +149,7 @@ func (s *PostgresGrantStore) CreateStepGrantAndAudit(ctx context.Context, grant 
 	if ticket.ExpiresAt.Time.Before(grant.ExpiresAt) {
 		grant.ExpiresAt = ticket.ExpiresAt.Time
 	}
-	owner, err := tx.GetGrantResourceOwnerForUpdate(ctx, db.GetGrantResourceOwnerForUpdateParams{EnterpriseID: grant.EnterpriseID, ResourceType: grant.ResourceType, ResourceID: grant.ResourceID})
+	owner, err := tx.GetGrantResourceOwnerForGrant(ctx, db.GetGrantResourceOwnerForGrantParams{EnterpriseID: grant.EnterpriseID, ResourceType: grant.ResourceType, ResourceID: grant.ResourceID})
 	if err != nil {
 		return tickets.StepGrant{}, err
 	}
@@ -172,11 +172,11 @@ func (s *PostgresGrantStore) CreateStepGrantAndAudit(ctx context.Context, grant 
 		return tickets.StepGrant{}, err
 	}
 	inputHash, outputHash := grantEvidenceHashes(grant)
-	event := audit.NewEvent(audit.EventInput{ID: auditID, EnterpriseID: grant.EnterpriseID, CaseTicketID: grant.CaseTicketID, StepGrantID: grant.ID, ActorUserID: grant.ActorUserID, ResourceType: grant.ResourceType, ResourceID: grant.ResourceID, Action: "step_grant.issue", Decision: "allow", InputHash: inputHash, OutputHash: outputHash}, previous)
-	if _, err = tx.InsertStepGrantIssuance(ctx, db.InsertStepGrantIssuanceParams{EnterpriseID: grant.EnterpriseID, StepGrantID: grant.ID, TokenHash: grant.TokenHash, ActorUserID: grant.ActorUserID, OrgVersion: grant.OrgVersion, OrgUnitID: grant.OrgUnitID, AuditEventID: auditID, CreatedAt: pgtype.Timestamptz{Time: grant.CreatedAt, Valid: true}}); err != nil {
+	event := audit.NewEvent(audit.EventInput{ID: auditID, EnterpriseID: grant.EnterpriseID, CaseTicketID: grant.CaseTicketID, StepGrantID: grant.ID, ActorUserID: grant.ActorUserID, ResourceType: grant.ResourceType, ResourceID: grant.ResourceID, Action: "step_grant.issue", Decision: "allow", InputHash: inputHash, OutputHash: outputHash, EvidencePointer: grant.ID}, previous)
+	if _, err = tx.InsertStepGrantIssuance(ctx, db.InsertStepGrantIssuanceParams{EnterpriseID: grant.EnterpriseID, StepGrantID: grant.ID, TokenHash: grant.TokenHash, ActorUserID: grant.ActorUserID, OrgVersion: grant.OrgVersion, OrgUnitID: grant.OrgUnitID, AuditEventID: auditID, ExpectedAuditInputHash: inputHash, ExpectedAuditOutputHash: outputHash, CreatedAt: pgtype.Timestamptz{Time: grant.CreatedAt, Valid: true}}); err != nil {
 		return tickets.StepGrant{}, err
 	}
-	if err = tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, CaseTicketID: textValue(event.CaseTicketID), StepGrantID: textValue(event.StepGrantID), ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, InputHash: textValue(event.InputHash), OutputHash: textValue(event.OutputHash), PrevHash: textValue(event.PrevHash), EventHash: event.EventHash}); err != nil {
+	if err = tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, CaseTicketID: textValue(event.CaseTicketID), StepGrantID: textValue(event.StepGrantID), ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, InputHash: textValue(event.InputHash), OutputHash: textValue(event.OutputHash), EvidencePointer: textValue(event.EvidencePointer), PrevHash: textValue(event.PrevHash), EventHash: event.EventHash}); err != nil {
 		return tickets.StepGrant{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
