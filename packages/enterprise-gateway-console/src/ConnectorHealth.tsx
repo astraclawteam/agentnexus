@@ -1,4 +1,4 @@
-import { Button } from "@agentnexus/claw-runtime-ui";
+import { Button } from "@xiaozhiclaw/runtime-ui";
 
 type ConnectorCopy = {
   title: string;
@@ -15,7 +15,7 @@ export function ConnectorHealth({ copy }: { copy: ConnectorCopy }) {
           <h2>{copy.title}</h2>
           <p>{copy.desc}</p>
         </div>
-        <Button className="ghost-button small" type="button" variant="ghost">
+        <Button className="ghost-button small" type="button">
           <span className="icon icon-play" aria-hidden="true" />
           {copy.smoke}
         </Button>

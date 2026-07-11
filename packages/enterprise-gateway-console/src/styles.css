@@ -1,5 +1,3 @@
-@import "../../claw-runtime-ui/src/tokens.css";
-
 * {
   box-sizing: border-box;
 }
@@ -10,9 +8,9 @@ body {
   background:
     radial-gradient(circle at 18% 0%, rgba(217, 119, 87, 0.08), transparent 32%),
     radial-gradient(circle at 90% 18%, rgba(94, 122, 125, 0.09), transparent 30%),
-    var(--bg);
-  color: var(--text);
-  font-family: var(--an-font);
+    var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
 }
 
 button,
@@ -51,7 +49,7 @@ button {
   border-right: 1px solid rgba(230, 225, 211, 0.86);
   background: rgba(245, 244, 236, 0.72);
   backdrop-filter: blur(22px) saturate(1.25);
-  color: var(--text);
+  color: var(--color-foreground);
   overflow-y: auto;
 }
 
@@ -66,7 +64,7 @@ button {
   width: 34px;
   height: 34px;
   border-radius: 10px;
-  background: var(--text);
+  background: var(--color-foreground);
   box-shadow: 0 12px 26px -18px rgba(19, 19, 20, 0.8);
 }
 
@@ -92,7 +90,7 @@ button {
 .event-item,
 .side-stat,
 .signal-row {
-  color: var(--muted);
+  color: var(--color-muted-foreground);
 }
 
 .brand-sub {
@@ -124,7 +122,7 @@ button {
 
 .identity-label,
 .side-section-title {
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 11px;
   font-weight: 760;
 }
@@ -150,7 +148,7 @@ button {
 }
 
 .side-stat strong {
-  color: var(--text);
+  color: var(--color-foreground);
   font-size: 16px;
 }
 
@@ -177,7 +175,7 @@ button {
 .pulse-grid span {
   display: block;
   margin-top: 5px;
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -199,7 +197,7 @@ button {
 }
 
 .signal-row strong {
-  color: var(--text);
+  color: var(--color-foreground);
 }
 
 .signal-dot,
@@ -211,16 +209,16 @@ button {
 
 .signal-dot.ok,
 .dot-ok {
-  background: var(--teal);
+  background: var(--color-success);
 }
 
 .signal-dot.warn,
 .dot-warn {
-  background: var(--amber);
+  background: var(--color-warning);
 }
 
 .signal-dot.info {
-  background: var(--cobalt);
+  background: var(--color-ink-teal);
 }
 
 .side-events {
@@ -240,7 +238,7 @@ button {
   margin-top: 5px;
   border: 1px solid rgba(110, 135, 101, 0.62);
   border-radius: 50%;
-  background: var(--teal-soft);
+  background: color-mix(in srgb, var(--color-success) 15%, transparent);
 }
 
 .event-item p,
@@ -256,7 +254,7 @@ p {
   padding: 12px;
   margin-top: auto;
   border-radius: 14px;
-  box-shadow: inset 0 1px 0 var(--glass-hi), var(--shadow);
+  box-shadow: inset 0 1px 0 var(--glass-hi), var(--shadow-card);
 }
 
 .status-row {
@@ -266,7 +264,7 @@ p {
 }
 
 .status-row.muted {
-  color: var(--subtle);
+  color: var(--color-muted-foreground);
   font-size: 11px;
 }
 
@@ -291,22 +289,22 @@ p {
   height: 36px;
   padding: 0 10px;
   border-radius: 12px;
-  color: var(--muted);
+  color: var(--color-muted-foreground);
 }
 
 .company-switcher select,
-.topbar-search .an-input {
+.topbar-search input {
   width: 100%;
   min-width: 0;
   border: 0;
   outline: 0;
   background: transparent;
-  color: var(--text);
+  color: var(--color-foreground);
   font-size: 13px;
 }
 
-.topbar-search .an-input::placeholder {
-  color: var(--subtle);
+.topbar-search input::placeholder {
+  color: var(--color-muted-foreground);
 }
 
 .icon {
@@ -375,7 +373,7 @@ p {
   width: 34px;
   height: 34px;
   border-radius: 10px;
-  color: var(--muted);
+  color: var(--color-muted-foreground);
 }
 
 .badge-dot {
@@ -384,9 +382,9 @@ p {
   top: 8px;
   width: 7px;
   height: 7px;
-  border: 1px solid var(--surface-solid);
+  border: 1px solid var(--color-card);
   border-radius: 50%;
-  background: var(--red);
+  background: var(--color-destructive);
 }
 
 .locale-switch {
@@ -407,8 +405,8 @@ p {
   padding: 0 10px;
   border: 1px solid rgba(200, 160, 0, 0.34);
   border-radius: 11px;
-  background: var(--amber-soft);
-  color: var(--amber);
+  background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+  color: var(--color-warning);
   font-size: 12px;
   font-weight: 760;
   white-space: nowrap;
@@ -416,15 +414,15 @@ p {
 
 .data-source-chip.source-api {
   border-color: rgba(110, 135, 101, 0.36);
-  background: var(--teal-soft);
-  color: var(--teal);
+  background: color-mix(in srgb, var(--color-success) 15%, transparent);
+  color: var(--color-success);
 }
 
 .locale-switch button,
 .segmented button {
   border: 0;
   background: transparent;
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 12px;
   font-weight: 650;
 }
@@ -436,8 +434,8 @@ p {
 
 .locale-switch button.is-selected,
 .segmented button.is-selected {
-  background: var(--clay-soft);
-  color: var(--clay-deep);
+  background: var(--color-sidebar-accent);
+  color: var(--color-clay-deep);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66);
 }
 
@@ -447,7 +445,7 @@ p {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: var(--text);
+  background: var(--color-foreground);
   color: #fff;
   font-size: 13px;
   font-weight: 720;
@@ -470,13 +468,13 @@ h1 {
 .page-head p {
   max-width: 760px;
   margin-top: 8px;
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 14px;
   line-height: 1.55;
 }
 
 .page-head .source-note {
-  color: var(--amber);
+  color: var(--color-warning);
   font-size: 12px;
   font-weight: 680;
 }
@@ -502,7 +500,7 @@ h1 {
 .metric-card,
 .panel {
   border-radius: 14px;
-  box-shadow: inset 0 1px 0 var(--glass-hi), var(--shadow);
+  box-shadow: inset 0 1px 0 var(--glass-hi), var(--shadow-card);
 }
 
 .metric-card {
@@ -510,7 +508,7 @@ h1 {
 }
 
 .metric-label {
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 12px;
   font-weight: 660;
 }
@@ -524,16 +522,16 @@ h1 {
 
 .metric-foot {
   margin-top: 9px;
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 12px;
 }
 
 .metric-foot.good {
-  color: var(--teal);
+  color: var(--color-success);
 }
 
 .metric-foot.warn {
-  color: var(--amber);
+  color: var(--color-warning);
 }
 
 .main-grid,
@@ -573,7 +571,7 @@ h1 {
 
 .panel p {
   margin-top: 4px;
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 12px;
 }
 
@@ -620,29 +618,29 @@ h1 {
 }
 
 .map-node text:first-of-type {
-  fill: var(--text);
+  fill: var(--color-foreground);
   font-size: 14px;
   font-weight: 760;
 }
 
 .map-node text:last-of-type {
-  fill: var(--muted);
+  fill: var(--color-muted-foreground);
   font-size: 11px;
   font-weight: 600;
 }
 
 .node-core rect {
-  fill: var(--teal-soft);
+  fill: color-mix(in srgb, var(--color-success) 15%, transparent);
   stroke: rgba(110, 135, 101, 0.48);
 }
 
 .node-knowledge rect {
-  fill: var(--cobalt-soft);
+  fill: color-mix(in srgb, var(--color-ink-teal) 15%, transparent);
   stroke: rgba(94, 122, 125, 0.45);
 }
 
 .node-system rect {
-  fill: var(--amber-soft);
+  fill: color-mix(in srgb, var(--color-warning) 15%, transparent);
   stroke: rgba(200, 160, 0, 0.46);
 }
 
@@ -664,19 +662,19 @@ h1 {
 
 .table-head {
   background: rgba(245, 244, 236, 0.68);
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 11px;
   font-weight: 760;
   text-transform: uppercase;
 }
 
 .ticket-row {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--color-border);
   font-size: 12px;
 }
 
 .ticket-id {
-  color: var(--clay-deep);
+  color: var(--color-clay-deep);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 12px;
 }
@@ -693,18 +691,18 @@ h1 {
 }
 
 .status-chip.allow {
-  background: var(--teal-soft);
-  color: var(--teal);
+  background: color-mix(in srgb, var(--color-success) 15%, transparent);
+  color: var(--color-success);
 }
 
 .status-chip.review {
-  background: var(--amber-soft);
-  color: var(--amber);
+  background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+  color: var(--color-warning);
 }
 
 .status-chip.deny {
-  background: var(--red-soft);
-  color: var(--red);
+  background: color-mix(in srgb, var(--color-destructive) 15%, transparent);
+  color: var(--color-destructive);
 }
 
 .connector-list {
@@ -717,7 +715,7 @@ h1 {
   align-items: center;
   gap: 10px;
   min-height: 58px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .connector-item:last-child {
@@ -730,8 +728,8 @@ h1 {
   width: 34px;
   height: 34px;
   border-radius: 10px;
-  background: var(--cobalt-soft);
-  color: var(--cobalt);
+  background: color-mix(in srgb, var(--color-ink-teal) 15%, transparent);
+  color: var(--color-ink-teal);
 }
 
 .connector-mark::before {
@@ -754,18 +752,18 @@ h1 {
 
 .connector-sub {
   margin-top: 4px;
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 12px;
 }
 
 .health-state {
-  color: var(--teal);
+  color: var(--color-success);
   font-size: 12px;
   font-weight: 760;
 }
 
 .health-state.warn {
-  color: var(--amber);
+  color: var(--color-warning);
 }
 
 .floating-agent {
@@ -777,9 +775,9 @@ h1 {
   place-items: center;
   width: 54px;
   height: 54px;
-  border: 1px solid var(--text);
+  border: 1px solid var(--color-foreground);
   border-radius: 50%;
-  background: var(--text);
+  background: var(--color-foreground);
   color: #fff;
   box-shadow: 0 18px 34px -18px rgba(19, 19, 20, 0.58), 0 0 0 6px rgba(217, 119, 87, 0.1);
 }
@@ -802,13 +800,13 @@ h1 {
 
 .agent-chat-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   width: min(460px, calc(100vw - 48px));
   height: min(620px, calc(100vh - 48px));
   border: 1px solid var(--glass-border);
   border-radius: 18px;
-  background: var(--surface-solid);
-  box-shadow: var(--shadow-hover);
+  background: var(--color-card);
+  box-shadow: var(--shadow-card-hover);
   overflow: hidden;
 }
 
@@ -818,7 +816,7 @@ h1 {
   justify-content: space-between;
   gap: 14px;
   padding: 16px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border);
   background: rgba(245, 244, 236, 0.82);
 }
 
@@ -829,36 +827,17 @@ h1 {
 
 .agent-chat-head p {
   margin-top: 5px;
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 12px;
 }
 
-.chat-messages {
+.chat-content {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   align-content: start;
   gap: 10px;
   padding: 16px;
   overflow-y: auto;
-}
-
-.chat-bubble {
-  max-width: 88%;
-  padding: 10px 12px;
-  border-radius: 14px;
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.chat-bubble.assistant {
-  justify-self: start;
-  border: 1px solid var(--border);
-  background: var(--surface-soft);
-}
-
-.chat-bubble.user {
-  justify-self: end;
-  background: var(--text);
-  color: #fff;
 }
 
 .quick-prompts {
@@ -870,32 +849,12 @@ h1 {
 .quick-prompts button {
   height: 30px;
   padding: 0 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.58);
-  color: var(--muted);
+  color: var(--color-muted-foreground);
   font-size: 12px;
   font-weight: 650;
-}
-
-.chat-input {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  padding: 12px;
-  border-top: 1px solid var(--border);
-  background: rgba(245, 244, 236, 0.72);
-}
-
-.chat-input .an-input {
-  min-width: 0;
-  height: 36px;
-  padding: 0 11px;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-  outline: 0;
 }
 
 @media (max-width: 900px) {

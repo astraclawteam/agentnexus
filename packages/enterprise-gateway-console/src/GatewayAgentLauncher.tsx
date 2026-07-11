@@ -1,5 +1,5 @@
-import { FormEvent, useState } from "react";
-import { Button, Input } from "@agentnexus/claw-runtime-ui";
+import { useState } from "react";
+import { AgentChatShell, type RuntimeMessage } from "@xiaozhiclaw/runtime-ui";
 
 type AgentCopy = {
   open: string;
@@ -15,15 +15,17 @@ type AgentCopy = {
 
 export function GatewayAgentLauncher({ copy }: { copy: AgentCopy }) {
   const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<string[]>([]);
+  const [messages, setMessages] = useState<RuntimeMessage[]>([]);
   const [draft, setDraft] = useState("");
 
-  function send(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!draft.trim()) {
+  function send({ text }: { text: string }) {
+    if (!text) {
       return;
     }
-    setMessages((current) => [...current, `${copy.sentPrefix}: ${draft.trim()}`]);
+    setMessages((current) => [
+      ...current,
+      { id: `user-${current.length}`, role: "user", content: `${copy.sentPrefix}: ${text}` }
+    ]);
     setDraft("");
   }
 
@@ -43,8 +45,7 @@ export function GatewayAgentLauncher({ copy }: { copy: AgentCopy }) {
               <span className="icon icon-x" aria-hidden="true" />
             </button>
           </header>
-          <div className="chat-messages">
-            <div className="chat-bubble assistant">{copy.intro}</div>
+          <div className="chat-content">
             <div className="quick-prompts">
               {copy.prompts.map((prompt) => (
                 <button key={prompt} type="button" onClick={() => setDraft(prompt)}>
@@ -52,18 +53,28 @@ export function GatewayAgentLauncher({ copy }: { copy: AgentCopy }) {
                 </button>
               ))}
             </div>
-            {messages.map((message) => (
-              <div className="chat-bubble user" key={message}>
-                {message}
-              </div>
-            ))}
+            <AgentChatShell
+              labels={{
+                conversation: copy.title,
+                promptInput: { send: copy.send },
+                attachments: {
+                  uploading: copy.desc,
+                  uploadFailed: copy.desc,
+                  remove: (name) => `${copy.close}: ${name}`
+                },
+                messageList: {
+                  list: copy.title,
+                  roles: { assistant: copy.title, system: copy.title, user: copy.sentPrefix }
+                }
+              }}
+              messages={[{ id: "intro", role: "assistant", content: copy.intro }, ...messages]}
+              value={draft}
+              attachments={[]}
+              placeholder={copy.input}
+              onChange={setDraft}
+              onSend={send}
+            />
           </div>
-          <form className="chat-input" onSubmit={send}>
-            <Input value={draft} onChange={(event) => setDraft(event.currentTarget.value)} placeholder={copy.input} />
-            <Button className="primary-button" type="submit">
-              {copy.send}
-            </Button>
-          </form>
         </section>
       </div>
     </>

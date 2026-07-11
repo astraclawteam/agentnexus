@@ -1,4 +1,4 @@
-import { Button } from "@agentnexus/claw-runtime-ui";
+import { Button } from "@xiaozhiclaw/runtime-ui";
 
 type TicketsCopy = {
   title: string;
@@ -16,7 +16,7 @@ export function AccessTicketsTable({ copy }: { copy: TicketsCopy }) {
           <h2>{copy.title}</h2>
           <p>{copy.desc}</p>
         </div>
-        <Button className="ghost-button small" type="button" variant="ghost">
+        <Button className="ghost-button small" type="button">
           <span className="icon icon-filter" aria-hidden="true" />
           {copy.filter}
         </Button>

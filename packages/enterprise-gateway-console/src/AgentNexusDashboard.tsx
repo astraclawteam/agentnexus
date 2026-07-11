@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Input } from "@agentnexus/claw-runtime-ui";
+import { Button, Input } from "@xiaozhiclaw/runtime-ui";
 import { AccessTicketsTable } from "./AccessTicketsTable";
 import { ConnectorHealth } from "./ConnectorHealth";
 import { developmentFixtures, loadConsoleOverview, localeNames, type ConsoleOverview, type Locale } from "./console-data";
@@ -80,7 +80,7 @@ export function AgentNexusDashboard() {
             <p className="source-note">{t.source.detail}</p>
           </div>
           <div className="head-actions">
-            <Button className="ghost-button" variant="ghost">
+            <Button className="ghost-button">
               <span className="icon icon-download" aria-hidden="true" />
               {t.topbar.exportAudit}
             </Button>

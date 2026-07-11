@@ -9,7 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@agentnexus/claw-runtime-ui": "0.1.0",
+    "@xiaozhiclaw/runtime-ui": "0.1.0",
     "@vitejs/plugin-react": "^4.5.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

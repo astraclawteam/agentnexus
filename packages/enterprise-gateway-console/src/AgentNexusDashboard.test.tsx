@@ -1,9 +1,29 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { AgentNexusDashboard } from "./AgentNexusDashboard";
 import { developmentFixtures } from "./console-data";
 
 describe("AgentNexusDashboard", () => {
+  it("depends on the published Xiaozhi family UI boundary", () => {
+    const source = readFileSync("src/AgentNexusDashboard.tsx", "utf8");
+    const retiredPackage = ["@agentnexus", "claw-runtime-ui"].join("/");
+
+    expect(source).toContain("@xiaozhiclaw/runtime-ui");
+    expect(source).not.toContain(retiredPackage);
+  });
+
+  it("keeps all shared UI imports on the family package and loads its stylesheet once", () => {
+    const sources = readdirSync("src")
+      .filter((name) => name.endsWith(".tsx") && !name.endsWith(".test.tsx"))
+      .map((name) => readFileSync(`src/${name}`, "utf8"))
+      .join("\n");
+    const retiredPackage = ["@agentnexus", "claw-runtime-ui"].join("/");
+
+    expect(sources).not.toContain(retiredPackage);
+    expect(sources.match(/@xiaozhiclaw\/runtime-ui\/styles\.css/g)).toHaveLength(1);
+  });
+
   it("renders the enterprise admin gateway prototype regions", async () => {
     render(<AgentNexusDashboard />);
 
@@ -26,6 +46,15 @@ describe("AgentNexusDashboard", () => {
     expect(screen.getByText("Development fixture")).toBeInTheDocument();
     expect(screen.getAllByText("Example Enterprise (local dev)").length).toBeGreaterThan(0);
     expect(screen.getByPlaceholderText("Search employees, systems, policies, audit IDs")).toBeInTheDocument();
+  });
+
+  it("keeps the controlled Agent chat copy in sync with the selected language", async () => {
+    render(<AgentNexusDashboard />);
+
+    fireEvent.click(screen.getByRole("button", { name: "EN" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Agent chat" }));
+
+    expect(screen.getByText(/I can create connector drafts/)).toBeInTheDocument();
   });
 
   it("renders API overview when the console endpoint is available", async () => {
