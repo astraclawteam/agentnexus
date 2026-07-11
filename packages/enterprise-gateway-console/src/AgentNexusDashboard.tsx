@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Input } from "@agentnexus/claw-runtime-ui";
+import { Button, Input } from "@xiaozhiclaw/runtime-ui";
 import { AccessTicketsTable } from "./AccessTicketsTable";
 import { ConnectorHealth } from "./ConnectorHealth";
 import { developmentFixtures, loadConsoleOverview, localeNames, type ConsoleOverview, type Locale } from "./console-data";
@@ -60,6 +60,7 @@ export function AgentNexusDashboard() {
             {(Object.keys(localeNames) as Locale[]).map((nextLocale) => (
               <button
                 className={nextLocale === locale ? "is-selected" : ""}
+                aria-pressed={nextLocale === locale}
                 key={nextLocale}
                 type="button"
                 onClick={() => setLocale(nextLocale)}
@@ -68,6 +69,7 @@ export function AgentNexusDashboard() {
               </button>
             ))}
           </div>
+          <GatewayAgentLauncher copy={t.agent} />
           <div className="avatar" aria-label={t.topbar.avatar}>
             {t.topbar.avatar}
           </div>
@@ -80,7 +82,7 @@ export function AgentNexusDashboard() {
             <p className="source-note">{t.source.detail}</p>
           </div>
           <div className="head-actions">
-            <Button className="ghost-button" variant="ghost">
+            <Button className="ghost-button">
               <span className="icon icon-download" aria-hidden="true" />
               {t.topbar.exportAudit}
             </Button>
@@ -106,8 +108,6 @@ export function AgentNexusDashboard() {
           <ConnectorHealth copy={t.connectors} />
         </section>
       </section>
-
-      <GatewayAgentLauncher copy={t.agent} />
     </main>
   );
 }

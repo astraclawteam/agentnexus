@@ -1,0 +1,144 @@
+package config
+
+import (
+	"crypto"
+	"errors"
+	"fmt"
+	"net/netip"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
+)
+
+type BrowserAuthConfig struct {
+	Enabled                     bool
+	DatabaseURL                 string
+	OIDC                        browserauth.OIDCConfig
+	LoginAttemptLimits          browserauth.LoginAttemptLimits
+	AuthorizeRateLimitPerMinute int
+	TrustedProxyCIDRs           []netip.Prefix
+}
+
+func LoadBrowserAuth() (BrowserAuthConfig, error) {
+	enabledValue := strings.TrimSpace(os.Getenv("AGENTNEXUS_BROWSER_AUTH_ENABLED"))
+	if enabledValue == "" || enabledValue == "false" {
+		return BrowserAuthConfig{}, nil
+	}
+	if enabledValue != "true" {
+		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_BROWSER_AUTH_ENABLED must be true or false")
+	}
+	dsn := os.Getenv("AGENTNEXUS_POSTGRES_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("AGENTNEXUS_DATABASE_URL")
+	}
+	limits := browserauth.DefaultLoginAttemptLimits()
+	authorizeRate, err := optionalPositiveInt("AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE", browserauth.DefaultAuthorizeRateLimitPerMinute)
+	if err != nil || !browserauth.ValidAuthorizeRateLimitPerMinute(authorizeRate) {
+		if err != nil {
+			return BrowserAuthConfig{}, err
+		}
+		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE is out of range")
+	}
+	perBrowser, err := optionalPositiveInt("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_PER_BROWSER_LIMIT", limits.PerBrowser)
+	if err != nil {
+		return BrowserAuthConfig{}, err
+	}
+	global, err := optionalPositiveInt("AGENTNEXUS_OIDC_LOGIN_ATTEMPT_GLOBAL_LIMIT", limits.Global)
+	if err != nil {
+		return BrowserAuthConfig{}, err
+	}
+	limits, err = browserauth.NewLoginAttemptLimits(perBrowser, global)
+	if err != nil {
+		return BrowserAuthConfig{}, fmt.Errorf("invalid OIDC login attempt limits: %w", err)
+	}
+	if limits.Global <= 5*authorizeRate {
+		return BrowserAuthConfig{}, errors.New("OIDC login attempt global limit must exceed five times the authorize source rate")
+	}
+	trustedProxyCIDRs, err := parseTrustedProxyCIDRs(os.Getenv("AGENTNEXUS_TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		return BrowserAuthConfig{}, err
+	}
+	config := BrowserAuthConfig{Enabled: true, DatabaseURL: dsn, LoginAttemptLimits: limits, AuthorizeRateLimitPerMinute: authorizeRate, TrustedProxyCIDRs: trustedProxyCIDRs}
+	if config.DatabaseURL == "" {
+		return BrowserAuthConfig{}, errors.New("AGENTNEXUS_POSTGRES_DSN is required when browser auth is enabled")
+	}
+	privateKey, err := browserauth.LoadSigningPrivateKey(os.Getenv("AGENTNEXUS_OIDC_SIGNING_KEY_PATH"))
+	if err != nil {
+		return BrowserAuthConfig{}, fmt.Errorf("load browser OIDC signing key: %w", err)
+	}
+	clients := map[string][]string{}
+	clients, err = browserauth.DecodeUniqueStringSliceMapJSON(os.Getenv("AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON"))
+	if err != nil {
+		return BrowserAuthConfig{}, fmt.Errorf("parse console clients: %w", err)
+	}
+	consoleCredentials, err := browserauth.LoadConsoleClientSecretFiles(os.Getenv("AGENTNEXUS_OIDC_CONSOLE_CLIENT_SECRET_FILES_JSON"), clients)
+	if err != nil {
+		return BrowserAuthConfig{}, fmt.Errorf("load downstream console client credentials: %w", err)
+	}
+	upstreamClientSecret, err := browserauth.LoadOIDCUpstreamClientSecret(os.Getenv("AGENTNEXUS_OIDC_UPSTREAM_CLIENT_SECRET_FILE"))
+	if err != nil {
+		return BrowserAuthConfig{}, fmt.Errorf("load upstream OIDC client secret: %w", err)
+	}
+	previous := map[string]crypto.PublicKey{}
+	previousPaths := map[string]string{}
+	if raw := strings.TrimSpace(os.Getenv("AGENTNEXUS_OIDC_PREVIOUS_SIGNING_KEYS_JSON")); raw != "" {
+		previousPaths, err = browserauth.DecodeUniqueStringMapJSON(raw)
+		if err != nil {
+			return BrowserAuthConfig{}, fmt.Errorf("parse previous signing keys: %w", err)
+		}
+		for kid, path := range previousPaths {
+			key, err := browserauth.LoadSigningPublicKey(path)
+			if err != nil {
+				return BrowserAuthConfig{}, fmt.Errorf("load previous signing key %q: %w", kid, err)
+			}
+			previous[kid] = key
+		}
+	}
+	config.OIDC = browserauth.OIDCConfig{
+		EnterpriseID: os.Getenv("AGENTNEXUS_OIDC_ENTERPRISE_ID"), EnterpriseIssuerURL: os.Getenv("AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL"),
+		PublicIssuerURL: os.Getenv("AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL"), ClientID: os.Getenv("AGENTNEXUS_OIDC_CLIENT_ID"), UpstreamClientSecret: upstreamClientSecret,
+		CallbackURL: os.Getenv("AGENTNEXUS_OIDC_CALLBACK_URL"), ConsoleClients: clients, ConsoleCredentials: consoleCredentials, SigningKeyID: os.Getenv("AGENTNEXUS_OIDC_SIGNING_KEY_ID"), SigningPrivateKey: privateKey, PreviousSigningKeys: previous,
+	}
+	if err := config.OIDC.Validate(); err != nil {
+		return BrowserAuthConfig{}, err
+	}
+	return config, nil
+}
+
+func parseTrustedProxyCIDRs(raw string) ([]netip.Prefix, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	prefixes := make([]netip.Prefix, 0, len(parts))
+	seen := make(map[netip.Prefix]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		prefix, err := netip.ParsePrefix(part)
+		if err != nil || prefix != prefix.Masked() {
+			return nil, errors.New("AGENTNEXUS_TRUSTED_PROXY_CIDRS must contain canonical CIDR prefixes")
+		}
+		prefix = prefix.Masked()
+		if _, exists := seen[prefix]; exists {
+			return nil, errors.New("AGENTNEXUS_TRUSTED_PROXY_CIDRS contains a duplicate prefix")
+		}
+		seen[prefix] = struct{}{}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
+}
+
+func optionalPositiveInt(name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+	return value, nil
+}

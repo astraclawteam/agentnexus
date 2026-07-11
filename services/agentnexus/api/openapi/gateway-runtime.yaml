@@ -4,6 +4,106 @@ info:
   version: 0.1.0
   description: Stable runtime entrypoints for Claw, AgentRag, and enterprise agents.
 paths:
+  /.well-known/openid-configuration:
+    get:
+      operationId: discoverBrowserOIDC
+      summary: Discover the AgentNexus browser OIDC endpoints.
+      responses:
+        '200':
+          description: OIDC discovery metadata.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+  /oauth2/jwks:
+    get:
+      operationId: getBrowserJWKS
+      summary: Get public browser-session ID token signing keys.
+      responses:
+        '200':
+          description: JSON Web Key Set.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+  /oauth2/authorize:
+    get:
+      operationId: authorizeBrowserSession
+      summary: Use an existing browser session or redirect the full page to the enterprise IdP.
+      parameters:
+        - {name: response_type, in: query, required: true, schema: {type: string, enum: [code]}}
+        - {name: client_id, in: query, required: true, schema: {type: string}}
+        - {name: redirect_uri, in: query, required: true, schema: {type: string, format: uri}}
+        - {name: scope, in: query, required: true, schema: {type: string}}
+        - {name: state, in: query, required: true, schema: {type: string, maxLength: 1024}}
+        - {name: nonce, in: query, required: true, schema: {type: string, maxLength: 512}}
+        - {name: code_challenge, in: query, required: true, schema: {type: string}}
+        - {name: code_challenge_method, in: query, required: true, schema: {type: string, enum: [S256]}}
+      responses:
+        '302': {description: Same-page cookie bootstrap, enterprise IdP redirect, or silent authorization-code redirect.}
+  /oauth2/idp/callback:
+    get:
+      operationId: completeEnterpriseOIDC
+      summary: Complete the enterprise IdP code flow in the bound browser.
+      parameters:
+        - {name: code, in: query, required: true, schema: {type: string}}
+        - {name: state, in: query, required: true, schema: {type: string}}
+      responses:
+        '302': {description: Full-page redirect to the allow-listed console callback.}
+  /oauth2/token:
+    post:
+      operationId: exchangeBrowserAuthorizationCode
+      summary: Confidential BFF exchange of a one-use authorization code using S256 PKCE.
+      security: [{consoleClientSecret: []}]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/BrowserTokenRequest'
+      responses:
+        '200':
+          description: Short-lived ID token; no access or refresh token is issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserTokenResponse'
+  /v1/browser-sessions/me:
+    get:
+      operationId: getBrowserSession
+      summary: Resolve the current HttpOnly browser session and sealed organization snapshot.
+      security: [{browserSession: []}]
+      responses:
+        '200':
+          description: Current browser identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserSession'
+        '401': {description: No active browser session.}
+  /v1/browser-sessions/logout:
+    post:
+      operationId: logoutBrowserSession
+      summary: Revoke the current browser session and clear its cookie.
+      security: [{browserSession: []}]
+      responses:
+        '204': {description: Session revoked.}
+  /v1/authorization/decisions:
+    post:
+      operationId: decideAgentAtlasPermission
+      summary: Evaluate an exact action against the latest sealed organization policy snapshot.
+      security: [{browserSession: []}, {caseTicket: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizationDecisionRequest'
+      responses:
+        '200':
+          description: Scoped permission decision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermissionDecision'
   /v1/runtime/locate:
     post:
       operationId: locateRuntimeResources
@@ -72,8 +172,117 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TicketResponse'
+  /v1/approvals/resolve:
+    post:
+      operationId: resolveApprovalRoute
+      summary: Resolve and audit the approval route for a governed change.
+      description: Facts are signed server-side by the AgentAtlas BFF; browser users never receive the signing secret.
+      security: [{browserSession: []}, {caseTicket: []}]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 16
+            maxLength: 128
+        - name: X-Approval-Facts-Attestation
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalResolveRequest'
+      responses:
+        '200':
+          description: Deterministic confirmation, reviewer, or administrator queue route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalRoute'
+  /v1/step-grants:
+    post:
+      operationId: createStepGrant
+      summary: Issue an audited short-lived grant for one exact sensitive action.
+      security: [{browserSession: []}, {caseTicket: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StepGrantRequest'
+      responses:
+        '201':
+          description: Opaque Step Grant returned once after durable audit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StepGrantResponse'
+  /v1/tickets/verify:
+    post:
+      operationId: verifyStepGrant
+      summary: Verify an opaque Step Grant against one exact operation.
+      security: [{browserSession: []}, {caseTicket: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StepGrantVerifyRequest'
+      responses:
+        '200':
+          description: The grant is active and exactly bound.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StepGrantVerifyResponse'
 components:
+  securitySchemes:
+    consoleClientSecret:
+      type: http
+      scheme: basic
+      description: Confidential console BFF client_id and secret; browser JavaScript must never call this endpoint directly.
+    browserSession:
+      type: apiKey
+      in: cookie
+      name: nexus_browser_session
+    caseTicket:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: 'Use the exact header format: Authorization: CaseTicket <opaque>'
   schemas:
+    BrowserTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [grant_type, code, code_verifier, redirect_uri]
+      properties:
+        grant_type: {type: string, enum: [authorization_code]}
+        code: {type: string}
+        code_verifier: {type: string}
+        redirect_uri: {type: string, format: uri}
+    BrowserTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [id_token, token_type, expires_in]
+      properties:
+        id_token: {type: string}
+        token_type: {type: string, enum: [Bearer]}
+        expires_in: {type: integer, minimum: 1}
+    AuthorizationDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [org_unit_id, org_version, resource_type, resource_id, action]
+      properties:
+        org_unit_id: {type: string}
+        org_version: {type: integer, minimum: 1}
+        resource_type: {type: string, enum: [knowledge, workflow, service, dream_evidence]}
+        resource_id: {type: string}
+        action: {type: string}
     RequestEnvelope:
       type: object
       required:
@@ -222,3 +431,237 @@ components:
         - deny
         - need_external_receipt
         - allow_with_masking
+    BrowserSession:
+      type: object
+      required:
+        - authenticated
+        - enterprise_id
+        - enterprise_user_id
+        - display_name
+        - org_version
+        - org_unit_ids
+        - permissions
+        - advanced_mode_allowed
+        - idle_expires_at
+        - absolute_expires_at
+      properties:
+        authenticated:
+          type: boolean
+        enterprise_id:
+          type: string
+        enterprise_user_id:
+          type: string
+        display_name:
+          type: string
+        org_version:
+          type: integer
+          minimum: 1
+        org_unit_ids:
+          type: array
+          items:
+            type: string
+        permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentAtlasPermission'
+        advanced_mode_allowed:
+          type: boolean
+        idle_expires_at:
+          type: string
+          format: date-time
+        absolute_expires_at:
+          type: string
+          format: date-time
+    PermissionDecision:
+      type: object
+      required:
+        - decision
+        - permissions
+        - org_unit_ids
+        - mask_fields
+        - risk_level
+        - org_version
+      properties:
+        decision:
+          type: string
+          enum:
+            - allow
+            - deny
+        permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentAtlasPermission'
+        org_unit_ids:
+          type: array
+          items:
+            type: string
+        mask_fields:
+          type: array
+          items:
+            type: string
+        risk_level:
+          type: string
+          enum:
+            - low
+            - medium
+            - high
+        fallback_action:
+          type: string
+        org_version:
+          type: integer
+          minimum: 1
+    AgentAtlasPermission:
+      type: string
+      enum:
+        - suggest
+        - edit
+        - publish_low_risk
+        - approve_high_risk
+        - workflow_edit
+        - workflow_advanced
+        - service_mode
+    ApprovalRoute:
+      type: object
+      required:
+        - mode
+        - risk_level
+        - risk_reasons
+        - requester_user_id
+        - org_path
+        - auto_publish
+      properties:
+        mode:
+          type: string
+          enum:
+            - single_confirmation
+            - upward_review
+            - enterprise_knowledge_admin_queue
+        risk_level:
+          type: string
+          enum:
+            - low
+            - medium
+            - high
+        risk_reasons:
+          type: array
+          items:
+            type: string
+        requester_user_id:
+          type: string
+        reviewer_user_id:
+          type: string
+        reviewer_display_name:
+          type: string
+        org_path:
+          type: array
+          items:
+            type: string
+        queue:
+          type: string
+        auto_publish:
+          type: boolean
+          enum:
+            - false
+    ApprovalResolveRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - org_version
+        - org_unit_id
+        - resource_type
+        - resource_id
+        - action
+        - changed_fields
+        - impacted_org_unit_ids
+        - impacted_user_count
+        - published_behavior_change
+        - external_side_effect
+        - requested_risk
+        - facts_issued_at
+        - facts_expires_at
+        - facts_nonce
+      properties:
+        org_version:
+          type: integer
+          minimum: 1
+        org_unit_id:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+        action:
+          type: string
+        changed_fields:
+          type: array
+          items:
+            type: string
+        impacted_org_unit_ids:
+          type: array
+          items:
+            type: string
+        impacted_user_count:
+          type: integer
+          minimum: 0
+        published_behavior_change:
+          type: boolean
+        external_side_effect:
+          type: boolean
+        requested_risk:
+          type: string
+          enum:
+            - low
+            - medium
+            - high
+        facts_issued_at:
+          type: string
+          format: date-time
+        facts_expires_at:
+          type: string
+          format: date-time
+        facts_nonce:
+          type: string
+          minLength: 16
+          maxLength: 128
+    StepGrantRequest:
+      type: object
+      additionalProperties: false
+      required: [case_ticket_id, org_unit_id, org_version, resource_type, resource_id, action, ttl_seconds]
+      properties:
+        case_ticket_id: {type: string}
+        org_unit_id: {type: string}
+        org_version: {type: integer, minimum: 1}
+        resource_type: {type: string, enum: [dream_evidence]}
+        resource_id: {type: string}
+        action: {type: string, enum: [read]}
+        ttl_seconds: {type: integer, minimum: 1, maximum: 86400}
+    StepGrantResponse:
+      type: object
+      additionalProperties: false
+      required: [token, expires_at, resource_type, resource_id, action, scopes]
+      properties:
+        token: {type: string}
+        expires_at: {type: string, format: date-time}
+        resource_type: {type: string}
+        resource_id: {type: string}
+        action: {type: string}
+        scopes: {type: array, items: {type: string}}
+    StepGrantVerifyRequest:
+      type: object
+      additionalProperties: false
+      required: [token, resource_type, resource_id, action, scope]
+      properties:
+        token: {type: string}
+        resource_type: {type: string, enum: [dream_evidence]}
+        resource_id: {type: string}
+        action: {type: string, enum: [read]}
+        scope: {type: string, enum: ['dream:evidence:read']}
+    StepGrantVerifyResponse:
+      type: object
+      additionalProperties: false
+      required: [valid, step_grant_id, expires_at, scopes]
+      properties:
+        valid: {type: boolean, enum: [true]}
+        step_grant_id: {type: string}
+        expires_at: {type: string, format: date-time}
+        scopes: {type: array, items: {type: string}}

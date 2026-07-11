@@ -1,0 +1,121 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+)
+
+func TestBuildRouterDisabledOmitsBrowserAuthRoutes(t *testing.T) {
+	router, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	for path, want := range map[string]int{"/healthz": http.StatusOK, "/.well-known/openid-configuration": http.StatusNotFound} {
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		if rr.Code != want {
+			t.Fatalf("%s status=%d", path, rr.Code)
+		}
+	}
+}
+
+func TestGatewayHTTPServerAndStartupHaveBoundedTimeouts(t *testing.T) {
+	server := newHTTPServer(config.Config{HTTPAddr: ":1234"}, http.NotFoundHandler())
+	for name, value := range map[string]time.Duration{"read-header": server.ReadHeaderTimeout, "read": server.ReadTimeout, "write": server.WriteTimeout, "idle": server.IdleTimeout} {
+		if value <= 0 || value > 2*time.Minute {
+			t.Fatalf("%s timeout=%s", name, value)
+		}
+	}
+	if server.MaxHeaderBytes <= 0 || server.MaxHeaderBytes > 1<<20 {
+		t.Fatalf("max headers=%d", server.MaxHeaderBytes)
+	}
+	_, file, _, _ := runtime.Caller(0)
+	source, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(source), "context.WithTimeout(ctx, startupTimeout)") {
+		t.Fatal("buildRouter startup context is not bounded")
+	}
+}
+
+func TestBuildRouterWiresAuthorizeRateLimiterAndTrustedSourceResolver(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	source, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, required := range []string{
+		"app.NewPostgresGatewayRouter(ctx, pool",
+		"AuthorizeRateLimitPerMinute: browserConfig.AuthorizeRateLimitPerMinute",
+		"TrustedProxyCIDRs:",
+		"browserConfig.TrustedProxyCIDRs",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("buildRouter missing %q", required)
+		}
+	}
+}
+
+func TestBuildRouterWiresAuthorizationPolicyAndPostgresTicketActor(t *testing.T) {
+	source, tickets := productionAuthorizationDependencies("enterprise-1", nil)
+	if _, err := source.LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1"); !errors.Is(err, policy.ErrAtlasPolicyUnavailable) {
+		t.Fatalf("nil Postgres source error = %v", err)
+	}
+	if _, err := tickets.AuthenticateTicketActor(context.Background(), "opaque-ticket"); !errors.Is(err, app.ErrTicketActorUnavailable) {
+		t.Fatalf("production ticket adapter error = %v", err)
+	}
+	_, file, _, _ := runtime.Caller(0)
+	raw, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"app.NewPostgresGatewayRouter(ctx, pool", "app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)"} {
+		if !strings.Contains(string(raw), required) {
+			t.Errorf("production authorization wiring missing %q", required)
+		}
+	}
+}
+
+func TestBuildRouterWiresPostgresApprovalSourceAndAtomicStore(t *testing.T) {
+	source, store := productionApprovalDependencies(nil)
+	if _, ok := source.(*app.PostgresApprovalSource); !ok {
+		t.Fatalf("source=%T", source)
+	}
+	if _, ok := store.(*app.PostgresApprovalStore); !ok {
+		t.Fatalf("store=%T", store)
+	}
+	if _, err := source.LoadApprovalSnapshot(context.Background(), "enterprise-1", 1, "user-1"); !errors.Is(err, approval.ErrApprovalUnavailable) {
+		t.Fatalf("nil Postgres approval source err=%v", err)
+	}
+	req := approval.Request{EnterpriseID: "enterprise-1", RequesterUserID: "user-1", OrgVersion: 1, OrgUnitID: "unit-1", ResourceType: "workflow", ResourceID: "workflow-1", Action: "workflow.update"}
+	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: "user-1", OrgPath: []string{"unit-1"}}
+	if _, err := store.RecordResolution(context.Background(), req, route); err == nil {
+		t.Fatal("nil Postgres approval store did not fail closed")
+	}
+}
+
+func TestBuildRouterDoesNotLeakDatabaseCredentialsInStartupError(t *testing.T) {
+	_, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{Enabled: true, DatabaseURL: "postgres://user:supersecret@%zz"})
+	cleanup()
+	if err == nil {
+		t.Fatal("invalid database URL accepted")
+	}
+	if strings.Contains(err.Error(), "supersecret") {
+		t.Fatalf("credential leaked: %v", err)
+	}
+}

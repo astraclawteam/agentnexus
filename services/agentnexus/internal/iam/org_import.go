@@ -79,19 +79,20 @@ func (s *Service) AddOrgMembership(ctx context.Context, input AddOrgMembershipIn
 }
 
 func (s *Service) CreateOrgVersion(ctx context.Context, input CreateOrgVersionInput) (OrgVersion, error) {
-	event, err := s.store.CreateOrgEvent(ctx, OrgEvent{
+	event := OrgEvent{
 		ID:           s.newID(),
 		EnterpriseID: input.EnterpriseID,
 		EventType:    "org_import",
 		SourceHash:   input.SourceHash,
-	})
+	}
+	version := OrgVersion{ID: s.newID(), EnterpriseID: input.EnterpriseID, VersionNumber: input.VersionNumber, SourceEventID: event.ID}
+	if publisher, ok := s.store.(orgPolicyPublisher); ok {
+		return publisher.PublishOrgVersion(ctx, event, version)
+	}
+	persistedEvent, err := s.store.CreateOrgEvent(ctx, event)
 	if err != nil {
 		return OrgVersion{}, err
 	}
-	return s.store.CreateOrgVersion(ctx, OrgVersion{
-		ID:            s.newID(),
-		EnterpriseID:  input.EnterpriseID,
-		VersionNumber: input.VersionNumber,
-		SourceEventID: event.ID,
-	})
+	version.SourceEventID = persistedEvent.ID
+	return s.store.CreateOrgVersion(ctx, version)
 }

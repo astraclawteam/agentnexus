@@ -46,6 +46,21 @@ func TestTicketAndStepGrantLifecycle(t *testing.T) {
 	}
 }
 
+func TestCaseTicketPersistsOnlyOpaqueTokenHash(t *testing.T) {
+	store := NewMemoryStore()
+	svc := NewService(store, WithIDGenerator(sequenceIDs("ticket_internal")), WithTokenGenerator(func() (string, error) { return "opaque-case-ticket-token", nil }))
+	ticket, err := svc.CreateCaseTicket(CreateCaseTicketInput{EnterpriseID: "ent_1", ActorUserID: "user_1", RequestID: "req_1", TTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.Token != "opaque-case-ticket-token" {
+		t.Fatalf("token=%q", ticket.Token)
+	}
+	if store.RawCaseTicketTokenStored(ticket.Token) {
+		t.Fatal("raw case ticket token persisted")
+	}
+}
+
 func sequenceIDs(ids ...string) func() string {
 	index := 0
 	return func() string {
