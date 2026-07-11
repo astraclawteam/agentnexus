@@ -43,6 +43,7 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 	authorizationPolicy := NewPostgresAtlasPolicySource(pool)
 	ticketActors := NewPostgresTicketActorAuthenticator(cfg.OIDC.EnterpriseID, pool, time.Now)
 	grantStore := NewPostgresGrantStore(pool)
+	auditSink := NewPostgresBrowserAuditSink(pool)
 	grantService := tickets.NewService(grantStore, tickets.WithGrantAuthorizer(NewScopedGrantAuthorizer(grantStore, policy.NewAgentAtlasEvaluator(authorizationPolicy))))
 	return NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, BrowserAuthDependencies{
 		Config:                  cfg.OIDC,
@@ -50,7 +51,8 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 		Upstream:                upstream,
 		Identities:              directory,
 		Profiles:                directory,
-		Audit:                   NewPostgresBrowserAuditSink(pool),
+		Audit:                   auditSink,
+		AuditEvidence:           auditSink,
 		AuthorizeRateLimiter:    authorizeRateLimiter,
 		AuthorizeSourceResolver: NewAuthorizeSourceResolver(cfg.TrustedProxyCIDRs),
 		AuthorizationPolicy:     authorizationPolicy,

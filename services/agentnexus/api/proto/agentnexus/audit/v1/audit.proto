@@ -4,6 +4,23 @@ package agentnexus.audit.v1;
 
 option go_package = "github.com/astraclawteam/agentnexus/services/agentnexus/api/proto/agentnexus/audit/v1;auditv1";
 
+// AuditAction publishes the bounded actions accepted by the HTTP audit append
+// contract. AuditEvent.action remains a string for wire compatibility.
+enum AuditAction {
+  AUDIT_ACTION_UNSPECIFIED = 0;
+  WORKFLOW_DRAFT_CREATED = 1;
+  WORKFLOW_VERSION_PUBLISHED = 2;
+  DREAM_POLICY_CREATED = 3;
+  DREAM_POLICY_CREATE_REQUESTED = 4;
+  DREAM_JOB_RUN = 5;
+  RETRIEVAL_PLAN_CREATED = 6;
+  EVIDENCE_LOCATED = 7;
+  EVIDENCE_READ = 8;
+  ANSWER_TRACE_CREATED = 9;
+  SENSITIVE_ARTIFACT_PARSED = 10;
+  VISIBILITY_RULE_CHANGED = 11;
+}
+
 message AuditEvent {
   string id = 1;
   string enterprise_id = 2;

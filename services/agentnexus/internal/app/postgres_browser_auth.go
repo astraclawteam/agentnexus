@@ -3,7 +3,10 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"sort"
@@ -148,12 +151,88 @@ func (d *PostgresBrowserDirectory) ResolveBrowserProfile(ctx context.Context, en
 }
 
 type PostgresBrowserAuditSink struct {
-	pool   *pgxpool.Pool
-	random io.Reader
+	pool       *pgxpool.Pool
+	evidenceDB auditEvidenceTxBeginner
+	random     io.Reader
+}
+
+type auditEvidenceTx interface {
+	AcquireEnterpriseAuditLock(context.Context, string) (interface{}, error)
+	GetLatestEnterpriseAuditHash(context.Context, string) (string, error)
+	AppendAuditEvent(context.Context, db.AppendAuditEventParams) (db.AuditEvent, error)
+	Commit(context.Context) error
+	Rollback(context.Context) error
+}
+
+type auditEvidenceTxBeginner interface {
+	BeginAuditEvidenceTx(context.Context, pgx.TxOptions) (auditEvidenceTx, error)
+}
+type postgresAuditEvidenceDB struct{ pool *pgxpool.Pool }
+
+func (d postgresAuditEvidenceDB) BeginAuditEvidenceTx(ctx context.Context, options pgx.TxOptions) (auditEvidenceTx, error) {
+	tx, err := d.pool.BeginTx(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return &postgresAuditEvidenceTx{Tx: tx, Queries: db.New(tx)}, nil
+}
+
+type postgresAuditEvidenceTx struct {
+	pgx.Tx
+	*db.Queries
 }
 
 func NewPostgresBrowserAuditSink(pool *pgxpool.Pool) *PostgresBrowserAuditSink {
-	return &PostgresBrowserAuditSink{pool: pool, random: rand.Reader}
+	return &PostgresBrowserAuditSink{pool: pool, evidenceDB: postgresAuditEvidenceDB{pool: pool}, random: rand.Reader}
+}
+
+func newPostgresAuditEvidenceSinkWithDB(database auditEvidenceTxBeginner, random io.Reader) *PostgresBrowserAuditSink {
+	return &PostgresBrowserAuditSink{evidenceDB: database, random: random}
+}
+
+func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, input AuditEvidenceInput) (id string, resultErr error) {
+	if s == nil || s.evidenceDB == nil || s.random == nil || input.EnterpriseID == "" || input.ActorUserID == "" || input.CaseTicketID == "" || input.ResourceType == "" || input.ResourceID == "" || !ValidAuditEvidenceAction(input.Action) {
+		return "", errors.New("invalid audit evidence")
+	}
+	tx, err := s.evidenceDB.BeginAuditEvidenceTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
+		defer cancel()
+		if rollbackErr := tx.Rollback(cleanupCtx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			resultErr = errors.Join(resultErr, rollbackErr)
+		}
+	}()
+	if _, err := tx.AcquireEnterpriseAuditLock(ctx, input.EnterpriseID); err != nil {
+		return "", err
+	}
+	previous, err := tx.GetLatestEnterpriseAuditHash(ctx, input.EnterpriseID)
+	if err != nil {
+		return "", err
+	}
+	id, err = randomAuditID(s.random)
+	if err != nil {
+		return "", err
+	}
+	details, err := json.Marshal(input.Details)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(details)
+	decision := "recorded"
+	if input.Action == AuditActionDreamPolicyCreateRequested {
+		decision = "requested"
+	}
+	event := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: input.EnterpriseID, CaseTicketID: input.CaseTicketID, ActorUserID: input.ActorUserID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: string(input.Action), Decision: decision, InputHash: "sha256:" + hex.EncodeToString(sum[:]), EvidencePointer: input.TraceID}, previous)
+	if _, err := tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, CaseTicketID: textValue(event.CaseTicketID), ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, InputHash: textValue(event.InputHash), EvidencePointer: textValue(event.EvidencePointer), PrevHash: textValue(event.PrevHash), EventHash: event.EventHash}); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func (s *PostgresBrowserAuditSink) AppendBrowserAudit(ctx context.Context, input BrowserAuditEvent) error {
