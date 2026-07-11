@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { AgentNexusDashboard } from "./AgentNexusDashboard";
@@ -46,6 +47,65 @@ describe("AgentNexusDashboard", () => {
     expect(screen.getByText("Development fixture")).toBeInTheDocument();
     expect(screen.getAllByText("Example Enterprise (local dev)").length).toBeGreaterThan(0);
     expect(screen.getByPlaceholderText("Search employees, systems, policies, audit IDs")).toBeInTheDocument();
+  });
+
+  it("exposes the selected locale as a pressed state", async () => {
+    const user = userEvent.setup();
+    render(<AgentNexusDashboard />);
+
+    const zh = screen.getByRole("button", { name: "\u4e2d\u6587" });
+    const en = screen.getByRole("button", { name: "EN" });
+    expect(zh).toHaveAttribute("aria-pressed", "true");
+    expect(en).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(en);
+
+    expect(zh).toHaveAttribute("aria-pressed", "false");
+    expect(en).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps focus inside the accessible Agent drawer and restores the launcher on Escape", async () => {
+    const user = userEvent.setup();
+    render(<AgentNexusDashboard />);
+
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    const launcher = await screen.findByRole("button", { name: "Open Agent chat" });
+    await user.click(launcher);
+
+    const dialog = screen.getByRole("dialog", { name: "Gateway Agent" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    expect(document.querySelector("main")?.closest('[aria-hidden="true"]')).not.toBeNull();
+    expect(document.body.style.pointerEvents).toBe("none");
+
+    for (let index = 0; index < 8; index += 1) {
+      await user.tab();
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    }
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "Gateway Agent" })).not.toBeInTheDocument();
+    expect(launcher).toHaveFocus();
+  });
+
+  it("keeps quick prompts, typing, trimmed send, messages, and draft state controlled by the Console", async () => {
+    const user = userEvent.setup();
+    render(<AgentNexusDashboard />);
+
+    await user.click(screen.getByRole("button", { name: "EN" }));
+    await user.click(await screen.findByRole("button", { name: "Open Agent chat" }));
+    await user.click(screen.getByRole("button", { name: "Generate MES connector" }));
+
+    const prompt = screen.getByPlaceholderText("Type a request, for example: connect a new OA receipt API");
+    expect(prompt).toHaveValue("Generate MES connector");
+
+    await user.clear(prompt);
+    await user.type(prompt, "   assess fields   ");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(screen.getByText("Request captured: assess fields")).toBeInTheDocument();
+    expect(prompt).toHaveValue("");
   });
 
   it("keeps the controlled Agent chat copy in sync with the selected language", async () => {

@@ -60,6 +60,7 @@ export function AgentNexusDashboard() {
             {(Object.keys(localeNames) as Locale[]).map((nextLocale) => (
               <button
                 className={nextLocale === locale ? "is-selected" : ""}
+                aria-pressed={nextLocale === locale}
                 key={nextLocale}
                 type="button"
                 onClick={() => setLocale(nextLocale)}
@@ -68,6 +69,7 @@ export function AgentNexusDashboard() {
               </button>
             ))}
           </div>
+          <GatewayAgentLauncher copy={t.agent} />
           <div className="avatar" aria-label={t.topbar.avatar}>
             {t.topbar.avatar}
           </div>
@@ -106,8 +108,6 @@ export function AgentNexusDashboard() {
           <ConnectorHealth copy={t.connectors} />
         </section>
       </section>
-
-      <GatewayAgentLauncher copy={t.agent} />
     </main>
   );
 }
