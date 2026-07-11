@@ -117,15 +117,15 @@ func (d *PostgresBrowserDirectory) ResolveBrowserProfile(ctx context.Context, en
 		if err := ctx.Err(); err != nil {
 			return BrowserProfile{}, err
 		}
-		permission, known := publicBrowserProfilePermission(row.Role)
+		permission, known := policy.MembershipRolePermission(row.Role)
 		if row.EnterpriseID != enterpriseID || row.VersionNumber != record.OrgVersion || row.EnterpriseUserID != userID || !canonicalAuthorizationValue(row.OrgUnitID) || !known {
 			return BrowserProfile{}, errors.New("invalid profile membership row")
 		}
 		unitSet[row.OrgUnitID] = struct{}{}
 		if permission != "" {
-			permissionSet[permission] = struct{}{}
+			permissionSet[string(permission)] = struct{}{}
 		}
-		if permission == string(policy.PermissionWorkflowAdvanced) || permission == string(policy.PermissionServiceMode) {
+		if permission == policy.PermissionWorkflowAdvanced || permission == policy.PermissionServiceMode {
 			advancedModeAllowed = true
 		}
 	}
@@ -143,19 +143,6 @@ func (d *PostgresBrowserDirectory) ResolveBrowserProfile(ctx context.Context, en
 		return BrowserProfile{}, err
 	}
 	return BrowserProfile{EnterpriseID: enterpriseID, EnterpriseUserID: userID, DisplayName: record.DisplayName, OrgVersion: record.OrgVersion, OrgUnitIDs: units, Permissions: permissions, AdvancedModeAllowed: advancedModeAllowed}, nil
-}
-
-func publicBrowserProfilePermission(role string) (string, bool) {
-	switch policy.AtlasPermission(role) {
-	case policy.PermissionSuggest, policy.PermissionEdit, policy.PermissionPublishLowRisk, policy.PermissionApproveHighRisk, policy.PermissionWorkflowEdit, policy.PermissionWorkflowAdvanced, policy.PermissionServiceMode:
-		return role, true
-	}
-	switch role {
-	case "member", "manager", "admin":
-		return "", true
-	default:
-		return "", false
-	}
 }
 
 type PostgresBrowserAuditSink struct {

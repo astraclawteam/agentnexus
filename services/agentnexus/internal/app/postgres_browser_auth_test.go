@@ -77,13 +77,14 @@ func TestPostgresBrowserProfileUsesExactVersionAndValidatesBoundedRows(t *testin
 				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "z", Role: "publish_low_risk"},
 				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a", Role: "service_mode"},
 				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a", Role: "publish_low_risk"},
+				{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "a", Role: "member"},
 			},
 		}
 		profile, err := (&PostgresBrowserDirectory{profileDB: &fakeBrowserProfileDB{tx: tx}}).ResolveBrowserProfile(context.Background(), "enterprise-1", "user-1")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if tx.unitArgs.VersionNumber != 17 || !reflect.DeepEqual(profile.OrgUnitIDs, []string{"a", "z"}) || !reflect.DeepEqual(profile.Permissions, []string{"publish_low_risk", "service_mode"}) || !profile.AdvancedModeAllowed {
+		if tx.unitArgs.VersionNumber != 17 || !reflect.DeepEqual(profile.OrgUnitIDs, []string{"a", "z"}) || !reflect.DeepEqual(profile.Permissions, []string{"publish_low_risk", "service_mode", "suggest"}) || !profile.AdvancedModeAllowed {
 			t.Fatalf("args=%#v profile=%#v", tx.unitArgs, profile)
 		}
 	})

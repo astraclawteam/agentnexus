@@ -151,7 +151,7 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 	if !profile.Authenticated || profile.EnterpriseID != e2eEnterprise || profile.UserID != e2eUser || profile.OrgVersion != e2eOrgVersion || !contains(profile.OrgUnitIDs, e2eTeam) {
 		t.Fatalf("profile=%+v", profile)
 	}
-	if !profile.AdvancedModeAllowed || !equalStrings(profile.Permissions, []string{"approve_high_risk", "publish_low_risk", "service_mode"}) {
+	if !profile.AdvancedModeAllowed || !equalStrings(profile.Permissions, []string{"approve_high_risk", "publish_low_risk", "service_mode", "suggest"}) {
 		t.Fatalf("public profile permissions=%v advanced=%v", profile.Permissions, profile.AdvancedModeAllowed)
 	}
 
@@ -310,40 +310,93 @@ func openMigratedPostgres(t *testing.T) *pgxpool.Pool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	admin, err := pgxpool.New(ctx, dsn)
+	pool, cleanup, err := openIsolatedPostgres(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	applyMigrations(t, pool)
+	return pool
+}
+
+func openIsolatedPostgres(ctx context.Context, dsn string, configure func(*pgxpool.Config) error) (*pgxpool.Pool, func(), error) {
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return nil, nil, err
 	}
 	schema := fmt.Sprintf("agentnexus_e2e_%d", time.Now().UnixNano())
 	if _, err = admin.Exec(ctx, `CREATE SCHEMA `+pgx.Identifier{schema}.Sanitize()); err != nil {
 		admin.Close()
-		t.Fatal(err)
+		return nil, nil, err
+	}
+	var pool *pgxpool.Pool
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			if pool != nil {
+				pool.Close()
+			}
+			cleanupCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+			defer stop()
+			_, _ = admin.Exec(cleanupCtx, `DROP SCHEMA IF EXISTS `+pgx.Identifier{schema}.Sanitize()+` CASCADE`)
+			admin.Close()
+		})
+	}
+	fail := func(err error) (*pgxpool.Pool, func(), error) {
+		cleanup()
+		return nil, nil, err
 	}
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		admin.Close()
-		t.Fatal(err)
+		return fail(err)
+	}
+	if configure != nil {
+		if err := configure(config); err != nil {
+			return fail(err)
+		}
 	}
 	config.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, config)
+	pool, err = pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
-		admin.Close()
-		t.Fatal(err)
+		return fail(err)
 	}
 	if err = pool.Ping(ctx); err != nil {
-		pool.Close()
-		admin.Close()
+		return fail(err)
+	}
+	return pool, cleanup, nil
+}
+
+func TestOpenIsolatedPostgresCleansSchemaOnPostCreateSetupFailure(t *testing.T) {
+	dsn := os.Getenv("AGENTNEXUS_E2E_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("AGENTNEXUS_E2E_POSTGRES_DSN is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	before := countE2ESchemas(t, ctx, dsn)
+	sentinel := errors.New("injected post-create setup failure")
+	pool, cleanup, err := openIsolatedPostgres(ctx, dsn, func(*pgxpool.Config) error { return sentinel })
+	if pool != nil || cleanup != nil || !errors.Is(err, sentinel) {
+		t.Fatalf("pool=%v cleanup=%v err=%v", pool, cleanup != nil, err)
+	}
+	after := countE2ESchemas(t, ctx, dsn)
+	if after != before {
+		t.Fatalf("isolated schemas leaked after setup failure: before=%d after=%d", before, after)
+	}
+}
+
+func countE2ESchemas(t *testing.T, ctx context.Context, dsn string) int {
+	t.Helper()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
 		t.Fatal(err)
 	}
-	applyMigrations(t, pool)
-	t.Cleanup(func() {
-		pool.Close()
-		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stop()
-		_, _ = admin.Exec(cleanup, `DROP SCHEMA IF EXISTS `+pgx.Identifier{schema}.Sanitize()+` CASCADE`)
-		admin.Close()
-	})
-	return pool
+	defer pool.Close()
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM pg_namespace WHERE nspname LIKE 'agentnexus_e2e_%'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }
 
 func applyMigrations(t *testing.T, pool *pgxpool.Pool) {

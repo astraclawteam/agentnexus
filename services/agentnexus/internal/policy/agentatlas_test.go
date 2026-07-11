@@ -9,6 +9,33 @@ import (
 	"testing"
 )
 
+func TestMembershipRolePermissionIsTheCanonicalClosedMapping(t *testing.T) {
+	tests := []struct {
+		role       string
+		permission AtlasPermission
+		known      bool
+	}{
+		{role: "member", permission: PermissionSuggest, known: true},
+		{role: "manager", known: true},
+		{role: "admin", known: true},
+		{role: string(PermissionSuggest), permission: PermissionSuggest, known: true},
+		{role: string(PermissionEdit), permission: PermissionEdit, known: true},
+		{role: string(PermissionPublishLowRisk), permission: PermissionPublishLowRisk, known: true},
+		{role: string(PermissionApproveHighRisk), permission: PermissionApproveHighRisk, known: true},
+		{role: string(PermissionWorkflowEdit), permission: PermissionWorkflowEdit, known: true},
+		{role: string(PermissionWorkflowAdvanced), permission: PermissionWorkflowAdvanced, known: true},
+		{role: string(PermissionServiceMode), permission: PermissionServiceMode, known: true},
+		{role: "unknown"},
+		{role: " member"},
+	}
+	for _, test := range tests {
+		permission, known := MembershipRolePermission(test.role)
+		if permission != test.permission || known != test.known {
+			t.Errorf("role=%q permission=%q known=%v, want %q/%v", test.role, permission, known, test.permission, test.known)
+		}
+	}
+}
+
 func TestAgentAtlasVocabulary(t *testing.T) {
 	t.Parallel()
 

@@ -317,7 +317,7 @@ func analyzeAtlasSnapshot(ctx context.Context, snapshot AtlasAccessSnapshot, tar
 		if _, coversTarget := ancestors[membership.OrgUnitID]; !coversTarget {
 			continue
 		}
-		permission := atlasPermissionForRole(membership.Role)
+		permission, _ := MembershipRolePermission(membership.Role)
 		if permission == requiredPermission {
 			requiredScopes[membership.OrgUnitID] = struct{}{}
 		}
@@ -342,25 +342,28 @@ func atlasCanonicalNonEmpty(value string) bool {
 }
 
 func atlasKnownRole(role string) bool {
-	if !atlasCanonicalNonEmpty(role) {
-		return false
-	}
-	if role == "member" || role == "manager" || role == "admin" {
-		return true
-	}
-	return atlasPermissionForRole(role) != ""
+	_, known := MembershipRolePermission(role)
+	return known
 }
 
-func atlasPermissionForRole(role string) AtlasPermission {
+// MembershipRolePermission is the single canonical mapping from a sealed
+// organization membership role to its effective AgentAtlas permission.
+func MembershipRolePermission(role string) (AtlasPermission, bool) {
+	if !atlasCanonicalNonEmpty(role) {
+		return "", false
+	}
 	if role == "member" {
-		return PermissionSuggest
+		return PermissionSuggest, true
+	}
+	if role == "manager" || role == "admin" {
+		return "", true
 	}
 	permission := AtlasPermission(role)
 	switch permission {
 	case PermissionSuggest, PermissionEdit, PermissionPublishLowRisk, PermissionApproveHighRisk, PermissionWorkflowEdit, PermissionWorkflowAdvanced, PermissionServiceMode:
-		return permission
+		return permission, true
 	default:
-		return ""
+		return "", false
 	}
 }
 
