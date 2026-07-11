@@ -97,7 +97,7 @@ func (c OIDCConfig) Validate() error {
 		seen[kid] = struct{}{}
 	}
 	for clientID, redirects := range c.ConsoleClients {
-		if clientID == "" || len(redirects) == 0 {
+		if !ValidConsoleClientID(clientID) || len(redirects) == 0 {
 			return errors.New("console client requires exact redirect allow-list")
 		}
 		unique := map[string]struct{}{}
@@ -133,7 +133,7 @@ func validateIssuerURL(raw string, allowLoopback bool) error {
 }
 
 func (c OIDCConfig) AllowsRedirect(clientID, redirectURI string) bool {
-	if validateAbsoluteHTTPSURL(redirectURI, true) != nil {
+	if !ValidConsoleClientID(clientID) || validateAbsoluteHTTPSURL(redirectURI, true) != nil {
 		return false
 	}
 	for _, allowed := range c.ConsoleClients[clientID] {

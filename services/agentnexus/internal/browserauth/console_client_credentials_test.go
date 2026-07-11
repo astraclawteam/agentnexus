@@ -65,6 +65,8 @@ func TestConsoleClientSecretFilesFailClosed(t *testing.T) {
 		"duplicate path": `{"agentatlas":[` + quoteJSON(good) + `,` + quoteJSON(good) + `]}`,
 		"relative path":  `{"agentatlas":["relative.secret"]}`,
 		"duplicate key":  `{"agentatlas":[` + quoteJSON(good) + `],"agentatlas":[` + quoteJSON(good) + `]}`,
+		"wrong value":    `{"agentatlas":` + quoteJSON(good) + `}`,
+		"trailing JSON":  `{"agentatlas":[` + quoteJSON(good) + `]}[]`,
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -85,6 +87,51 @@ func TestConsoleClientSecretFilesFailClosed(t *testing.T) {
 		if _, err := LoadConsoleClientSecretFiles(`{"agentatlas":[`+quoteJSON(good)+`]}`, clients); err == nil {
 			t.Fatal("broad secret permissions accepted")
 		}
+	}
+}
+
+func TestConsoleClientIDUsesOneCanonicalASCIIContract(t *testing.T) {
+	valid := []string{"agentatlas", "AgentAtlas.BFF_1", "client~prod-2"}
+	for _, clientID := range valid {
+		if !ValidConsoleClientID(clientID) {
+			t.Fatalf("valid client id rejected: %q", clientID)
+		}
+	}
+	invalid := []string{"", " bad", "bad ", "bad:client", "bad%client", "bad+client", "bad/client", "客户端", string(make([]byte, 257))}
+	for _, clientID := range invalid {
+		if ValidConsoleClientID(clientID) {
+			t.Fatalf("unsafe client id accepted: %q", clientID)
+		}
+		if _, err := NewConsoleClientCredentials(map[string][]string{clientID: {"Console-BFF-secret-Q7mV2xK9pR4tY8dF3"}}); err == nil {
+			t.Fatalf("credential map accepted unsafe client id: %q", clientID)
+		}
+	}
+}
+
+func TestSecureJSONMapDecodersRejectDuplicateWrongShapeAndTrailingData(t *testing.T) {
+	for name, raw := range map[string]string{
+		"duplicate slice key": `{"atlas":["a"],"atlas":["b"]}`,
+		"wrong slice value":   `{"atlas":"a"}`,
+		"nested slice value":  `{"atlas":[["a"]]}`,
+		"slice trailing":      `{"atlas":["a"]}{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeUniqueStringSliceMapJSON(raw); err == nil {
+				t.Fatal("unsafe JSON accepted")
+			}
+		})
+	}
+	for name, raw := range map[string]string{
+		"duplicate string key": `{"old":"a","old":"b"}`,
+		"wrong string value":   `{"old":["a"]}`,
+		"nested string value":  `{"old":{"path":"a"}}`,
+		"string trailing":      `{"old":"a"}[]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeUniqueStringMapJSON(raw); err == nil {
+				t.Fatal("unsafe JSON accepted")
+			}
+		})
 	}
 }
 

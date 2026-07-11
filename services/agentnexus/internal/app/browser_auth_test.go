@@ -285,6 +285,30 @@ func TestBrowserAuthTokenRequiresConfidentialBasicBeforeCodeConsumption(t *testi
 	}
 }
 
+func TestConfidentialBasicAndAuthorizeRejectNonCanonicalClientIDsBeforeSideEffects(t *testing.T) {
+	invalid := []string{"bad:client", "bad%client", "bad+client", " bad", "客户端", strings.Repeat("a", 257)}
+	for _, clientID := range invalid {
+		if !strings.Contains(clientID, ":") {
+			header := http.Header{"Authorization": {tokenBasicHeader(clientID, testConsoleClientSecret)}}
+			if _, _, ok := confidentialBasicCredentials(header); ok {
+				t.Fatalf("Basic parser accepted unsafe client id %q", clientID)
+			}
+		}
+		limiter := &stubAuthorizeRateLimiter{}
+		var counting *countingSessionService
+		h := newBrowserHarnessWithRateLimit(t, limiter, NewAuthorizeSourceResolver(nil), func(service *browserauth.Service) BrowserSessionService {
+			counting = &countingSessionService{BrowserSessionService: service}
+			return counting
+		})
+		query := h.authorizeQuery("state", "nonce")
+		query.Set("client_id", clientID)
+		rr := performOnce(h.router, http.MethodGet, "/oauth2/authorize?"+query.Encode(), "", nil)
+		if rr.Code != http.StatusBadRequest || limiter.calls != 0 || counting.createAttempts != 0 || len(rr.Result().Cookies()) != 0 {
+			t.Fatalf("client=%q status=%d limiter=%d attempts=%d cookies=%v", clientID, rr.Code, limiter.calls, counting.createAttempts, rr.Result().Cookies())
+		}
+	}
+}
+
 func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 	h := newBrowserHarness(t)
 	idpRedirect := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("state-1", "nonce-1").Encode(), "", nil)

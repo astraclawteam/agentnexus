@@ -29,7 +29,7 @@ type ConsoleClientCredentials struct {
 func NewConsoleClientCredentials(raw map[string][]string) (ConsoleClientCredentials, error) {
 	credentials := ConsoleClientCredentials{clients: make(map[string]consoleClientCredentialHashes, len(raw))}
 	for clientID, secrets := range raw {
-		if clientID == "" || len(secrets) < 1 || len(secrets) > 2 {
+		if !ValidConsoleClientID(clientID) || len(secrets) < 1 || len(secrets) > 2 {
 			return ConsoleClientCredentials{}, errors.New("console client requires current and optional previous secret")
 		}
 		for _, secret := range secrets {
@@ -76,7 +76,7 @@ func consoleClientSecretHash(clientID, secret string) [32]byte {
 }
 
 func LoadConsoleClientSecretFiles(rawJSON string, consoleClients map[string][]string) (ConsoleClientCredentials, error) {
-	paths, err := decodeUniqueSecretFileMap(rawJSON)
+	paths, err := DecodeUniqueStringSliceMapJSON(rawJSON)
 	if err != nil {
 		return ConsoleClientCredentials{}, errors.New("parse console client secret files JSON")
 	}
@@ -109,7 +109,15 @@ func LoadConsoleClientSecretFiles(rawJSON string, consoleClients map[string][]st
 	return credentials, nil
 }
 
-func decodeUniqueSecretFileMap(rawJSON string) (map[string][]string, error) {
+func DecodeUniqueStringSliceMapJSON(rawJSON string) (map[string][]string, error) {
+	return decodeUniqueMapJSON[[]string](rawJSON)
+}
+
+func DecodeUniqueStringMapJSON(rawJSON string) (map[string]string, error) {
+	return decodeUniqueMapJSON[string](rawJSON)
+}
+
+func decodeUniqueMapJSON[T any](rawJSON string) (map[string]T, error) {
 	if rawJSON == "" {
 		return nil, errors.New("empty JSON")
 	}
@@ -118,21 +126,21 @@ func decodeUniqueSecretFileMap(rawJSON string) (map[string][]string, error) {
 	if err != nil || opening != json.Delim('{') {
 		return nil, errors.New("secret file map must be an object")
 	}
-	paths := map[string][]string{}
+	values := map[string]T{}
 	for decoder.More() {
 		token, err := decoder.Token()
 		clientID, ok := token.(string)
 		if err != nil || !ok {
 			return nil, errors.New("invalid console client key")
 		}
-		if _, exists := paths[clientID]; exists {
+		if _, exists := values[clientID]; exists {
 			return nil, errors.New("duplicate console client key")
 		}
-		var values []string
-		if err := decoder.Decode(&values); err != nil {
+		var value T
+		if err := decoder.Decode(&value); err != nil {
 			return nil, err
 		}
-		paths[clientID] = values
+		values[clientID] = value
 	}
 	closing, err := decoder.Token()
 	if err != nil || closing != json.Delim('}') {
@@ -141,7 +149,21 @@ func decodeUniqueSecretFileMap(rawJSON string) (map[string][]string, error) {
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("trailing console client JSON")
 	}
-	return paths, nil
+	return values, nil
+}
+
+func ValidConsoleClientID(clientID string) bool {
+	if len(clientID) < 1 || len(clientID) > 256 {
+		return false
+	}
+	for i := 0; i < len(clientID); i++ {
+		value := clientID[i]
+		if (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') || value == '.' || value == '_' || value == '~' || value == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // LoadOIDCUpstreamClientSecret loads the separate upstream IdP credential.

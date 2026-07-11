@@ -96,7 +96,7 @@ Do not add production private-deployment automation here. Put production ingress
 
 ## Browser authentication production contract
 
-Browser authentication is disabled unless `AGENTNEXUS_BROWSER_AUTH_ENABLED=true`. When enabled, every item below is required and any missing, malformed, weak, non-canonical, unreadable, or over-permissive secret stops startup. Production `AGENTNEXUS_POSTGRES_DSN` must require TLS (`sslmode=require`, `verify-ca`, or `verify-full`); `sslmode=disable` is test-only.
+Browser authentication is disabled unless `AGENTNEXUS_BROWSER_AUTH_ENABLED=true`. When enabled, every item below is required and any missing, malformed, weak, non-canonical, unreadable, or over-permissive secret stops startup. Production release preflight accepts only a `postgres://` URL with a host, database, and exactly one explicit `sslmode=require`, `sslmode=verify-ca`, or `sslmode=verify-full`. Missing, weak, duplicate, conflicting, case-variant, percent-encoded bypass, malformed, keyword-format, and non-PostgreSQL DSNs fail before any deployment hook. `sslmode=disable` is test-only.
 
 | Variable | Contract |
 | --- | --- |
@@ -151,8 +151,10 @@ The runtime role needs `INSERT` on append-only audit/evidence tables but never u
 
 ## Irreversible 000006 release
 
-Migration `000006` revokes every legacy database-id CaseTicket bearer and adds mandatory hash-only credentials. Old and new binaries cannot overlap. Use `make release-auth` only through deployment-owned absolute executable hooks. It fails closed unless maintenance acknowledgement and a TLS DSN are present, and enforces: stop old/writes, create a verified backup, migrate, start only the new binary, then run verification.
+Migration `000006` revokes every legacy database-id CaseTicket bearer and adds mandatory hash-only credentials. Old and new binaries cannot overlap. Build and install `cmd/release-preflight` beside the private deployment automation, then set these absolute executable paths: `AGENTNEXUS_RELEASE_PREFLIGHT_BIN`, `AGENTNEXUS_RELEASE_STOP_OLD_HOOK`, `AGENTNEXUS_RELEASE_BACKUP_HOOK`, `AGENTNEXUS_RELEASE_MIGRATE_HOOK`, `AGENTNEXUS_RELEASE_START_NEW_ISOLATED_HOOK`, `AGENTNEXUS_RELEASE_VERIFY_HOOK`, `AGENTNEXUS_RELEASE_STOP_NEW_HOOK`, and `AGENTNEXUS_RELEASE_OPEN_TRAFFIC_HOOK`.
 
-Preflight must confirm no old replicas/workers remain, the backup is restorable, secret mounts and file modes are correct, and `make test-auth` passed against real PostgreSQL. If migration/start/verification fails, stop the new binary and restore the pre-migration database backup before starting the old release. SQL Down intentionally raises an exception; there is no destructive in-place rollback.
+`make release-auth` validates the strong TLS DSN before any hook, then enforces `STOP_OLD` (close traffic and stop all old writers) → `BACKUP` → `MIGRATE` → `START_NEW_ISOLATED` (must not register with a load balancer) → `VERIFY` → `OPEN_TRAFFIC`. Traffic opens only after successful verification. Verification or isolated-start failure automatically invokes `STOP_NEW` and leaves maintenance active. A `STOP_NEW` failure is a critical hard failure: do not open traffic or restart an old release until operators prove the isolated process is stopped and restore the recorded backup if rollback is required.
+
+Preflight must confirm no old replicas/workers remain, the backup is restorable, secret mounts and file modes are correct, and `make test-auth` passed against real PostgreSQL. If migration/start/verification fails, keep maintenance closed, stop the isolated new binary, and restore the pre-migration database backup before starting the old release. SQL Down intentionally raises an exception; there is no destructive in-place rollback.
 
 Ordinary `go test ./...` may skip live PostgreSQL acceptance and is not a release gate. The repository CI provisions a real PostgreSQL service and calls only the fail-closed `make test-auth` target; releases must use that same gate with `AGENTNEXUS_E2E_POSTGRES_DSN` set.

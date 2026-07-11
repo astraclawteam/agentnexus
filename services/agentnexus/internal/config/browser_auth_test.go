@@ -150,6 +150,37 @@ func TestLoadBrowserAuthParsesTrustedProxyCIDRsStrictly(t *testing.T) {
 	}
 }
 
+func TestLoadBrowserAuthRejectsDuplicateAndMalformedSecureJSONMaps(t *testing.T) {
+	for name, raw := range map[string]string{
+		"duplicate redirect client": `{"atlas":["https://atlas.example.com/cb"],"atlas":["https://other.example.com/cb"]}`,
+		"wrong redirect shape":      `{"atlas":"https://atlas.example.com/cb"}`,
+		"redirect trailing JSON":    `{"atlas":["https://atlas.example.com/cb"]}{}`,
+		"invalid client id":         `{"bad:client":["https://atlas.example.com/cb"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			setValidBrowserAuthEnvironment(t)
+			t.Setenv("AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON", raw)
+			if _, err := LoadBrowserAuth(); err == nil {
+				t.Fatal("unsafe redirect-client JSON accepted")
+			}
+		})
+	}
+	publicPath := writeBrowserPublicKey(t)
+	for name, raw := range map[string]string{
+		"duplicate previous kid": `{"old":"` + jsonPath(publicPath) + `","old":"` + jsonPath(publicPath) + `"}`,
+		"wrong previous shape":   `{"old":["` + jsonPath(publicPath) + `"]}`,
+		"previous trailing JSON": `{"old":"` + jsonPath(publicPath) + `"}[]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			setValidBrowserAuthEnvironment(t)
+			t.Setenv("AGENTNEXUS_OIDC_PREVIOUS_SIGNING_KEYS_JSON", raw)
+			if _, err := LoadBrowserAuth(); err == nil {
+				t.Fatal("unsafe previous-signing-key JSON accepted")
+			}
+		})
+	}
+}
+
 func setValidBrowserAuthEnvironment(t *testing.T) {
 	t.Helper()
 	setBrowserSecretFiles(t, "atlas")
@@ -182,6 +213,24 @@ func setBrowserSecretFiles(t *testing.T, clientID string) {
 		t.Fatal(err)
 	}
 	t.Setenv("AGENTNEXUS_OIDC_UPSTREAM_CLIENT_SECRET_FILE", upstream)
-	jsonPath := strings.ReplaceAll(downstream, `\`, `\\`)
-	t.Setenv("AGENTNEXUS_OIDC_CONSOLE_CLIENT_SECRET_FILES_JSON", `{"`+clientID+`":["`+jsonPath+`"]}`)
+	t.Setenv("AGENTNEXUS_OIDC_CONSOLE_CLIENT_SECRET_FILES_JSON", `{"`+clientID+`":["`+jsonPath(downstream)+`"]}`)
 }
+
+func writeBrowserPublicKey(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "previous.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func jsonPath(path string) string { return strings.ReplaceAll(path, `\`, `\\`) }

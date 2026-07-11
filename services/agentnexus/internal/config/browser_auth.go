@@ -2,7 +2,6 @@ package config
 
 import (
 	"crypto"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -70,7 +69,8 @@ func LoadBrowserAuth() (BrowserAuthConfig, error) {
 		return BrowserAuthConfig{}, fmt.Errorf("load browser OIDC signing key: %w", err)
 	}
 	clients := map[string][]string{}
-	if err := json.Unmarshal([]byte(os.Getenv("AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON")), &clients); err != nil {
+	clients, err = browserauth.DecodeUniqueStringSliceMapJSON(os.Getenv("AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON"))
+	if err != nil {
 		return BrowserAuthConfig{}, fmt.Errorf("parse console clients: %w", err)
 	}
 	consoleCredentials, err := browserauth.LoadConsoleClientSecretFiles(os.Getenv("AGENTNEXUS_OIDC_CONSOLE_CLIENT_SECRET_FILES_JSON"), clients)
@@ -84,7 +84,8 @@ func LoadBrowserAuth() (BrowserAuthConfig, error) {
 	previous := map[string]crypto.PublicKey{}
 	previousPaths := map[string]string{}
 	if raw := strings.TrimSpace(os.Getenv("AGENTNEXUS_OIDC_PREVIOUS_SIGNING_KEYS_JSON")); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &previousPaths); err != nil {
+		previousPaths, err = browserauth.DecodeUniqueStringMapJSON(raw)
+		if err != nil {
 			return BrowserAuthConfig{}, fmt.Errorf("parse previous signing keys: %w", err)
 		}
 		for kid, path := range previousPaths {

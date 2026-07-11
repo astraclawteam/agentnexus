@@ -588,7 +588,7 @@ func confidentialBasicCredentials(header http.Header) (string, string, bool) {
 		return "", "", false
 	}
 	clientID, secret := string(raw[:separator]), string(raw[separator+1:])
-	if strings.TrimSpace(clientID) != clientID || strings.TrimSpace(secret) != secret {
+	if !browserauth.ValidConsoleClientID(clientID) || strings.TrimSpace(secret) != secret {
 		return "", "", false
 	}
 	return clientID, secret, true

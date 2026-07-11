@@ -134,3 +134,70 @@ GREEN evidence: all 10 Console tests passed, including 20 repeated runs, and the
 - GNU Make is not installed in the restarted Windows environment. The fail-closed Make structure and CI invocation are contract-tested, and its exact `go test` command was executed successfully against the real PostgreSQL DSN. No external CI was run.
 - Go 1.26.4 VCS stamping in this Windows worktree returns `error obtaining VCS status: exit status 128` for command packages in both dirty and clean states, even though the equivalent direct `git status`, `git log`, `git tag`, and `git rev-parse` commands all return zero. Full test/vet/build gates therefore use the standard `-buildvcs=false` escape hatch; this is an environment/toolchain limitation, not a passing no-flag claim.
 - The race detector remains unavailable because `CGO_ENABLED=1` cannot find `gcc`; no race-pass claim is made.
+
+## Second-round release hardening
+
+The final release review found four remaining places where permissive parsing or an underspecified cutover could weaken the fail-closed contract.
+
+### A. Production PostgreSQL DSN preflight
+
+Root cause: the shell release guard inferred TLS with string matching. That could not reliably distinguish a unique canonical `sslmode` from missing, duplicated, encoded, malformed, or non-PostgreSQL input.
+
+Remediation:
+
+- a dedicated Go preflight parses the URL and query using the standard library before any deployment hook runs;
+- only a `postgres` URL with host, database path, and exactly one lowercase `sslmode=require|verify-ca|verify-full` is accepted;
+- missing or weak modes, duplicate keys (including percent-encoded aliases), encoded values, malformed percent escapes, fragments, control characters, outer whitespace, and non-PostgreSQL schemes fail closed;
+- the command reports a generic error and never prints the DSN.
+
+RED evidence: focused tests initially failed because the DSN validation API and release-preflight command did not exist.
+
+GREEN evidence: the validator matrix passed 20 repeated runs, and actual release-script tests proved seven invalid DSNs execute no deployment hook.
+
+### B. Isolated release cutover and cleanup
+
+Root cause: the prior release contract did not make isolated startup, pre-traffic verification, and failed-new-instance cleanup independently enforceable.
+
+Remediation: the script now enforces `STOP_OLD -> BACKUP -> MIGRATE -> START_NEW_ISOLATED -> VERIFY -> OPEN_TRAFFIC`. A failed isolated start or verification invokes `STOP_NEW`, leaves maintenance/traffic closed, and becomes a critical failure if cleanup itself fails. `OPEN_TRAFFIC` is unreachable until verification succeeds.
+
+Actual-script evidence:
+
+- success recorded the exact six-phase order and final traffic state `open`;
+- verification failure recorded `STOP_NEW`, omitted `OPEN_TRAFFIC`, and left traffic `closed`;
+- `STOP_NEW` failure emitted a critical error, omitted `OPEN_TRAFFIC`, and left traffic `closed`;
+- the combined release-script E2E suite passed against real executable hook stubs and the built Go preflight command.
+
+### C. Canonical confidential client identifiers
+
+Root cause: startup configuration and Basic authentication did not share one explicit client-id grammar, permitting inconsistent admission across boundaries.
+
+Remediation: both paths now use the same 1..256-byte ASCII grammar `[A-Za-z0-9._~-]`. Redirect lookups and authorization validation also reject noncanonical identifiers.
+
+RED evidence: new startup, authorization, and Basic boundary tests admitted invalid identifiers before the shared validator existed.
+
+GREEN evidence: focused client-id tests passed 20 repeated runs, including boundary length and invalid-character cases.
+
+### D. Duplicate-rejecting JSON maps
+
+Root cause: ordinary Go JSON map decoding silently accepted duplicate keys, so later entries could replace security-sensitive redirect, previous-signing-key, or secret-file mappings.
+
+Remediation: all three maps now use one token-level strict decoder that rejects duplicate keys, wrong value shapes, and trailing JSON.
+
+RED evidence: duplicate-key and malformed-shape tests were accepted by the previous decoders.
+
+GREEN evidence: focused decoder, startup-config, and mounted-secret tests passed 20 repeated runs.
+
+## Second-round verification
+
+- `sqlc generate` twice: success and no generated diff.
+- `go test -buildvcs=false ./internal/... -count=1`: all internal packages pass.
+- `go test -buildvcs=false ./cmd/... ./db/... -count=1`: pass.
+- `go test -buildvcs=false ./tests/integration -count=1`: pass.
+- `go test -buildvcs=false ./tests/e2e -count=1`: pass, including actual release-script state assertions.
+- exact auth/release package gate: pass.
+- `go vet -buildvcs=false ./...`: pass.
+- gateway-api, gateway-agent, connector-worker, connector-agent, and release-preflight builds with `-buildvcs=false`: pass.
+- Console 10-test suite, Console production build, root workspace tests, and `npm ls @xiaozhiclaw/runtime-ui --all`: pass.
+- `git diff --check`: pass (Windows line-ending warnings only).
+
+The environment concerns above remain unchanged: GNU Make and gcc are unavailable, and this Windows/Go worktree requires `-buildvcs=false`; no Make, race-detector, or no-flag VCS-stamped pass is claimed.
