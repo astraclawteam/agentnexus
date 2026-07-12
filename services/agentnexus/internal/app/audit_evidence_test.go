@@ -243,3 +243,45 @@ func TestAuditDetailDepthAndStringBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestAuditEvidenceAcceptsBoundBrowserBearerAndStillVerifiesCaseTicket(t *testing.T) {
+	sink := &recordingAuditEvidenceSink{}
+	tickets := &stubTicketActors{identity: trust.TicketIdentity{TenantRef: "ent-1", PrincipalRef: "u-1", TicketRef: "case-1", ExpiresAt: time.Now().Add(time.Hour)}}
+	h, err := newAuditEvidenceHandler("ent-1", tickets, sink, &recordingTrustAudit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := newGatewayAPIMux("gateway-api", "test")
+	h.register(mux)
+	resolver, err := trust.NewResolver(trust.ResolverConfig{
+		TenantRef:           "ent-1",
+		BrowserAccessTokens: staticBrowserAccessTokenVerifier{identity: trust.SessionIdentity{TenantRef: "ent-1", PrincipalRef: "u-1", ExpiresAt: time.Now().Add(time.Hour)}},
+		OrgSnapshots:        staticAuditOrgSnapshot{},
+		Protected:           func(r *http.Request) bool { return trustProtectedPath(r.URL.Path) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/audit/evidence", strings.NewReader(`{"business_context_ref":"opaque-ticket","action":"dream_policy_created","resource_type":"dream_policy","resource_id":"pol-1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer opaque-token")
+	rr := httptest.NewRecorder()
+	resolver.Middleware(mux).ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated || sink.input.ActorUserID != "u-1" {
+		t.Fatalf("status=%d input=%+v body=%s", rr.Code, sink.input, rr.Body.String())
+	}
+}
+
+type staticBrowserAccessTokenVerifier struct {
+	identity trust.SessionIdentity
+}
+
+type staticAuditOrgSnapshot struct{}
+
+func (staticAuditOrgSnapshot) ResolveSealedOrgVersion(context.Context, string, string) (int64, error) {
+	return 1, nil
+}
+
+func (s staticBrowserAccessTokenVerifier) VerifyBrowserAccessToken(context.Context, string) (trust.SessionIdentity, error) {
+	return s.identity, nil
+}

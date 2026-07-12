@@ -26,6 +26,24 @@ type fakeSessions struct {
 	calls       int
 }
 
+type fakeAccessTokens struct {
+	identities  map[string]trust.SessionIdentity
+	unavailable bool
+	calls       int
+}
+
+func (f *fakeAccessTokens) VerifyBrowserAccessToken(_ context.Context, token string) (trust.SessionIdentity, error) {
+	f.calls++
+	if f.unavailable {
+		return trust.SessionIdentity{}, trust.ErrSourceUnavailable
+	}
+	identity, ok := f.identities[token]
+	if !ok {
+		return trust.SessionIdentity{}, trust.ErrCredentialRejected
+	}
+	return identity, nil
+}
+
 func (f *fakeSessions) VerifyBrowserSession(_ context.Context, token string) (trust.SessionIdentity, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -133,14 +151,15 @@ func (a *recordingAudit) last() trust.Rejection {
 }
 
 type trustHarness struct {
-	sessions  *fakeSessions
-	tickets   *fakeTickets
-	grants    *fakeGrants
-	services  *fakeServices
-	snapshots *fakeSnapshots
-	audit     *recordingAudit
-	router    http.Handler
-	handled   *int
+	sessions     *fakeSessions
+	accessTokens *fakeAccessTokens
+	tickets      *fakeTickets
+	grants       *fakeGrants
+	services     *fakeServices
+	snapshots    *fakeSnapshots
+	audit        *recordingAudit
+	router       http.Handler
+	handled      *int
 }
 
 type echoedContext struct {
@@ -171,6 +190,9 @@ func newTrustHarness(t *testing.T) *trustHarness {
 			},
 			revoked: map[string]bool{},
 		},
+		accessTokens: &fakeAccessTokens{identities: map[string]trust.SessionIdentity{
+			"access-token": {TenantRef: testTenant, PrincipalRef: "user-1", ExpiresAt: time.Now().Add(time.Hour)},
+		}},
 		tickets: &fakeTickets{identities: map[string]trust.TicketIdentity{
 			"ticket-token": {TenantRef: testTenant, PrincipalRef: "user-1", TicketRef: "ct-1", ExpiresAt: time.Now().Add(time.Hour)},
 		}},
@@ -183,13 +205,14 @@ func newTrustHarness(t *testing.T) *trustHarness {
 		handled:   new(int),
 	}
 	resolver, err := trust.NewResolver(trust.ResolverConfig{
-		TenantRef:     testTenant,
-		Sessions:      h.sessions,
-		AccessTickets: h.tickets,
-		StepGrants:    h.grants,
-		Services:      h.services,
-		OrgSnapshots:  h.snapshots,
-		Audit:         h.audit,
+		TenantRef:           testTenant,
+		Sessions:            h.sessions,
+		BrowserAccessTokens: h.accessTokens,
+		AccessTickets:       h.tickets,
+		StepGrants:          h.grants,
+		Services:            h.services,
+		OrgSnapshots:        h.snapshots,
+		Audit:               h.audit,
 		Protected: func(r *http.Request) bool {
 			return r.URL.Path == "/protected"
 		},
@@ -294,6 +317,50 @@ func TestTrustedContextResolvesBrowserSessionOnceAndImmutable(t *testing.T) {
 	}
 }
 
+func TestTrustedContextResolvesBrowserAccessTokenOnce(t *testing.T) {
+	t.Parallel()
+	h := newTrustHarness(t)
+	rr, echo := performTrust(t, h, func(req *http.Request) {
+		req.Header.Set("Authorization", "Bearer access-token")
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if echo.Tenant != testTenant || echo.Principal != "user-1" || echo.Source != string(trust.SourceBrowserAccessToken) || !echo.Connector {
+		t.Fatalf("context=%+v", echo)
+	}
+	if h.accessTokens.calls != 1 || h.snapshots.callCount() != 1 {
+		t.Fatalf("access token calls=%d snapshot calls=%d", h.accessTokens.calls, h.snapshots.callCount())
+	}
+}
+
+func TestTrustedContextBrowserAccessTokenFailuresFailClosed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		configure func(*trustHarness)
+		want      int
+	}{
+		{name: "unknown", want: http.StatusUnauthorized},
+		{name: "source unavailable", configure: func(h *trustHarness) { h.accessTokens.unavailable = true }, want: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTrustHarness(t)
+			if tc.configure != nil {
+				tc.configure(h)
+			}
+			token := "unknown-token"
+			if tc.name == "source unavailable" {
+				token = "access-token"
+			}
+			rr, _ := performTrust(t, h, func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+token) })
+			if rr.Code != tc.want || *h.handled != 0 {
+				t.Fatalf("status=%d want=%d handled=%d", rr.Code, tc.want, *h.handled)
+			}
+		})
+	}
+}
+
 func TestTrustedContextRejectsForgedIdentityHeaders(t *testing.T) {
 	t.Parallel()
 	headers := []string{
@@ -357,6 +424,10 @@ func TestTrustedContextRejectsConflictingCredentials(t *testing.T) {
 		{name: "session and ticket", mutate: func(req *http.Request) {
 			addSessionCookie(req)
 			req.Header.Set("Authorization", "CaseTicket ticket-token")
+		}},
+		{name: "session and bearer", mutate: func(req *http.Request) {
+			addSessionCookie(req)
+			req.Header.Set("Authorization", "Bearer access-token")
 		}},
 		{name: "repeated authorization", mutate: func(req *http.Request) {
 			req.Header.Add("Authorization", "CaseTicket ticket-token")
@@ -708,7 +779,7 @@ func TestTrustedContextMalformedAuthorizationCredentialsRejected(t *testing.T) {
 		{name: "basic missing colon", header: "Basic " + base64.StdEncoding.EncodeToString([]byte("agentatlas-no-colon"))},
 		{name: "basic decoded over 1024 bytes", header: "Basic " + oversizedBasic},
 		{name: "basic empty secret", header: "Basic " + base64.StdEncoding.EncodeToString([]byte("agentatlas:"))},
-		{name: "unknown scheme", header: "Bearer forged-jwt"},
+		{name: "unknown bearer token", header: "Bearer forged-jwt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTrustHarness(t)
@@ -755,7 +826,7 @@ func TestTrustedContextUnknownAuthorizationSchemeIsRejected(t *testing.T) {
 	t.Parallel()
 	h := newTrustHarness(t)
 	rr, _ := performTrust(t, h, func(req *http.Request) {
-		req.Header.Set("Authorization", "Bearer forged-jwt")
+		req.Header.Set("Authorization", "Digest forged")
 	})
 	if rr.Code != http.StatusUnauthorized || h.audit.count() != 1 {
 		t.Fatalf("status=%d audit=%d", rr.Code, h.audit.count())

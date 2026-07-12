@@ -42,14 +42,14 @@ RETURNING id_hash, enterprise_id, enterprise_user_id, created_at, last_seen_at,
 -- name: CreateAuthorizationCode :one
 INSERT INTO oauth_authorization_codes (
     code_hash, client_id, redirect_uri, enterprise_id, enterprise_user_id,
-    code_challenge, nonce, created_at, expires_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    code_challenge, nonce, created_at, expires_at, browser_session_id_hash
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING code_hash, client_id, redirect_uri, enterprise_id, enterprise_user_id,
-          code_challenge, nonce, created_at, expires_at, consumed_at;
+          code_challenge, nonce, created_at, expires_at, consumed_at, browser_session_id_hash;
 
 -- name: GetAuthorizationCodeForUpdate :one
 SELECT code_hash, client_id, redirect_uri, enterprise_id, enterprise_user_id,
-       code_challenge, nonce, created_at, expires_at, consumed_at
+       code_challenge, nonce, created_at, expires_at, consumed_at, browser_session_id_hash
 FROM oauth_authorization_codes
 WHERE code_hash = $1
 FOR UPDATE;
@@ -58,6 +58,47 @@ FOR UPDATE;
 UPDATE oauth_authorization_codes
 SET consumed_at = $2
 WHERE code_hash = $1 AND consumed_at IS NULL;
+
+-- name: CreateBrowserAccessToken :one
+INSERT INTO browser_access_tokens (
+    token_hash, browser_session_id_hash, enterprise_id, enterprise_user_id,
+    client_id, audience, created_at, expires_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+RETURNING token_hash, browser_session_id_hash, enterprise_id, enterprise_user_id,
+          client_id, audience, created_at, expires_at, revoked_at;
+
+-- name: GetActiveBrowserAccessToken :one
+SELECT t.token_hash, t.browser_session_id_hash, t.enterprise_id, t.enterprise_user_id,
+       t.client_id, t.audience, t.created_at, t.expires_at, t.revoked_at,
+       s.created_at AS session_created_at, s.last_seen_at AS session_last_seen_at,
+       s.idle_expires_at AS session_idle_expires_at, s.absolute_expires_at AS session_absolute_expires_at
+FROM browser_access_tokens AS t
+JOIN browser_sessions AS s ON s.id_hash = t.browser_session_id_hash
+WHERE t.token_hash = sqlc.arg(token_hash)
+  AND t.client_id = sqlc.arg(client_id)
+  AND t.audience = sqlc.arg(audience)
+  AND t.revoked_at IS NULL
+  AND s.revoked_at IS NULL
+  AND t.expires_at > sqlc.arg(now)
+  AND s.idle_expires_at > sqlc.arg(now)
+  AND s.absolute_expires_at > sqlc.arg(now);
+
+-- name: RevokeAndGetBrowserSessionByAccessToken :one
+UPDATE browser_sessions AS s
+SET revoked_at = COALESCE(s.revoked_at, sqlc.arg(revoked_at))
+FROM browser_access_tokens AS t
+WHERE t.token_hash = sqlc.arg(token_hash)
+  AND t.browser_session_id_hash = s.id_hash
+  AND t.client_id = sqlc.arg(client_id)
+  AND t.audience = sqlc.arg(audience)
+  AND t.revoked_at IS NULL
+  AND t.expires_at > sqlc.arg(revoked_at)
+  AND (s.revoked_at IS NOT NULL OR (
+      s.idle_expires_at > sqlc.arg(revoked_at)
+      AND s.absolute_expires_at > sqlc.arg(revoked_at)
+  ))
+RETURNING s.id_hash, s.enterprise_id, s.enterprise_user_id, s.created_at, s.last_seen_at,
+          s.idle_expires_at, s.absolute_expires_at, s.revoked_at, s.user_agent_hash;
 
 -- name: LockOIDCLoginAttemptScope :one
 SELECT pg_advisory_xact_lock(

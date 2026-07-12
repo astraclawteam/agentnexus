@@ -36,10 +36,11 @@ import (
 type Source string
 
 const (
-	SourceBrowserSession    Source = "browser_session"
-	SourceServiceCredential Source = "service_credential"
-	SourceAccessTicket      Source = "access_ticket"
-	SourceStepGrant         Source = "step_grant"
+	SourceBrowserSession     Source = "browser_session"
+	SourceBrowserAccessToken Source = "browser_access_token"
+	SourceServiceCredential  Source = "service_credential"
+	SourceAccessTicket       Source = "access_ticket"
+	SourceStepGrant          Source = "step_grant"
 )
 
 // OriginHeader declares the calling Agent product. It is UNVERIFIED trace
@@ -137,6 +138,13 @@ type SessionIdentity struct {
 // BrowserSessionVerifier verifies an opaque browser-session token.
 type BrowserSessionVerifier interface {
 	VerifyBrowserSession(context.Context, string) (SessionIdentity, error)
+}
+
+// BrowserAccessTokenVerifier verifies an opaque, revocable browser BFF token.
+// It returns the same member identity as the bound browser session while
+// keeping the credential source explicit for authorization and audit policy.
+type BrowserAccessTokenVerifier interface {
+	VerifyBrowserAccessToken(context.Context, string) (SessionIdentity, error)
 }
 
 // TicketIdentity is a verified Access Ticket (Case Ticket) identity.
@@ -300,13 +308,14 @@ type ResolverConfig struct {
 	// SessionCookieName overrides DefaultSessionCookieName.
 	SessionCookieName string
 	// BrowserClientRef overrides DefaultBrowserClientRef.
-	BrowserClientRef string
-	Sessions         BrowserSessionVerifier
-	AccessTickets    AccessTicketVerifier
-	StepGrants       StepGrantVerifier
-	Services         ServiceCredentialVerifier
-	OrgSnapshots     OrgSnapshotResolver
-	Audit            AuditSink
+	BrowserClientRef    string
+	Sessions            BrowserSessionVerifier
+	BrowserAccessTokens BrowserAccessTokenVerifier
+	AccessTickets       AccessTicketVerifier
+	StepGrants          StepGrantVerifier
+	Services            ServiceCredentialVerifier
+	OrgSnapshots        OrgSnapshotResolver
+	Audit               AuditSink
 	// Protected reports whether a request requires a trusted context. Only
 	// protected requests are resolved; forged-identity header screening
 	// covers every request.
@@ -488,6 +497,29 @@ func (r *Resolver) resolveAuthorization(req *http.Request, origin, header string
 			expiresAt:     identity.ExpiresAt,
 			expiring:      true,
 			origin:        origin,
+		})
+	case strings.EqualFold(scheme, "Bearer"):
+		if r.cfg.BrowserAccessTokens == nil {
+			r.audit(req, Rejection{Reason: ReasonSourceNotConfigured, Source: SourceBrowserAccessToken, Path: req.URL.Path, Origin: origin})
+			return Context{}, ErrInvalidCredential
+		}
+		if !opaqueCredential(value) {
+			r.audit(req, Rejection{Reason: ReasonMalformedCredential, Source: SourceBrowserAccessToken, Path: req.URL.Path, Origin: origin})
+			return Context{}, ErrInvalidCredential
+		}
+		identity, err := r.cfg.BrowserAccessTokens.VerifyBrowserAccessToken(req.Context(), value)
+		if err != nil {
+			return Context{}, r.credentialFailure(req, SourceBrowserAccessToken, origin, err)
+		}
+		return r.principalContext(req, principalInput{
+			source:       SourceBrowserAccessToken,
+			tenantRef:    identity.TenantRef,
+			principalRef: identity.PrincipalRef,
+			clientRef:    r.cfg.BrowserClientRef,
+			releaseRef:   UnregisteredReleaseRef,
+			expiresAt:    identity.ExpiresAt,
+			expiring:     true,
+			origin:       origin,
 		})
 	case strings.EqualFold(scheme, "StepGrant"):
 		if r.cfg.StepGrants == nil {

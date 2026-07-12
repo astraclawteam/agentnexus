@@ -381,8 +381,13 @@ func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 	if err := json.Unmarshal(token.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["id_token"] == "" || payload["token_type"] != "Bearer" || payload["access_token"] != nil || payload["refresh_token"] != nil {
-		t.Fatalf("payload=%v", payload)
+	accessToken, _ := payload["access_token"].(string)
+	if payload["id_token"] == "" || payload["token_type"] != "Bearer" || accessToken == "" || payload["refresh_token"] != nil {
+		t.Fatalf("token payload fields invalid id=%v access=%v type=%v refresh_present=%v", payload["id_token"] != "", accessToken != "", payload["token_type"], payload["refresh_token"] != nil)
+	}
+	bearerMe := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", nil, "Authorization", "Bearer "+accessToken)
+	if bearerMe.Code != http.StatusOK {
+		t.Fatalf("bearer me=%d body=%s", bearerMe.Code, bearerMe.Body.String())
 	}
 
 	me := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", cookie)
@@ -406,16 +411,15 @@ func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 		t.Fatalf("profile=%+v", profile)
 	}
 
-	logout := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", cookie)
+	logout := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", nil, "Authorization", "Bearer "+accessToken)
 	if logout.Code != http.StatusNoContent {
 		t.Fatalf("logout=%d", logout.Code)
 	}
-	cleared := logout.Result().Cookies()[0]
-	if cleared.Name != browserSessionCookie || cleared.MaxAge >= 0 || !cleared.HttpOnly || !cleared.Secure || cleared.SameSite != http.SameSiteLaxMode || cleared.Path != "/" {
-		t.Fatalf("cleared=%+v", cleared)
-	}
 	if got := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", cookie).Code; got != http.StatusUnauthorized {
 		t.Fatalf("post logout=%d", got)
+	}
+	if got := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", nil, "Authorization", "Bearer "+accessToken).Code; got != http.StatusUnauthorized {
+		t.Fatalf("post logout bearer=%d", got)
 	}
 }
 
@@ -803,7 +807,7 @@ func TestBrowserAuthRejectsCrossEnterpriseSessionsAndCodes(t *testing.T) {
 	if me.Code != http.StatusUnauthorized || !hasClearedCookie(me, browserSessionCookie) {
 		t.Fatalf("me=%d cookies=%v", me.Code, me.Result().Cookies())
 	}
-	code, err := h.sessions.IssueCode(context.Background(), browserauth.IssueCodeInput{EnterpriseID: "ent-2", UserID: "user-2", ClientID: "agentatlas", RedirectURI: "https://atlas.example.com/auth/callback", Nonce: "n", CodeChallenge: testS256(testVerifier)})
+	code, err := h.sessions.IssueCode(context.Background(), browserauth.IssueCodeInput{EnterpriseID: "ent-2", UserID: "user-2", ClientID: "agentatlas", RedirectURI: "https://atlas.example.com/auth/callback", Nonce: "n", CodeChallenge: testS256(testVerifier), BrowserSessionToken: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -996,6 +1000,22 @@ func (m *memoryAudit) LogoutBrowserSession(ctx context.Context, token string, ev
 	session, err := m.sessions.LogoutSession(ctx, token)
 	if err != nil {
 		return browserauth.BrowserSession{}, err
+	}
+	event.ActorUserID = session.UserID
+	m.events = append(m.events, event)
+	return session, nil
+}
+
+func (m *memoryAudit) LogoutBrowserAccessToken(ctx context.Context, token string, event BrowserAuditEvent) (browserauth.BrowserSession, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, m.sawDeadline = ctx.Deadline()
+	session, err := m.sessions.LogoutAccessTokenSession(ctx, token, "agentatlas", "agentatlas")
+	if err != nil {
+		return browserauth.BrowserSession{}, err
+	}
+	if m.err != nil {
+		return browserauth.BrowserSession{}, m.err
 	}
 	event.ActorUserID = session.UserID
 	m.events = append(m.events, event)

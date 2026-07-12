@@ -29,8 +29,9 @@ func TestAuditRequestedActionIsPublishedInOpenAPIAndProto(t *testing.T) {
 	auditPath := nestedMap(t, document, "paths", "/v1/audit/evidence", "post")
 	security := auditPath["security"].([]any)
 	_, hasServiceSecurity := security[0].(map[string]any)["trustedServiceSecret"]
-	if len(security) != 1 || !hasServiceSecurity {
-		t.Fatal("audit endpoint must require dedicated trusted first-party service Basic auth")
+	_, hasBearerSecurity := security[1].(map[string]any)["browserAccessToken"]
+	if len(security) != 2 || !hasServiceSecurity || !hasBearerSecurity {
+		t.Fatal("audit endpoint must accept dedicated service Basic or bound browser Bearer auth")
 	}
 	serviceSecret := nestedMap(t, document, "components", "securitySchemes", "trustedServiceSecret")
 	if serviceSecret["type"] != "http" || serviceSecret["scheme"] != "basic" || !strings.Contains(serviceSecret["description"].(string), "trusted first-party service") {

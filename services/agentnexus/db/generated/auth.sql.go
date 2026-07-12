@@ -66,22 +66,23 @@ func (q *Queries) ConsumeOIDCAuthorizeRateLimit(ctx context.Context, arg Consume
 const createAuthorizationCode = `-- name: CreateAuthorizationCode :one
 INSERT INTO oauth_authorization_codes (
     code_hash, client_id, redirect_uri, enterprise_id, enterprise_user_id,
-    code_challenge, nonce, created_at, expires_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    code_challenge, nonce, created_at, expires_at, browser_session_id_hash
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING code_hash, client_id, redirect_uri, enterprise_id, enterprise_user_id,
-          code_challenge, nonce, created_at, expires_at, consumed_at
+          code_challenge, nonce, created_at, expires_at, consumed_at, browser_session_id_hash
 `
 
 type CreateAuthorizationCodeParams struct {
-	CodeHash         string
-	ClientID         string
-	RedirectUri      string
-	EnterpriseID     string
-	EnterpriseUserID string
-	CodeChallenge    string
-	Nonce            string
-	CreatedAt        pgtype.Timestamptz
-	ExpiresAt        pgtype.Timestamptz
+	CodeHash             string
+	ClientID             string
+	RedirectUri          string
+	EnterpriseID         string
+	EnterpriseUserID     string
+	CodeChallenge        string
+	Nonce                string
+	CreatedAt            pgtype.Timestamptz
+	ExpiresAt            pgtype.Timestamptz
+	BrowserSessionIDHash string
 }
 
 func (q *Queries) CreateAuthorizationCode(ctx context.Context, arg CreateAuthorizationCodeParams) (OauthAuthorizationCode, error) {
@@ -95,6 +96,7 @@ func (q *Queries) CreateAuthorizationCode(ctx context.Context, arg CreateAuthori
 		arg.Nonce,
 		arg.CreatedAt,
 		arg.ExpiresAt,
+		arg.BrowserSessionIDHash,
 	)
 	var i OauthAuthorizationCode
 	err := row.Scan(
@@ -108,6 +110,53 @@ func (q *Queries) CreateAuthorizationCode(ctx context.Context, arg CreateAuthori
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
+		&i.BrowserSessionIDHash,
+	)
+	return i, err
+}
+
+const createBrowserAccessToken = `-- name: CreateBrowserAccessToken :one
+INSERT INTO browser_access_tokens (
+    token_hash, browser_session_id_hash, enterprise_id, enterprise_user_id,
+    client_id, audience, created_at, expires_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+RETURNING token_hash, browser_session_id_hash, enterprise_id, enterprise_user_id,
+          client_id, audience, created_at, expires_at, revoked_at
+`
+
+type CreateBrowserAccessTokenParams struct {
+	TokenHash            string
+	BrowserSessionIDHash string
+	EnterpriseID         string
+	EnterpriseUserID     string
+	ClientID             string
+	Audience             string
+	CreatedAt            pgtype.Timestamptz
+	ExpiresAt            pgtype.Timestamptz
+}
+
+func (q *Queries) CreateBrowserAccessToken(ctx context.Context, arg CreateBrowserAccessTokenParams) (BrowserAccessToken, error) {
+	row := q.db.QueryRow(ctx, createBrowserAccessToken,
+		arg.TokenHash,
+		arg.BrowserSessionIDHash,
+		arg.EnterpriseID,
+		arg.EnterpriseUserID,
+		arg.ClientID,
+		arg.Audience,
+		arg.CreatedAt,
+		arg.ExpiresAt,
+	)
+	var i BrowserAccessToken
+	err := row.Scan(
+		&i.TokenHash,
+		&i.BrowserSessionIDHash,
+		&i.EnterpriseID,
+		&i.EnterpriseUserID,
+		&i.ClientID,
+		&i.Audience,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
@@ -412,9 +461,75 @@ func (q *Queries) EnterpriseUserBindingExists(ctx context.Context, arg Enterpris
 	return exists, err
 }
 
+const getActiveBrowserAccessToken = `-- name: GetActiveBrowserAccessToken :one
+SELECT t.token_hash, t.browser_session_id_hash, t.enterprise_id, t.enterprise_user_id,
+       t.client_id, t.audience, t.created_at, t.expires_at, t.revoked_at,
+       s.created_at AS session_created_at, s.last_seen_at AS session_last_seen_at,
+       s.idle_expires_at AS session_idle_expires_at, s.absolute_expires_at AS session_absolute_expires_at
+FROM browser_access_tokens AS t
+JOIN browser_sessions AS s ON s.id_hash = t.browser_session_id_hash
+WHERE t.token_hash = $1
+  AND t.client_id = $2
+  AND t.audience = $3
+  AND t.revoked_at IS NULL
+  AND s.revoked_at IS NULL
+  AND t.expires_at > $4
+  AND s.idle_expires_at > $4
+  AND s.absolute_expires_at > $4
+`
+
+type GetActiveBrowserAccessTokenParams struct {
+	TokenHash string
+	ClientID  string
+	Audience  string
+	Now       pgtype.Timestamptz
+}
+
+type GetActiveBrowserAccessTokenRow struct {
+	TokenHash                string
+	BrowserSessionIDHash     string
+	EnterpriseID             string
+	EnterpriseUserID         string
+	ClientID                 string
+	Audience                 string
+	CreatedAt                pgtype.Timestamptz
+	ExpiresAt                pgtype.Timestamptz
+	RevokedAt                pgtype.Timestamptz
+	SessionCreatedAt         pgtype.Timestamptz
+	SessionLastSeenAt        pgtype.Timestamptz
+	SessionIdleExpiresAt     pgtype.Timestamptz
+	SessionAbsoluteExpiresAt pgtype.Timestamptz
+}
+
+func (q *Queries) GetActiveBrowserAccessToken(ctx context.Context, arg GetActiveBrowserAccessTokenParams) (GetActiveBrowserAccessTokenRow, error) {
+	row := q.db.QueryRow(ctx, getActiveBrowserAccessToken,
+		arg.TokenHash,
+		arg.ClientID,
+		arg.Audience,
+		arg.Now,
+	)
+	var i GetActiveBrowserAccessTokenRow
+	err := row.Scan(
+		&i.TokenHash,
+		&i.BrowserSessionIDHash,
+		&i.EnterpriseID,
+		&i.EnterpriseUserID,
+		&i.ClientID,
+		&i.Audience,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.SessionCreatedAt,
+		&i.SessionLastSeenAt,
+		&i.SessionIdleExpiresAt,
+		&i.SessionAbsoluteExpiresAt,
+	)
+	return i, err
+}
+
 const getAuthorizationCodeForUpdate = `-- name: GetAuthorizationCodeForUpdate :one
 SELECT code_hash, client_id, redirect_uri, enterprise_id, enterprise_user_id,
-       code_challenge, nonce, created_at, expires_at, consumed_at
+       code_challenge, nonce, created_at, expires_at, consumed_at, browser_session_id_hash
 FROM oauth_authorization_codes
 WHERE code_hash = $1
 FOR UPDATE
@@ -434,6 +549,7 @@ func (q *Queries) GetAuthorizationCodeForUpdate(ctx context.Context, codeHash st
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
+		&i.BrowserSessionIDHash,
 	)
 	return i, err
 }
@@ -693,6 +809,53 @@ type RevokeAndGetBrowserSessionParams struct {
 
 func (q *Queries) RevokeAndGetBrowserSession(ctx context.Context, arg RevokeAndGetBrowserSessionParams) (BrowserSession, error) {
 	row := q.db.QueryRow(ctx, revokeAndGetBrowserSession, arg.IDHash, arg.RevokedAt)
+	var i BrowserSession
+	err := row.Scan(
+		&i.IDHash,
+		&i.EnterpriseID,
+		&i.EnterpriseUserID,
+		&i.CreatedAt,
+		&i.LastSeenAt,
+		&i.IdleExpiresAt,
+		&i.AbsoluteExpiresAt,
+		&i.RevokedAt,
+		&i.UserAgentHash,
+	)
+	return i, err
+}
+
+const revokeAndGetBrowserSessionByAccessToken = `-- name: RevokeAndGetBrowserSessionByAccessToken :one
+UPDATE browser_sessions AS s
+SET revoked_at = COALESCE(s.revoked_at, $1)
+FROM browser_access_tokens AS t
+WHERE t.token_hash = $2
+  AND t.browser_session_id_hash = s.id_hash
+  AND t.client_id = $3
+  AND t.audience = $4
+  AND t.revoked_at IS NULL
+  AND t.expires_at > $1
+  AND (s.revoked_at IS NOT NULL OR (
+      s.idle_expires_at > $1
+      AND s.absolute_expires_at > $1
+  ))
+RETURNING s.id_hash, s.enterprise_id, s.enterprise_user_id, s.created_at, s.last_seen_at,
+          s.idle_expires_at, s.absolute_expires_at, s.revoked_at, s.user_agent_hash
+`
+
+type RevokeAndGetBrowserSessionByAccessTokenParams struct {
+	RevokedAt pgtype.Timestamptz
+	TokenHash string
+	ClientID  string
+	Audience  string
+}
+
+func (q *Queries) RevokeAndGetBrowserSessionByAccessToken(ctx context.Context, arg RevokeAndGetBrowserSessionByAccessTokenParams) (BrowserSession, error) {
+	row := q.db.QueryRow(ctx, revokeAndGetBrowserSessionByAccessToken,
+		arg.RevokedAt,
+		arg.TokenHash,
+		arg.ClientID,
+		arg.Audience,
+	)
 	var i BrowserSession
 	err := row.Scan(
 		&i.IDHash,

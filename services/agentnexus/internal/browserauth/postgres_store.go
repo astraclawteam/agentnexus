@@ -96,7 +96,7 @@ func (s *PostgresStore) CreateAuthorizationCode(ctx context.Context, code stored
 	_, err := db.New(s.pool).CreateAuthorizationCode(ctx, db.CreateAuthorizationCodeParams{
 		CodeHash: code.CodeHash, ClientID: code.ClientID, RedirectUri: code.RedirectURI,
 		EnterpriseID: code.EnterpriseID, EnterpriseUserID: code.UserID, CodeChallenge: code.CodeChallenge,
-		Nonce: code.Nonce, CreatedAt: timestamp(code.CreatedAt), ExpiresAt: timestamp(code.ExpiresAt),
+		Nonce: code.Nonce, CreatedAt: timestamp(code.CreatedAt), ExpiresAt: timestamp(code.ExpiresAt), BrowserSessionIDHash: code.BrowserSessionIDHash,
 	})
 	return err
 }
@@ -239,6 +239,17 @@ func (s *PostgresStore) ExchangeAuthorizationCode(ctx context.Context, request e
 	if record.ConsumedAt.Valid || !request.Now.Before(record.ExpiresAt.Time) || record.ClientID != request.ClientID || record.RedirectUri != request.RedirectURI {
 		return storedAuthorizationCode{}, errNotFound
 	}
+	session, err := queries.GetBrowserSessionForUpdate(ctx, record.BrowserSessionIDHash)
+	if err != nil {
+		return storedAuthorizationCode{}, mapPostgresNotFound(err)
+	}
+	if session.RevokedAt.Valid || session.EnterpriseID != record.EnterpriseID || session.EnterpriseUserID != record.EnterpriseUserID || !request.Now.Before(session.IdleExpiresAt.Time) || !request.Now.Before(session.AbsoluteExpiresAt.Time) {
+		return storedAuthorizationCode{}, errNotFound
+	}
+	accessExpiresAt := session.AbsoluteExpiresAt.Time
+	if request.AccessTokenHash == "" || request.Audience == "" || !accessExpiresAt.After(request.Now) {
+		return storedAuthorizationCode{}, errNotFound
+	}
 	challenge, err := base64.RawURLEncoding.DecodeString(record.CodeChallenge)
 	if err != nil || len(challenge) != len(request.VerifierDigest) || subtle.ConstantTimeCompare(challenge, request.VerifierDigest[:]) != 1 {
 		return storedAuthorizationCode{}, errNotFound
@@ -250,10 +261,59 @@ func (s *PostgresStore) ExchangeAuthorizationCode(ctx context.Context, request e
 	if rows != 1 {
 		return storedAuthorizationCode{}, errNotFound
 	}
+	if _, err := queries.CreateBrowserAccessToken(ctx, db.CreateBrowserAccessTokenParams{TokenHash: request.AccessTokenHash, BrowserSessionIDHash: record.BrowserSessionIDHash, EnterpriseID: record.EnterpriseID, EnterpriseUserID: record.EnterpriseUserID, ClientID: record.ClientID, Audience: request.Audience, CreatedAt: timestamp(request.Now), ExpiresAt: timestamp(accessExpiresAt)}); err != nil {
+		return storedAuthorizationCode{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return storedAuthorizationCode{}, err
 	}
-	return storedCodeFromDB(record, request.Now), nil
+	result := storedCodeFromDB(record, request.Now)
+	result.AccessTokenExpiresAt = accessExpiresAt
+	return result, nil
+}
+
+func (s *PostgresStore) UseAccessToken(ctx context.Context, tokenHash, clientID, audience string, now time.Time) (storedAccessToken, error) {
+	if s == nil || s.pool == nil {
+		return storedAccessToken{}, errStoreUnavailable
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return storedAccessToken{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	queries := db.New(tx)
+	record, err := queries.GetActiveBrowserAccessToken(ctx, db.GetActiveBrowserAccessTokenParams{TokenHash: tokenHash, ClientID: clientID, Audience: audience, Now: timestamp(now)})
+	if err != nil {
+		return storedAccessToken{}, mapPostgresNotFound(err)
+	}
+	session, err := queries.GetBrowserSessionForUpdate(ctx, record.BrowserSessionIDHash)
+	if err != nil || session.RevokedAt.Valid || session.EnterpriseID != record.EnterpriseID || session.EnterpriseUserID != record.EnterpriseUserID || !now.Before(session.IdleExpiresAt.Time) || !now.Before(session.AbsoluteExpiresAt.Time) {
+		return storedAccessToken{}, errNotFound
+	}
+	session, err = queries.SlideBrowserSession(ctx, db.SlideBrowserSessionParams{IDHash: session.IDHash, LastSeenAt: timestamp(now), IdleExpiresAt: timestamp(minTime(now.Add(defaultIdleTimeout), session.AbsoluteExpiresAt.Time))})
+	if err != nil {
+		return storedAccessToken{}, mapPostgresNotFound(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return storedAccessToken{}, err
+	}
+	result := storedAccessToken{TokenHash: record.TokenHash, BrowserSessionIDHash: record.BrowserSessionIDHash, EnterpriseID: record.EnterpriseID, UserID: record.EnterpriseUserID, ClientID: record.ClientID, Audience: record.Audience, CreatedAt: record.CreatedAt.Time, ExpiresAt: record.ExpiresAt.Time, SessionCreatedAt: session.CreatedAt.Time, SessionLastSeenAt: session.LastSeenAt.Time, SessionIdleExpiresAt: session.IdleExpiresAt.Time, SessionAbsoluteExpiresAt: session.AbsoluteExpiresAt.Time}
+	if record.RevokedAt.Valid {
+		value := record.RevokedAt.Time
+		result.RevokedAt = &value
+	}
+	return result, nil
+}
+
+func (s *PostgresStore) RevokeSessionByAccessToken(ctx context.Context, tokenHash, clientID, audience string, now time.Time) (storedSession, error) {
+	if s == nil || s.pool == nil {
+		return storedSession{}, errStoreUnavailable
+	}
+	record, err := db.New(s.pool).RevokeAndGetBrowserSessionByAccessToken(ctx, db.RevokeAndGetBrowserSessionByAccessTokenParams{TokenHash: tokenHash, ClientID: clientID, Audience: audience, RevokedAt: timestamp(now)})
+	if err != nil {
+		return storedSession{}, mapPostgresNotFound(err)
+	}
+	return storedSessionFromDB(record), nil
 }
 
 func storedSessionFromDB(record db.BrowserSession) storedSession {
@@ -266,7 +326,7 @@ func storedSessionFromDB(record db.BrowserSession) storedSession {
 }
 
 func storedCodeFromDB(record db.OauthAuthorizationCode, consumedAt time.Time) storedAuthorizationCode {
-	return storedAuthorizationCode{CodeHash: record.CodeHash, EnterpriseID: record.EnterpriseID, UserID: record.EnterpriseUserID, ClientID: record.ClientID, RedirectURI: record.RedirectUri, Nonce: record.Nonce, CodeChallenge: record.CodeChallenge, CreatedAt: record.CreatedAt.Time, ExpiresAt: record.ExpiresAt.Time, ConsumedAt: &consumedAt}
+	return storedAuthorizationCode{CodeHash: record.CodeHash, EnterpriseID: record.EnterpriseID, UserID: record.EnterpriseUserID, ClientID: record.ClientID, RedirectURI: record.RedirectUri, Nonce: record.Nonce, CodeChallenge: record.CodeChallenge, CreatedAt: record.CreatedAt.Time, ExpiresAt: record.ExpiresAt.Time, ConsumedAt: &consumedAt, BrowserSessionIDHash: record.BrowserSessionIDHash}
 }
 
 func timestamp(value time.Time) pgtype.Timestamptz {

@@ -67,7 +67,7 @@ paths:
               $ref: '#/components/schemas/BrowserTokenRequest'
       responses:
         '200':
-          description: Short-lived ID token; no access or refresh token is issued.
+          description: ID token plus an opaque revocable BFF access token bound to the browser session; no refresh token is issued.
           content:
             application/json:
               schema:
@@ -76,7 +76,7 @@ paths:
     get:
       operationId: getBrowserSession
       summary: Resolve the current HttpOnly browser session and sealed organization snapshot.
-      security: [{browserSession: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}]
       responses:
         '200':
           description: Current browser identity as opaque verified references.
@@ -89,14 +89,14 @@ paths:
     post:
       operationId: logoutBrowserSession
       summary: Revoke the current browser session and clear its cookie.
-      security: [{browserSession: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}]
       responses:
         '204': {description: Session revoked.}
   /v1/authorization/decisions:
     post:
       operationId: decideAuthorization
       summary: Evaluate one exact capability on one business resource against the sealed organization policy snapshot of the verified session.
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -385,7 +385,7 @@ paths:
     post:
       operationId: createStepGrant
       summary: Issue an audited short-lived one-use grant bound to one exact operation (capability + parameter hash).
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -403,7 +403,7 @@ paths:
     post:
       operationId: verifyStepGrant
       summary: Verify an opaque Step Grant against one exact operation.
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -421,7 +421,7 @@ paths:
     post:
       operationId: appendAuditEvidence
       summary: Record a trusted first-party service request in the audit chain.
-      security: [{trustedServiceSecret: []}]
+      security: [{trustedServiceSecret: []}, {browserAccessToken: []}]
       parameters:
         - {name: Idempotency-Key, in: header, required: false, schema: {type: string, minLength: 16, maxLength: 128}, description: Stable operation-derived key; retries with the same canonical payload return the same audit_ref_id.}
       requestBody:
@@ -543,6 +543,10 @@ components:
       type: apiKey
       in: cookie
       name: nexus_browser_session
+    browserAccessToken:
+      type: http
+      scheme: bearer
+      description: Opaque browser BFF token bound to client, audience, enterprise, user, and browser session.
     caseTicket:
       type: apiKey
       in: header
@@ -1225,9 +1229,10 @@ components:
     BrowserTokenResponse:
       type: object
       additionalProperties: false
-      required: [id_token, token_type, expires_in]
+      required: [id_token, access_token, token_type, expires_in]
       properties:
         id_token: {type: string}
+        access_token: {type: string, description: Opaque revocable token; the server stores only its hash.}
         token_type: {type: string, enum: [Bearer]}
         expires_in: {type: integer, minimum: 1}
     AgentClientRef:

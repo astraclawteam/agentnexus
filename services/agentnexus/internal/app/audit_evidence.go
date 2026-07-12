@@ -49,9 +49,9 @@ type AuditEvidenceSink interface {
 	AppendAuditEvidence(context.Context, AuditEvidenceInput) (string, error)
 }
 
-// auditEvidenceHandler appends trusted first-party service audit evidence.
-// The service identity comes from the verified trusted context (service
-// credential source); the request body binds the Case Ticket lineage through
+// auditEvidenceHandler appends trusted first-party audit evidence. The
+// verified context may be a confidential service credential or a browser BFF
+// access token. The request body binds the Case Ticket lineage through
 // business_context_ref and carries NO tenant or actor identity.
 type auditEvidenceHandler struct {
 	enterpriseID string
@@ -82,7 +82,7 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_service"})
 		return
 	}
-	if trustedCtx.Source != trust.SourceServiceCredential || trustedCtx.Principal.TenantRef != h.enterpriseID {
+	if (trustedCtx.Source != trust.SourceServiceCredential && trustedCtx.Source != trust.SourceBrowserAccessToken) || trustedCtx.Principal.TenantRef != h.enterpriseID {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_service"})
 		return
 	}
@@ -133,6 +133,10 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if identity.TenantRef != h.enterpriseID || identity.PrincipalRef == "" || identity.TicketRef == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_ticket"})
+		return
+	}
+	if trustedCtx.Source == trust.SourceBrowserAccessToken && trustedCtx.Principal.PrincipalRef != identity.PrincipalRef {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_ticket"})
 		return
 	}

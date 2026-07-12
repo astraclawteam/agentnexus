@@ -35,6 +35,8 @@ var (
 	ErrGrantUnavailable        = errors.New("authorization grant store unavailable")
 	ErrLoginAttemptUnavailable = errors.New("OIDC login attempt store unavailable")
 	ErrLoginAttemptLimited     = errors.New("too many outstanding OIDC login attempts")
+	ErrInvalidAccessToken      = errors.New("invalid browser access token")
+	ErrAccessTokenUnavailable  = errors.New("browser access token store unavailable")
 )
 
 var (
@@ -54,6 +56,8 @@ type Store interface {
 	RevokeAndGetSession(context.Context, string, time.Time) (storedSession, error)
 	CreateAuthorizationCode(context.Context, storedAuthorizationCode) error
 	ExchangeAuthorizationCode(context.Context, exchangeRequest) (storedAuthorizationCode, error)
+	UseAccessToken(context.Context, string, string, string, time.Time) (storedAccessToken, error)
+	RevokeSessionByAccessToken(context.Context, string, string, string, time.Time) (storedSession, error)
 	CreateLoginAttempt(context.Context, storedLoginAttempt, LoginAttemptLimits) error
 	ConsumeLoginAttempt(context.Context, string, string, time.Time) (storedLoginAttempt, error)
 }
@@ -229,11 +233,11 @@ func (s *Service) RevokeSession(ctx context.Context, token string) error {
 }
 
 func (s *Service) IssueCode(ctx context.Context, input IssueCodeInput) (string, error) {
-	if s == nil || s.store == nil || input.EnterpriseID == "" || input.UserID == "" || !validBounded(input.ClientID, maxClientIDLength) || !validBounded(input.RedirectURI, maxRedirectURILength) || !validBounded(input.Nonce, maxNonceLength) || !validS256Challenge(input.CodeChallenge) {
+	if s == nil || s.store == nil || input.EnterpriseID == "" || input.UserID == "" || validateGeneratedSecret(input.BrowserSessionToken) != nil || !validBounded(input.ClientID, maxClientIDLength) || !validBounded(input.RedirectURI, maxRedirectURILength) || !validBounded(input.Nonce, maxNonceLength) || !validS256Challenge(input.CodeChallenge) {
 		return "", ErrInvalidInput
 	}
-	ok, err := s.store.EnterpriseUserBindingExists(ctx, input.EnterpriseID, input.UserID)
-	if err != nil || !ok {
+	session, err := s.store.UseSession(ctx, hashHex(input.BrowserSessionToken), s.now().UTC(), defaultIdleTimeout)
+	if err != nil || session.EnterpriseID != input.EnterpriseID || session.UserID != input.UserID {
 		return "", errInvalidBinding
 	}
 	code, err := s.generateSecret()
@@ -248,6 +252,7 @@ func (s *Service) IssueCode(ctx context.Context, input IssueCodeInput) (string, 
 		CodeHash: hashHex(code), EnterpriseID: input.EnterpriseID, UserID: input.UserID,
 		ClientID: input.ClientID, RedirectURI: input.RedirectURI, Nonce: input.Nonce,
 		CodeChallenge: input.CodeChallenge, CreatedAt: now, ExpiresAt: now.Add(defaultCodeTimeout),
+		BrowserSessionIDHash: hashHex(input.BrowserSessionToken),
 	}
 	if err := s.store.CreateAuthorizationCode(ctx, record); err != nil {
 		return "", err
@@ -260,9 +265,13 @@ func (s *Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (Ex
 		return ExchangeResult{}, ErrInvalidGrant
 	}
 	digest := sha256.Sum256([]byte(input.Verifier))
+	accessToken, err := s.generateSecret()
+	if err != nil || validateGeneratedSecret(accessToken) != nil {
+		return ExchangeResult{}, ErrGrantUnavailable
+	}
 	record, err := s.store.ExchangeAuthorizationCode(ctx, exchangeRequest{
 		CodeHash: hashHex(input.Code), VerifierDigest: digest, ClientID: input.ClientID,
-		RedirectURI: input.RedirectURI, Now: s.now().UTC(),
+		RedirectURI: input.RedirectURI, Now: s.now().UTC(), AccessTokenHash: hashHex(accessToken), Audience: input.ClientID,
 	})
 	if err != nil {
 		if errors.Is(err, errNotFound) {
@@ -270,7 +279,35 @@ func (s *Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (Ex
 		}
 		return ExchangeResult{}, ErrGrantUnavailable
 	}
-	return ExchangeResult{EnterpriseID: record.EnterpriseID, UserID: record.UserID, Nonce: record.Nonce}, nil
+	return ExchangeResult{EnterpriseID: record.EnterpriseID, UserID: record.UserID, Nonce: record.Nonce, AccessToken: accessToken, AccessTokenExpiresAt: record.AccessTokenExpiresAt, AccessTokenExpiresIn: record.AccessTokenExpiresAt.Sub(s.now().UTC())}, nil
+}
+
+func (s *Service) GetAccessTokenSession(ctx context.Context, token, clientID, audience string) (BrowserSession, error) {
+	if s == nil || s.store == nil || validateGeneratedSecret(token) != nil || !validBounded(clientID, maxClientIDLength) || !validBounded(audience, maxClientIDLength) {
+		return BrowserSession{}, ErrInvalidAccessToken
+	}
+	record, err := s.store.UseAccessToken(ctx, hashHex(token), clientID, audience, s.now().UTC())
+	if err != nil {
+		if errors.Is(err, errNotFound) {
+			return BrowserSession{}, ErrInvalidAccessToken
+		}
+		return BrowserSession{}, ErrAccessTokenUnavailable
+	}
+	return BrowserSession{EnterpriseID: record.EnterpriseID, UserID: record.UserID, CreatedAt: record.SessionCreatedAt, LastSeenAt: record.SessionLastSeenAt, IdleExpiresAt: record.SessionIdleExpiresAt, AbsoluteExpiresAt: record.SessionAbsoluteExpiresAt}, nil
+}
+
+func (s *Service) LogoutAccessTokenSession(ctx context.Context, token, clientID, audience string) (BrowserSession, error) {
+	if s == nil || s.store == nil || validateGeneratedSecret(token) != nil {
+		return BrowserSession{}, ErrInvalidAccessToken
+	}
+	record, err := s.store.RevokeSessionByAccessToken(ctx, hashHex(token), clientID, audience, s.now().UTC())
+	if err != nil {
+		if errors.Is(err, errNotFound) {
+			return BrowserSession{}, ErrInvalidAccessToken
+		}
+		return BrowserSession{}, ErrSessionUnavailable
+	}
+	return publicSession(record), nil
 }
 
 func randomOpaqueSecret() (string, error) {
@@ -319,3 +356,5 @@ func HashBrowserSessionToken(token string) string {
 	}
 	return hashHex(token)
 }
+
+func HashBrowserAccessToken(token string) string { return HashBrowserSessionToken(token) }
