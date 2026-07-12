@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
@@ -13,13 +14,18 @@ import (
 )
 
 type fakeAuditEvidenceDB struct {
+	beginMu  sync.Mutex
+	auditMu  sync.Mutex
 	tx       *fakeAuditEvidenceTx
 	txs      []*fakeAuditEvidenceTx
 	beginErr error
 	latest   string
+	events   map[string]db.AuditEvent
 }
 
 func (f *fakeAuditEvidenceDB) BeginAuditEvidenceTx(context.Context, pgx.TxOptions) (auditEvidenceTx, error) {
+	f.beginMu.Lock()
+	defer f.beginMu.Unlock()
 	if f.beginErr != nil {
 		return nil, f.beginErr
 	}
@@ -29,6 +35,9 @@ func (f *fakeAuditEvidenceDB) BeginAuditEvidenceTx(context.Context, pgx.TxOption
 		f.txs = append(f.txs, tx)
 	}
 	tx.database = f
+	if f.events == nil {
+		f.events = map[string]db.AuditEvent{}
+	}
 	tx.order = append(tx.order, "begin")
 	return tx, nil
 }
@@ -46,12 +55,17 @@ type fakeAuditEvidenceTx struct {
 	rollbackContextErr  error
 	rollbackHasDeadline bool
 	committed           bool
+	locked              bool
 }
 
 func (f *fakeAuditEvidenceTx) AcquireEnterpriseAuditLock(context.Context, string) (any, error) {
 	f.order = append(f.order, "lock")
 	if f.cancelOnLock != nil {
 		f.cancelOnLock()
+	}
+	if f.lockErr == nil {
+		f.database.auditMu.Lock()
+		f.locked = true
 	}
 	return nil, f.lockErr
 }
@@ -62,6 +76,15 @@ func (f *fakeAuditEvidenceTx) GetLatestEnterpriseAuditHash(context.Context, stri
 		return "", f.latestErr
 	}
 	return f.database.latest, nil
+}
+
+func (f *fakeAuditEvidenceTx) GetAuditEventByID(_ context.Context, p db.GetAuditEventByIDParams) (db.AuditEvent, error) {
+	f.order = append(f.order, "lookup")
+	row, ok := f.database.events[p.ID]
+	if !ok || row.EnterpriseID != p.EnterpriseID {
+		return db.AuditEvent{}, pgx.ErrNoRows
+	}
+	return row, nil
 }
 
 func (f *fakeAuditEvidenceTx) AppendAuditEvent(_ context.Context, params db.AppendAuditEventParams) (db.AuditEvent, error) {
@@ -93,14 +116,86 @@ func (f *fakeAuditEvidenceTx) Commit(context.Context) error {
 	if f.commitErr == nil {
 		f.committed = true
 		f.database.latest = f.params.EventHash
+		f.database.events[f.params.ID] = db.AuditEvent{ID: f.params.ID, EnterpriseID: f.params.EnterpriseID, CaseTicketID: f.params.CaseTicketID, ActorUserID: f.params.ActorUserID, ResourceType: f.params.ResourceType, ResourceID: f.params.ResourceID, Action: f.params.Action, Decision: f.params.Decision, InputHash: f.params.InputHash, EvidencePointer: f.params.EvidencePointer, PrevHash: f.params.PrevHash, EventHash: f.params.EventHash}
+	}
+	if f.locked {
+		f.database.auditMu.Unlock()
+		f.locked = false
 	}
 	return f.commitErr
+}
+
+func TestPostgresAuditEvidenceIdempotencyReturnsOneSemanticEvent(t *testing.T) {
+	database := &fakeAuditEvidenceDB{}
+	sink := newPostgresAuditEvidenceSinkWithDB(database, bytes.NewReader(make([]byte, 18)))
+	input := validAuditEvidenceInput("pol-idempotent")
+	input.IdempotencyKey = "operation-audit-key-0001"
+	first, err := sink.AppendAuditEvidence(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sink.AppendAuditEvidence(context.Background(), input)
+	if err != nil || second != first {
+		t.Fatalf("first=%q second=%q err=%v", first, second, err)
+	}
+	if len(database.events) != 1 || len(database.txs) != 2 {
+		t.Fatalf("events=%d txs=%d", len(database.events), len(database.txs))
+	}
+	assertAuditEvidenceOrder(t, database.txs[0], "begin,lock,lookup,previous,append,commit,rollback")
+	assertAuditEvidenceOrder(t, database.txs[1], "begin,lock,lookup,rollback")
+	input.ResourceID = "different"
+	if _, err := sink.AppendAuditEvidence(context.Background(), input); err == nil {
+		t.Fatal("idempotency payload substitution accepted")
+	}
+}
+
+func TestPostgresAuditEvidenceConcurrentSameKeyReturnsOneSemanticEvent(t *testing.T) {
+	database := &fakeAuditEvidenceDB{}
+	sink := newPostgresAuditEvidenceSinkWithDB(database, bytes.NewReader(make([]byte, 18)))
+	input := validAuditEvidenceInput("pol-concurrent")
+	input.IdempotencyKey = "operation-audit-concurrent-0001"
+	const workers = 8
+	refs := make(chan string, workers)
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ref, err := sink.AppendAuditEvidence(context.Background(), input)
+			refs <- ref
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(refs)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := ""
+	for ref := range refs {
+		if first == "" {
+			first = ref
+		} else if ref != first {
+			t.Fatalf("refs differ: %q != %q", ref, first)
+		}
+	}
+	if len(database.events) != 1 {
+		t.Fatalf("semantic events=%d", len(database.events))
+	}
 }
 
 func (f *fakeAuditEvidenceTx) Rollback(ctx context.Context) error {
 	f.order = append(f.order, "rollback")
 	f.rollbackContextErr = ctx.Err()
 	_, f.rollbackHasDeadline = ctx.Deadline()
+	if f.locked {
+		f.database.auditMu.Unlock()
+		f.locked = false
+	}
 	if f.committed && f.rollbackErr == nil {
 		return pgx.ErrTxClosed
 	}
@@ -129,7 +224,7 @@ func TestPostgresAuditEvidencePersistsRequestedLineageInSerializedTransaction(t 
 	if id == "" || tx.params.CaseTicketID.String != "case-internal" || tx.params.ResourceType.String != "dream_policy" || tx.params.ResourceID.String != "pol-1" || tx.params.Action != "dream_policy_create_requested" || tx.params.Decision != "requested" || tx.params.PrevHash.String != "sha256:prev" {
 		t.Fatalf("id=%q params=%+v", id, tx.params)
 	}
-	const wantInputHash = "sha256:bcfc24af76cbd804add2a4f9216879a3662113625d6cf4f902246bbf61cde229"
+	const wantInputHash = "sha256:f411a429b99c0104547bd80c18a1487876b61232114545ebed53748336df7386"
 	if tx.params.InputHash.String != wantInputHash {
 		t.Fatalf("input hash=%q want=%q", tx.params.InputHash.String, wantInputHash)
 	}

@@ -32,14 +32,15 @@ const (
 func ValidAuditEvidenceAction(action AuditEvidenceAction) bool { return audit.ValidAction(action) }
 
 type AuditEvidenceInput struct {
-	EnterpriseID string
-	ActorUserID  string
-	CaseTicketID string
-	Action       AuditEvidenceAction
-	ResourceType string
-	ResourceID   string
-	TraceID      string
-	Details      map[string]any
+	IdempotencyKey string
+	EnterpriseID   string
+	ActorUserID    string
+	CaseTicketID   string
+	Action         AuditEvidenceAction
+	ResourceType   string
+	ResourceID     string
+	TraceID        string
+	Details        map[string]any
 }
 
 type AuditEvidenceSink interface {
@@ -83,6 +84,19 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_service"})
 		return
 	}
+	keys := r.Header.Values("Idempotency-Key")
+	if len(keys) > 1 || (len(keys) == 1 && !boundedText(keys[0], 128, false)) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_idempotency_key"})
+		return
+	}
+	idempotencyKey := ""
+	if len(keys) == 1 {
+		idempotencyKey = strings.TrimSpace(keys[0])
+		if utf8.RuneCountInString(idempotencyKey) < 16 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_idempotency_key"})
+			return
+		}
+	}
 	var request struct {
 		RequestID          string              `json:"request_id"`
 		BusinessContextRef string              `json:"business_context_ref"`
@@ -120,7 +134,7 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_ticket"})
 		return
 	}
-	id, err := h.sink.AppendAuditEvidence(r.Context(), AuditEvidenceInput{EnterpriseID: identity.TenantRef, ActorUserID: identity.PrincipalRef, CaseTicketID: identity.TicketRef, Action: request.Action, ResourceType: request.ResourceType, ResourceID: request.ResourceID, TraceID: request.TraceID, Details: request.Details})
+	id, err := h.sink.AppendAuditEvidence(r.Context(), AuditEvidenceInput{IdempotencyKey: idempotencyKey, EnterpriseID: identity.TenantRef, ActorUserID: identity.PrincipalRef, CaseTicketID: identity.TicketRef, Action: request.Action, ResourceType: request.ResourceType, ResourceID: request.ResourceID, TraceID: request.TraceID, Details: request.Details})
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit_unavailable"})
 		return

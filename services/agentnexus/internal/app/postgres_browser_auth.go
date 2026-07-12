@@ -169,6 +169,7 @@ type auditEvidenceTx interface {
 	GetLatestEnterpriseAuditHash(context.Context, string) (string, error)
 	GetLatestSignedEnterpriseAuditHash(context.Context, string) (string, error)
 	AllocateNextTenantSeq(context.Context, string) (int64, error)
+	GetAuditEventByID(context.Context, db.GetAuditEventByIDParams) (db.AuditEvent, error)
 	AppendAuditEvent(context.Context, db.AppendAuditEventParams) (db.AuditEvent, error)
 	AppendSignedAuditEvent(context.Context, db.AppendSignedAuditEventParams) (db.AuditEvent, error)
 	Commit(context.Context) error
@@ -229,7 +230,7 @@ func newPostgresAuditEvidenceSinkWithDB(database auditEvidenceTxBeginner, random
 }
 
 func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, input AuditEvidenceInput) (id string, resultErr error) {
-	if s == nil || s.evidenceDB == nil || s.random == nil || input.EnterpriseID == "" || input.ActorUserID == "" || input.CaseTicketID == "" || input.ResourceType == "" || input.ResourceID == "" || !ValidAuditEvidenceAction(input.Action) {
+	if s == nil || s.evidenceDB == nil || s.random == nil || input.EnterpriseID == "" || input.ActorUserID == "" || input.CaseTicketID == "" || input.ResourceType == "" || input.ResourceID == "" || !ValidAuditEvidenceAction(input.Action) || (input.IdempotencyKey != "" && (len(input.IdempotencyKey) < 16 || len(input.IdempotencyKey) > 128)) {
 		return "", errors.New("invalid audit evidence")
 	}
 	tx, err := s.evidenceDB.BeginAuditEvidenceTx(ctx, pgx.TxOptions{})
@@ -246,24 +247,54 @@ func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, inpu
 	if _, err := tx.AcquireEnterpriseAuditLock(ctx, input.EnterpriseID); err != nil {
 		return "", err
 	}
-	previous, err := tx.GetLatestEnterpriseAuditHash(ctx, input.EnterpriseID)
-	if err != nil {
-		return "", err
-	}
-	id, err = randomAuditID(s.random)
-	if err != nil {
-		return "", err
-	}
 	details, err := json.Marshal(input.Details)
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(details)
+	canonical, err := json.Marshal(struct {
+		EnterpriseID string              `json:"enterprise_id"`
+		ActorUserID  string              `json:"actor_user_id"`
+		CaseTicketID string              `json:"case_ticket_id"`
+		Action       AuditEvidenceAction `json:"action"`
+		ResourceType string              `json:"resource_type"`
+		ResourceID   string              `json:"resource_id"`
+		TraceID      string              `json:"trace_id"`
+		Details      json.RawMessage     `json:"details"`
+	}{input.EnterpriseID, input.ActorUserID, input.CaseTicketID, input.Action, input.ResourceType, input.ResourceID, input.TraceID, details})
+	if err != nil {
+		return "", err
+	}
+	payloadSum := sha256.Sum256(canonical)
+	inputHash := "sha256:" + hex.EncodeToString(payloadSum[:])
+	if input.IdempotencyKey != "" {
+		keySum := sha256.Sum256([]byte(input.EnterpriseID + "\x00" + input.IdempotencyKey))
+		id = "aud_" + hex.EncodeToString(keySum[:16])
+		existing, existingErr := tx.GetAuditEventByID(ctx, db.GetAuditEventByIDParams{EnterpriseID: input.EnterpriseID, ID: id})
+		if existingErr == nil {
+			if existing.InputHash.String != inputHash || existing.ActorUserID.String != input.ActorUserID || existing.CaseTicketID.String != input.CaseTicketID || existing.ResourceType.String != input.ResourceType || existing.ResourceID.String != input.ResourceID || existing.Action != string(input.Action) || existing.EvidencePointer.String != input.TraceID {
+				return "", errors.New("audit idempotency payload mismatch")
+			}
+			return id, nil
+		}
+		if !errors.Is(existingErr, pgx.ErrNoRows) {
+			return "", existingErr
+		}
+	}
+	previous, err := tx.GetLatestEnterpriseAuditHash(ctx, input.EnterpriseID)
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		id, err = randomAuditID(s.random)
+		if err != nil {
+			return "", err
+		}
+	}
 	decision := "recorded"
 	if input.Action == AuditActionDreamPolicyCreateRequested {
 		decision = "requested"
 	}
-	event := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: input.EnterpriseID, CaseTicketID: input.CaseTicketID, ActorUserID: input.ActorUserID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: string(input.Action), Decision: decision, InputHash: "sha256:" + hex.EncodeToString(sum[:]), EvidencePointer: input.TraceID}, previous)
+	event := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: input.EnterpriseID, CaseTicketID: input.CaseTicketID, ActorUserID: input.ActorUserID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: string(input.Action), Decision: decision, InputHash: inputHash, EvidencePointer: input.TraceID}, previous)
 	if _, err := tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, CaseTicketID: textValue(event.CaseTicketID), ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, InputHash: textValue(event.InputHash), EvidencePointer: textValue(event.EvidencePointer), PrevHash: textValue(event.PrevHash), EventHash: event.EventHash}); err != nil {
 		return "", err
 	}

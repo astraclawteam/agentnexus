@@ -422,6 +422,8 @@ paths:
       operationId: appendAuditEvidence
       summary: Record a trusted first-party service request in the audit chain.
       security: [{trustedServiceSecret: []}]
+      parameters:
+        - {name: Idempotency-Key, in: header, required: false, schema: {type: string, minLength: 16, maxLength: 128}, description: Stable operation-derived key; retries with the same canonical payload return the same audit_ref_id.}
       requestBody:
         required: true
         content:

@@ -106,6 +106,9 @@ SELECT COUNT(*)::BIGINT AS signed_count
 FROM audit_events
 WHERE enterprise_id = $1 AND tenant_seq IS NOT NULL;
 
+-- name: GetAuditEventByID :one
+SELECT * FROM audit_events WHERE enterprise_id=$1 AND id=$2;
+
 -- name: AcquireEnterpriseAuditLock :one
 SELECT pg_advisory_xact_lock(hashtextextended($1, 1));
 

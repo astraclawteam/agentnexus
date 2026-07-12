@@ -62,6 +62,7 @@ func postAuditEvidence(t *testing.T, router http.Handler, body io.Reader, withBa
 	req := httptest.NewRequest(http.MethodPost, "/v1/audit/evidence", body)
 	req.Header.Set("Content-Type", "application/json")
 	if withBasic {
+		req.Header.Set("Idempotency-Key", "audit-handler-key-0001")
 		req.SetBasicAuth("agentatlas", "secret")
 	}
 	rr := httptest.NewRecorder()
@@ -84,7 +85,7 @@ func TestAuditEvidenceRecordsDreamPolicyCreateRequest(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response["audit_ref_id"] != "audit-1" || sink.input.Action != AuditActionDreamPolicyCreateRequested || sink.input.EnterpriseID != "ent-1" || sink.input.ActorUserID != "u-1" || sink.input.CaseTicketID != "case-1" || sink.input.ResourceType != "dream_policy" || sink.input.ResourceID != "pol-1" {
+	if response["audit_ref_id"] != "audit-1" || sink.input.IdempotencyKey != "audit-handler-key-0001" || sink.input.Action != AuditActionDreamPolicyCreateRequested || sink.input.EnterpriseID != "ent-1" || sink.input.ActorUserID != "u-1" || sink.input.CaseTicketID != "case-1" || sink.input.ResourceType != "dream_policy" || sink.input.ResourceID != "pol-1" {
 		t.Fatalf("response=%v input=%+v", response, sink.input)
 	}
 }
