@@ -14,11 +14,27 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 )
 
-type recordingAuditEvidenceSink struct{ input AuditEvidenceInput }
+type recordingAuditEvidenceSink struct {
+	input AuditEvidenceInput
+	err   error
+}
 
 func (s *recordingAuditEvidenceSink) AppendAuditEvidence(_ context.Context, input AuditEvidenceInput) (string, error) {
 	s.input = input
-	return "audit-1", nil
+	return "audit-1", s.err
+}
+
+func TestAuditEvidenceMapsCanonicalPayloadMismatchToConflict(t *testing.T) {
+	sink := &recordingAuditEvidenceSink{err: ErrAuditIdempotencyConflict}
+	h, _ := newAuditEvidenceHandler("ent-1", &stubTicketActors{actor: AuthorizationActor{EnterpriseID: "ent-1", UserID: "u-1", CaseTicketID: "case-1"}}, sink, stubServiceAuthenticator{allow: true})
+	req := httptest.NewRequest(http.MethodPost, "/v1/audit/evidence", strings.NewReader(`{"ticket_id":"opaque-ticket","enterprise_id":"ent-1","action":"dream_policy_created","resource_type":"dream_policy","resource_id":"pol-1"}`))
+	req.Header.Set("Idempotency-Key", "audit-conflict-key-0001")
+	req.SetBasicAuth("agentatlas", "secret")
+	rr := httptest.NewRecorder()
+	h.append(rr, req)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "idempotency_conflict") {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
 }
 
 type stubServiceCredentials struct {

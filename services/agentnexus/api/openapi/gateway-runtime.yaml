@@ -437,6 +437,7 @@ paths:
               schema: {$ref: '#/components/schemas/AuditEvidenceResponse'}
         '400': {description: Invalid action, resource binding, or bounded details.}
         '401': {description: Invalid service credentials or Case Ticket.}
+        '409': {description: Idempotency-Key was already used with a different canonical audit payload.}
         '503': {description: Ticket or audit persistence unavailable.}
   /v1/agent-clients:
     post:

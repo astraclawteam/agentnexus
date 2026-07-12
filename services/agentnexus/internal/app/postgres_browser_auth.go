@@ -272,7 +272,7 @@ func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, inpu
 		existing, existingErr := tx.GetAuditEventByID(ctx, db.GetAuditEventByIDParams{EnterpriseID: input.EnterpriseID, ID: id})
 		if existingErr == nil {
 			if existing.InputHash.String != inputHash || existing.ActorUserID.String != input.ActorUserID || existing.CaseTicketID.String != input.CaseTicketID || existing.ResourceType.String != input.ResourceType || existing.ResourceID.String != input.ResourceID || existing.Action != string(input.Action) || existing.EvidencePointer.String != input.TraceID {
-				return "", errors.New("audit idempotency payload mismatch")
+				return "", ErrAuditIdempotencyConflict
 			}
 			return id, nil
 		}

@@ -15,6 +15,8 @@ import (
 
 type AuditEvidenceAction = audit.Action
 
+var ErrAuditIdempotencyConflict = errors.New("audit idempotency payload mismatch")
+
 const (
 	AuditActionWorkflowDraftCreated       = audit.ActionWorkflowDraftCreated
 	AuditActionWorkflowVersionPublished   = audit.ActionWorkflowVersionPublished
@@ -135,6 +137,10 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, err := h.sink.AppendAuditEvidence(r.Context(), AuditEvidenceInput{IdempotencyKey: idempotencyKey, EnterpriseID: identity.TenantRef, ActorUserID: identity.PrincipalRef, CaseTicketID: identity.TicketRef, Action: request.Action, ResourceType: request.ResourceType, ResourceID: request.ResourceID, TraceID: request.TraceID, Details: request.Details})
+	if errors.Is(err, ErrAuditIdempotencyConflict) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "idempotency_conflict"})
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit_unavailable"})
 		return
