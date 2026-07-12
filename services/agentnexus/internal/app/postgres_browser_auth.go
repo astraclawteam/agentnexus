@@ -525,7 +525,7 @@ func (s *PostgresBrowserAuditSink) LogoutBrowserAccessToken(ctx context.Context,
 		return browserauth.BrowserSession{}, browserauth.ErrInvalidAccessToken
 	}
 	now := time.Now().UTC()
-	record, err := db.New(s.pool).RevokeAndGetBrowserSessionByAccessToken(ctx, db.RevokeAndGetBrowserSessionByAccessTokenParams{TokenHash: tokenHash, ClientID: "agentatlas", Audience: "agentatlas", RevokedAt: pgtype.Timestamptz{Time: now, Valid: true}})
+	record, err := db.New(s.pool).RevokeAndGetBrowserSessionByAccessToken(ctx, db.RevokeAndGetBrowserSessionByAccessTokenParams{TokenHash: tokenHash, EnterpriseID: input.EnterpriseID, ClientID: "agentatlas", Audience: "agentatlas", RevokedAt: pgtype.Timestamptz{Time: now, Valid: true}})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return browserauth.BrowserSession{}, browserauth.ErrInvalidAccessToken
 	}

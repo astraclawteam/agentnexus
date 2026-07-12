@@ -1010,7 +1010,7 @@ func (m *memoryAudit) LogoutBrowserAccessToken(ctx context.Context, token string
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, m.sawDeadline = ctx.Deadline()
-	session, err := m.sessions.LogoutAccessTokenSession(ctx, token, "agentatlas", "agentatlas")
+	session, err := m.sessions.LogoutAccessTokenSession(ctx, token, "agentatlas", "agentatlas", event.EnterpriseID)
 	if err != nil {
 		return browserauth.BrowserSession{}, err
 	}

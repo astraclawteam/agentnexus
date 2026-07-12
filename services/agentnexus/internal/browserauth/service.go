@@ -56,8 +56,8 @@ type Store interface {
 	RevokeAndGetSession(context.Context, string, time.Time) (storedSession, error)
 	CreateAuthorizationCode(context.Context, storedAuthorizationCode) error
 	ExchangeAuthorizationCode(context.Context, exchangeRequest) (storedAuthorizationCode, error)
-	UseAccessToken(context.Context, string, string, string, time.Time) (storedAccessToken, error)
-	RevokeSessionByAccessToken(context.Context, string, string, string, time.Time) (storedSession, error)
+	UseAccessToken(context.Context, string, string, string, string, time.Time) (storedAccessToken, error)
+	RevokeSessionByAccessToken(context.Context, string, string, string, string, time.Time) (storedSession, error)
 	CreateLoginAttempt(context.Context, storedLoginAttempt, LoginAttemptLimits) error
 	ConsumeLoginAttempt(context.Context, string, string, time.Time) (storedLoginAttempt, error)
 }
@@ -282,11 +282,11 @@ func (s *Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (Ex
 	return ExchangeResult{EnterpriseID: record.EnterpriseID, UserID: record.UserID, Nonce: record.Nonce, AccessToken: accessToken, AccessTokenExpiresAt: record.AccessTokenExpiresAt, AccessTokenExpiresIn: record.AccessTokenExpiresAt.Sub(s.now().UTC())}, nil
 }
 
-func (s *Service) GetAccessTokenSession(ctx context.Context, token, clientID, audience string) (BrowserSession, error) {
-	if s == nil || s.store == nil || validateGeneratedSecret(token) != nil || !validBounded(clientID, maxClientIDLength) || !validBounded(audience, maxClientIDLength) {
+func (s *Service) GetAccessTokenSession(ctx context.Context, token, clientID, audience, enterpriseID string) (BrowserSession, error) {
+	if s == nil || s.store == nil || validateGeneratedSecret(token) != nil || !validBounded(clientID, maxClientIDLength) || !validBounded(audience, maxClientIDLength) || enterpriseID == "" {
 		return BrowserSession{}, ErrInvalidAccessToken
 	}
-	record, err := s.store.UseAccessToken(ctx, hashHex(token), clientID, audience, s.now().UTC())
+	record, err := s.store.UseAccessToken(ctx, hashHex(token), clientID, audience, enterpriseID, s.now().UTC())
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			return BrowserSession{}, ErrInvalidAccessToken
@@ -296,11 +296,11 @@ func (s *Service) GetAccessTokenSession(ctx context.Context, token, clientID, au
 	return BrowserSession{EnterpriseID: record.EnterpriseID, UserID: record.UserID, CreatedAt: record.SessionCreatedAt, LastSeenAt: record.SessionLastSeenAt, IdleExpiresAt: record.SessionIdleExpiresAt, AbsoluteExpiresAt: record.SessionAbsoluteExpiresAt}, nil
 }
 
-func (s *Service) LogoutAccessTokenSession(ctx context.Context, token, clientID, audience string) (BrowserSession, error) {
+func (s *Service) LogoutAccessTokenSession(ctx context.Context, token, clientID, audience, enterpriseID string) (BrowserSession, error) {
 	if s == nil || s.store == nil || validateGeneratedSecret(token) != nil {
 		return BrowserSession{}, ErrInvalidAccessToken
 	}
-	record, err := s.store.RevokeSessionByAccessToken(ctx, hashHex(token), clientID, audience, s.now().UTC())
+	record, err := s.store.RevokeSessionByAccessToken(ctx, hashHex(token), clientID, audience, enterpriseID, s.now().UTC())
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			return BrowserSession{}, ErrInvalidAccessToken

@@ -75,6 +75,7 @@ SELECT t.token_hash, t.browser_session_id_hash, t.enterprise_id, t.enterprise_us
 FROM browser_access_tokens AS t
 JOIN browser_sessions AS s ON s.id_hash = t.browser_session_id_hash
 WHERE t.token_hash = sqlc.arg(token_hash)
+  AND t.enterprise_id = sqlc.arg(enterprise_id)
   AND t.client_id = sqlc.arg(client_id)
   AND t.audience = sqlc.arg(audience)
   AND t.revoked_at IS NULL
@@ -88,6 +89,7 @@ UPDATE browser_sessions AS s
 SET revoked_at = COALESCE(s.revoked_at, sqlc.arg(revoked_at))
 FROM browser_access_tokens AS t
 WHERE t.token_hash = sqlc.arg(token_hash)
+  AND t.enterprise_id = sqlc.arg(enterprise_id)
   AND t.browser_session_id_hash = s.id_hash
   AND t.client_id = sqlc.arg(client_id)
   AND t.audience = sqlc.arg(audience)

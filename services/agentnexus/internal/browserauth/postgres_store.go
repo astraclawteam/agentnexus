@@ -272,7 +272,7 @@ func (s *PostgresStore) ExchangeAuthorizationCode(ctx context.Context, request e
 	return result, nil
 }
 
-func (s *PostgresStore) UseAccessToken(ctx context.Context, tokenHash, clientID, audience string, now time.Time) (storedAccessToken, error) {
+func (s *PostgresStore) UseAccessToken(ctx context.Context, tokenHash, clientID, audience, enterpriseID string, now time.Time) (storedAccessToken, error) {
 	if s == nil || s.pool == nil {
 		return storedAccessToken{}, errStoreUnavailable
 	}
@@ -282,7 +282,7 @@ func (s *PostgresStore) UseAccessToken(ctx context.Context, tokenHash, clientID,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	queries := db.New(tx)
-	record, err := queries.GetActiveBrowserAccessToken(ctx, db.GetActiveBrowserAccessTokenParams{TokenHash: tokenHash, ClientID: clientID, Audience: audience, Now: timestamp(now)})
+	record, err := queries.GetActiveBrowserAccessToken(ctx, db.GetActiveBrowserAccessTokenParams{TokenHash: tokenHash, EnterpriseID: enterpriseID, ClientID: clientID, Audience: audience, Now: timestamp(now)})
 	if err != nil {
 		return storedAccessToken{}, mapPostgresNotFound(err)
 	}
@@ -305,11 +305,11 @@ func (s *PostgresStore) UseAccessToken(ctx context.Context, tokenHash, clientID,
 	return result, nil
 }
 
-func (s *PostgresStore) RevokeSessionByAccessToken(ctx context.Context, tokenHash, clientID, audience string, now time.Time) (storedSession, error) {
+func (s *PostgresStore) RevokeSessionByAccessToken(ctx context.Context, tokenHash, clientID, audience, enterpriseID string, now time.Time) (storedSession, error) {
 	if s == nil || s.pool == nil {
 		return storedSession{}, errStoreUnavailable
 	}
-	record, err := db.New(s.pool).RevokeAndGetBrowserSessionByAccessToken(ctx, db.RevokeAndGetBrowserSessionByAccessTokenParams{TokenHash: tokenHash, ClientID: clientID, Audience: audience, RevokedAt: timestamp(now)})
+	record, err := db.New(s.pool).RevokeAndGetBrowserSessionByAccessToken(ctx, db.RevokeAndGetBrowserSessionByAccessTokenParams{TokenHash: tokenHash, EnterpriseID: enterpriseID, ClientID: clientID, Audience: audience, RevokedAt: timestamp(now)})
 	if err != nil {
 		return storedSession{}, mapPostgresNotFound(err)
 	}

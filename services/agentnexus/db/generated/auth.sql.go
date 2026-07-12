@@ -469,20 +469,22 @@ SELECT t.token_hash, t.browser_session_id_hash, t.enterprise_id, t.enterprise_us
 FROM browser_access_tokens AS t
 JOIN browser_sessions AS s ON s.id_hash = t.browser_session_id_hash
 WHERE t.token_hash = $1
-  AND t.client_id = $2
-  AND t.audience = $3
+  AND t.enterprise_id = $2
+  AND t.client_id = $3
+  AND t.audience = $4
   AND t.revoked_at IS NULL
   AND s.revoked_at IS NULL
-  AND t.expires_at > $4
-  AND s.idle_expires_at > $4
-  AND s.absolute_expires_at > $4
+  AND t.expires_at > $5
+  AND s.idle_expires_at > $5
+  AND s.absolute_expires_at > $5
 `
 
 type GetActiveBrowserAccessTokenParams struct {
-	TokenHash string
-	ClientID  string
-	Audience  string
-	Now       pgtype.Timestamptz
+	TokenHash    string
+	EnterpriseID string
+	ClientID     string
+	Audience     string
+	Now          pgtype.Timestamptz
 }
 
 type GetActiveBrowserAccessTokenRow struct {
@@ -504,6 +506,7 @@ type GetActiveBrowserAccessTokenRow struct {
 func (q *Queries) GetActiveBrowserAccessToken(ctx context.Context, arg GetActiveBrowserAccessTokenParams) (GetActiveBrowserAccessTokenRow, error) {
 	row := q.db.QueryRow(ctx, getActiveBrowserAccessToken,
 		arg.TokenHash,
+		arg.EnterpriseID,
 		arg.ClientID,
 		arg.Audience,
 		arg.Now,
@@ -829,9 +832,10 @@ UPDATE browser_sessions AS s
 SET revoked_at = COALESCE(s.revoked_at, $1)
 FROM browser_access_tokens AS t
 WHERE t.token_hash = $2
+  AND t.enterprise_id = $3
   AND t.browser_session_id_hash = s.id_hash
-  AND t.client_id = $3
-  AND t.audience = $4
+  AND t.client_id = $4
+  AND t.audience = $5
   AND t.revoked_at IS NULL
   AND t.expires_at > $1
   AND (s.revoked_at IS NOT NULL OR (
@@ -843,16 +847,18 @@ RETURNING s.id_hash, s.enterprise_id, s.enterprise_user_id, s.created_at, s.last
 `
 
 type RevokeAndGetBrowserSessionByAccessTokenParams struct {
-	RevokedAt pgtype.Timestamptz
-	TokenHash string
-	ClientID  string
-	Audience  string
+	RevokedAt    pgtype.Timestamptz
+	TokenHash    string
+	EnterpriseID string
+	ClientID     string
+	Audience     string
 }
 
 func (q *Queries) RevokeAndGetBrowserSessionByAccessToken(ctx context.Context, arg RevokeAndGetBrowserSessionByAccessTokenParams) (BrowserSession, error) {
 	row := q.db.QueryRow(ctx, revokeAndGetBrowserSessionByAccessToken,
 		arg.RevokedAt,
 		arg.TokenHash,
+		arg.EnterpriseID,
 		arg.ClientID,
 		arg.Audience,
 	)

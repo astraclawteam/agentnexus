@@ -348,7 +348,7 @@ func (s *MemoryStore) ExchangeAuthorizationCode(ctx context.Context, request exc
 	return record, nil
 }
 
-func (s *MemoryStore) UseAccessToken(ctx context.Context, tokenHash, clientID, audience string, now time.Time) (storedAccessToken, error) {
+func (s *MemoryStore) UseAccessToken(ctx context.Context, tokenHash, clientID, audience, enterpriseID string, now time.Time) (storedAccessToken, error) {
 	if err := ctx.Err(); err != nil {
 		return storedAccessToken{}, err
 	}
@@ -359,7 +359,7 @@ func (s *MemoryStore) UseAccessToken(ctx context.Context, tokenHash, clientID, a
 	}
 	record, ok := s.accessTokens[tokenHash]
 	session, sessionOK := s.sessions[record.BrowserSessionIDHash]
-	if !ok || !sessionOK || record.RevokedAt != nil || session.RevokedAt != nil || record.ClientID != clientID || record.Audience != audience || record.EnterpriseID != session.EnterpriseID || record.UserID != session.UserID || !now.Before(record.ExpiresAt) || !now.Before(session.IdleExpiresAt) || !now.Before(session.AbsoluteExpiresAt) {
+	if !ok || !sessionOK || record.RevokedAt != nil || session.RevokedAt != nil || record.ClientID != clientID || record.Audience != audience || record.EnterpriseID != enterpriseID || record.EnterpriseID != session.EnterpriseID || record.UserID != session.UserID || !now.Before(record.ExpiresAt) || !now.Before(session.IdleExpiresAt) || !now.Before(session.AbsoluteExpiresAt) {
 		return storedAccessToken{}, errNotFound
 	}
 	session.LastSeenAt = now
@@ -372,7 +372,7 @@ func (s *MemoryStore) UseAccessToken(ctx context.Context, tokenHash, clientID, a
 	return record, nil
 }
 
-func (s *MemoryStore) RevokeSessionByAccessToken(ctx context.Context, tokenHash, clientID, audience string, now time.Time) (storedSession, error) {
+func (s *MemoryStore) RevokeSessionByAccessToken(ctx context.Context, tokenHash, clientID, audience, enterpriseID string, now time.Time) (storedSession, error) {
 	if err := ctx.Err(); err != nil {
 		return storedSession{}, err
 	}
@@ -383,7 +383,7 @@ func (s *MemoryStore) RevokeSessionByAccessToken(ctx context.Context, tokenHash,
 	}
 	token, ok := s.accessTokens[tokenHash]
 	session, sessionOK := s.sessions[token.BrowserSessionIDHash]
-	if !ok || !sessionOK || token.ClientID != clientID || token.Audience != audience || token.RevokedAt != nil || !now.Before(token.ExpiresAt) || (session.RevokedAt == nil && (!now.Before(session.IdleExpiresAt) || !now.Before(session.AbsoluteExpiresAt))) {
+	if !ok || !sessionOK || token.ClientID != clientID || token.Audience != audience || token.EnterpriseID != enterpriseID || token.RevokedAt != nil || !now.Before(token.ExpiresAt) || (session.RevokedAt == nil && (!now.Before(session.IdleExpiresAt) || !now.Before(session.AbsoluteExpiresAt))) {
 		return storedSession{}, errNotFound
 	}
 	if session.RevokedAt == nil {

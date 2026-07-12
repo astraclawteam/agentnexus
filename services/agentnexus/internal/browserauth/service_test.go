@@ -212,26 +212,26 @@ func TestExchangeCodeIssuesSessionBoundOpaqueAccessToken(t *testing.T) {
 	if strings.Contains(fmt.Sprintf("%+v", store.accessTokenSnapshot()), result.AccessToken) {
 		t.Fatal("raw access token persisted")
 	}
-	resolved, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas")
+	resolved, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1")
 	if err != nil || resolved.EnterpriseID != "ent-1" || resolved.UserID != "user-1" {
 		t.Fatalf("resolved=%+v err=%v", resolved, err)
 	}
 	clock := &mutableClock{now: fixedNow.Add(7 * time.Hour)}
 	svc.now = clock.Now
-	resolved, err = svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas")
+	resolved, err = svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1")
 	if err != nil || !resolved.IdleExpiresAt.Equal(fixedNow.Add(15*time.Hour)) {
 		t.Fatalf("bearer idle slide=%s err=%v", resolved.IdleExpiresAt, err)
 	}
 	if err := svc.RevokeSession(context.Background(), sessionToken); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas"); !errors.Is(err, ErrInvalidAccessToken) {
+	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1"); !errors.Is(err, ErrInvalidAccessToken) {
 		t.Fatalf("revoked session token err=%v", err)
 	}
 }
 
 func TestAccessTokenFailsClosedForWrongBindingAndExpiry(t *testing.T) {
-	svc, _, clock := newTestService(t)
+	svc, store, clock := newTestService(t)
 	sessionToken, _, err := svc.CreateSession(context.Background(), CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
 	if err != nil {
 		t.Fatal(err)
@@ -246,17 +246,26 @@ func TestAccessTokenFailsClosedForWrongBindingAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, binding := range [][2]string{{"other", "agentatlas"}, {"agentatlas", "other"}} {
-		if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, binding[0], binding[1]); !errors.Is(err, ErrInvalidAccessToken) {
+	for _, binding := range [][3]string{{"other", "agentatlas", "ent-1"}, {"agentatlas", "other", "ent-1"}, {"agentatlas", "agentatlas", "ent-2"}} {
+		if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, binding[0], binding[1], binding[2]); !errors.Is(err, ErrInvalidAccessToken) {
 			t.Fatalf("binding=%v err=%v", binding, err)
 		}
 	}
+	if session := store.sessionSnapshot()[hashHex(sessionToken)]; !session.LastSeenAt.Equal(fixedNow) || session.RevokedAt != nil {
+		t.Fatalf("wrong tenant mutated session")
+	}
+	if _, err := svc.LogoutAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-2"); !errors.Is(err, ErrInvalidAccessToken) {
+		t.Fatalf("wrong tenant logout err=%v", err)
+	}
+	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1"); err != nil {
+		t.Fatalf("wrong tenant logout revoked session: %v", err)
+	}
 	clock.now = fixedNow.Add(8 * time.Hour)
-	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas"); !errors.Is(err, ErrInvalidAccessToken) {
+	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1"); !errors.Is(err, ErrInvalidAccessToken) {
 		t.Fatalf("idle expiry err=%v", err)
 	}
 	clock.now = result.AccessTokenExpiresAt
-	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas"); !errors.Is(err, ErrInvalidAccessToken) {
+	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1"); !errors.Is(err, ErrInvalidAccessToken) {
 		t.Fatalf("expiry err=%v", err)
 	}
 }

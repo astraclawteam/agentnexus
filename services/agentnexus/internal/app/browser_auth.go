@@ -38,11 +38,11 @@ const oidcBrowserCookieTTL = 24 * time.Hour
 
 type BrowserSessionService interface {
 	GetSession(context.Context, string) (browserauth.BrowserSession, error)
-	GetAccessTokenSession(context.Context, string, string, string) (browserauth.BrowserSession, error)
+	GetAccessTokenSession(context.Context, string, string, string, string) (browserauth.BrowserSession, error)
 	CreateSession(context.Context, browserauth.CreateSessionInput) (string, browserauth.BrowserSession, error)
 	RevokeSession(context.Context, string) error
 	LogoutSession(context.Context, string) (browserauth.BrowserSession, error)
-	LogoutAccessTokenSession(context.Context, string, string, string) (browserauth.BrowserSession, error)
+	LogoutAccessTokenSession(context.Context, string, string, string, string) (browserauth.BrowserSession, error)
 	IssueCode(context.Context, browserauth.IssueCodeInput) (string, error)
 	ExchangeCode(context.Context, browserauth.ExchangeCodeInput) (browserauth.ExchangeResult, error)
 	CreateLoginAttempt(context.Context, browserauth.CreateLoginAttemptInput) (string, string, browserauth.LoginAttempt, error)
@@ -105,7 +105,7 @@ type browserSessionResolver interface {
 }
 
 type browserAccessTokenResolver interface {
-	GetAccessTokenSession(context.Context, string, string, string) (browserauth.BrowserSession, error)
+	GetAccessTokenSession(context.Context, string, string, string, string) (browserauth.BrowserSession, error)
 }
 
 // browserSessionTrustVerifier adapts the browser session service onto the
@@ -123,10 +123,13 @@ func (v browserSessionTrustVerifier) VerifyBrowserSession(ctx context.Context, t
 	return trust.SessionIdentity{TenantRef: session.EnterpriseID, PrincipalRef: session.UserID, ExpiresAt: session.IdleExpiresAt}, nil
 }
 
-type browserAccessTokenTrustVerifier struct{ sessions browserAccessTokenResolver }
+type browserAccessTokenTrustVerifier struct {
+	sessions     browserAccessTokenResolver
+	enterpriseID string
+}
 
 func (v browserAccessTokenTrustVerifier) VerifyBrowserAccessToken(ctx context.Context, token string) (trust.SessionIdentity, error) {
-	session, err := v.sessions.GetAccessTokenSession(ctx, token, "agentatlas", "agentatlas")
+	session, err := v.sessions.GetAccessTokenSession(ctx, token, "agentatlas", "agentatlas", v.enterpriseID)
 	if errors.Is(err, browserauth.ErrAccessTokenUnavailable) {
 		return trust.SessionIdentity{}, errors.Join(trust.ErrSourceUnavailable, err)
 	}
@@ -258,7 +261,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 	trustResolver, err := trust.NewResolver(trust.ResolverConfig{
 		TenantRef:           deps.Config.EnterpriseID,
 		Sessions:            browserSessionTrustVerifier{sessions: deps.Sessions},
-		BrowserAccessTokens: browserAccessTokenTrustVerifier{sessions: deps.Sessions},
+		BrowserAccessTokens: browserAccessTokenTrustVerifier{sessions: deps.Sessions, enterpriseID: deps.Config.EnterpriseID},
 		AccessTickets:       deps.TicketActors,
 		StepGrants:          deps.StepGrants,
 		Services:            consoleServiceCredentialVerifier{config: deps.Config},
@@ -713,7 +716,7 @@ func (h *browserAuthHandler) resolveBrowserCredential(r *http.Request) (browsera
 	if len(parts) != 2 || parts[0] != "Bearer" {
 		return browserauth.BrowserSession{}, "", browserauth.ErrInvalidAccessToken
 	}
-	session, err := h.sessions.GetAccessTokenSession(r.Context(), parts[1], "agentatlas", "agentatlas")
+	session, err := h.sessions.GetAccessTokenSession(r.Context(), parts[1], "agentatlas", "agentatlas", h.config.EnterpriseID)
 	return session, "bearer", err
 }
 
