@@ -6,6 +6,7 @@ require (
 	github.com/astraclawteam/agentnexus/sdk/go/connector v0.0.0
 	github.com/astraclawteam/agentnexus/sdk/go/runtime v0.0.0
 	github.com/astraclawteam/agentnexus/sdk/go/secretprovider v0.0.0
+	github.com/astraclawteam/agentnexus/sdk/go/transportsecurity v0.0.0
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/jackc/pgx/v5 v5.10.0
@@ -22,6 +23,8 @@ replace github.com/astraclawteam/agentnexus/sdk/go/connector => ../../sdk/go/con
 replace github.com/astraclawteam/agentnexus/sdk/go/runtime => ../../sdk/go/runtime
 
 replace github.com/astraclawteam/agentnexus/sdk/go/secretprovider => ../../sdk/go/secretprovider
+
+replace github.com/astraclawteam/agentnexus/sdk/go/transportsecurity => ../../sdk/go/transportsecurity
 
 require (
 	cloud.google.com/go v0.123.0 // indirect

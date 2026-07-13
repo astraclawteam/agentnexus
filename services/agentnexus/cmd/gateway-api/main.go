@@ -11,6 +11,7 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/transportsecurity"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -19,6 +20,11 @@ const startupTimeout = 15 * time.Second
 
 func main() {
 	cfg := config.Load("gateway-api")
+	// Fail closed before anything else: production never serves plaintext.
+	mode, err := transportsecurity.ResolveStartupMode(cfg.Environment, cfg.TLS)
+	if err != nil {
+		log.Fatal(err)
+	}
 	browserConfig, err := config.LoadBrowserAuth()
 	if err != nil {
 		log.Fatal(err)
@@ -29,9 +35,35 @@ func main() {
 	}
 	defer cleanup()
 	health := app.NewHealthStatus(cfg.ServiceName, cfg.Version, true)
+	server := newHTTPServer(cfg, router)
+
+	if mode == transportsecurity.ModeMutualTLS {
+		// The single public TLS profile (sdk/go/transportsecurity) via the
+		// runtime manager: unique service identity, mutual TLS 1.3,
+		// revocation enforced per handshake, pools torn down on rotation.
+		manager, err := transportsecurity.NewManager(transportsecurity.SettingsFromConfig(cfg))
+		if err != nil {
+			log.Fatal(err)
+		}
+		peers, err := transportsecurity.AuthorizedClients(cfg.ServiceName, cfg.EnterpriseID)
+		if err != nil {
+			log.Fatal(err)
+		}
+		tlsConfig, err := manager.ServerTLSConfig(peers)
+		if err != nil {
+			log.Fatal(err)
+		}
+		server.TLSConfig = tlsConfig
+		manager.InstrumentServer(server)
+		fmt.Printf("service=%s version=%s environment=%s ready=%t addr=%s mtls=true identity=%s\n", health.Service, health.Version, cfg.Environment, health.Ready, cfg.HTTPAddr, manager.IdentityURI())
+		if err := server.ListenAndServeTLS("", ""); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	fmt.Printf("service=%s version=%s environment=%s ready=%t addr=%s\n", health.Service, health.Version, cfg.Environment, health.Ready, cfg.HTTPAddr)
-	if err := newHTTPServer(cfg, router).ListenAndServe(); err != nil {
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }
