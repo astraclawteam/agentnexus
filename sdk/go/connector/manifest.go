@@ -7,6 +7,12 @@ const (
 	DefaultReadOnlyMode = true
 )
 
+// Manifest is the generic connector resource/config manifest: a declarative
+// description of the resources, fields and operations a connector exposes. It
+// is the pre-Product-Pack form. DevelopmentPackFromManifest (package.go)
+// migrates a generic Manifest into an unsigned, development-only ProductPack;
+// a production Product Pack is authored and signed directly and can never be
+// imported from a generic manifest.
 type Manifest struct {
 	SchemaVersion string       `json:"schema_version"`
 	Name          string       `json:"name"`

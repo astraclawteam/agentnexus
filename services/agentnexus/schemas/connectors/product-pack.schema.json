@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentnexus.example/schemas/connectors/product-pack.schema.json",
+  "title": "Connector Product Pack v1",
+  "description": "A reusable, resellable, customer-agnostic connector product. It declares semantic capabilities, IO schemas, field policy, side-effect and reconciliation declarations, network/runtime requirements, compatibility, migration, limits and SBOM/provenance/signature references. It carries NO customer-identifying data: customer name, endpoints, credentials, raw table/API paths and field mappings live only in a Customer Binding. `additionalProperties:false` at every level makes that structural, not advisory. Capability names use the same frozen business-semantic vocabulary as the public Agent runtime contract (sdk/go/runtime).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "product_key",
+    "version",
+    "capabilities",
+    "field_policy",
+    "network",
+    "runtime",
+    "compatibility",
+    "migration",
+    "limits",
+    "sbom",
+    "provenance",
+    "signature",
+    "digest"
+  ],
+  "properties": {
+    "schema_version": { "const": "connector.product/v1" },
+    "product_key": { "$ref": "#/$defs/semanticName" },
+    "version": { "$ref": "#/$defs/semver" },
+    "title": { "type": "string" },
+    "development": {
+      "const": false,
+      "description": "A production Product Pack is never a development migration. Development packs set development=true and are rejected here."
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/capability" }
+    },
+    "field_policy": { "$ref": "#/$defs/fieldPolicy" },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["egress"],
+      "properties": {
+        "egress": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*$" }
+        },
+        "isolation": { "type": "string" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime"],
+      "properties": {
+        "runtime": { "type": "string", "minLength": 1 },
+        "min_memory_mb": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "compatibility": { "$ref": "#/$defs/compatibility" },
+    "migration": { "$ref": "#/$defs/migration" },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrency": { "type": "integer", "minimum": 0 },
+        "max_requests_per_minute": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "sbom": { "$ref": "#/$defs/artifactRef" },
+    "provenance": { "$ref": "#/$defs/artifactRef" },
+    "signature": { "$ref": "#/$defs/signature" },
+    "digest": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "semanticName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "capabilityName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "semver": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "digest"],
+      "properties": {
+        "ref": { "type": "string", "minLength": 1 },
+        "digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "ioSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "digest"],
+      "properties": {
+        "ref": { "$ref": "#/$defs/semanticName" },
+        "digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "value"],
+      "properties": {
+        "algorithm": { "enum": ["ed25519"] },
+        "key_id": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
+    "sideEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "description"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "reversible": { "type": "boolean" }
+      }
+    },
+    "reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "verify_capability"],
+      "properties": {
+        "strategy": { "type": "string", "minLength": 1 },
+        "verify_capability": { "$ref": "#/$defs/capabilityName" },
+        "compensation_capability": { "$ref": "#/$defs/capabilityName" }
+      }
+    },
+    "fieldClassification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "classification"],
+      "properties": {
+        "field": { "type": "string", "minLength": 1 },
+        "classification": { "type": "string", "minLength": 1 },
+        "redacted": { "type": "boolean" }
+      }
+    },
+    "fieldPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "classifications": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fieldClassification" }
+        },
+        "default_redacted": { "type": "boolean" }
+      }
+    },
+    "versionRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min"],
+      "properties": {
+        "min": { "$ref": "#/$defs/semver" },
+        "max": { "$ref": "#/$defs/semver" }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime_contract", "connector_runtime"],
+      "properties": {
+        "runtime_contract": { "$ref": "#/$defs/versionRange" },
+        "connector_runtime": { "$ref": "#/$defs/versionRange" },
+        "supersedes_versions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_versions"],
+      "properties": {
+        "from_versions": { "type": "array", "items": { "type": "string" } },
+        "notes": { "type": "string" },
+        "irreversible": { "type": "boolean" }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "title", "effect", "input", "output"],
+      "properties": {
+        "name": { "$ref": "#/$defs/capabilityName" },
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "effect": { "enum": ["read", "write"] },
+        "input": { "$ref": "#/$defs/ioSchema" },
+        "output": { "$ref": "#/$defs/ioSchema" },
+        "field_policy": { "$ref": "#/$defs/fieldPolicy" },
+        "side_effects": { "type": "array", "items": { "$ref": "#/$defs/sideEffect" } },
+        "reconciliation": { "$ref": "#/$defs/reconciliation" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["effect"],
+            "properties": { "effect": { "const": "write" } }
+          },
+          "then": {
+            "required": ["side_effects", "reconciliation"],
+            "properties": { "side_effects": { "minItems": 1 } }
+          }
+        }
+      ]
+    }
+  }
+}
