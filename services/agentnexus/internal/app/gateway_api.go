@@ -50,7 +50,8 @@ func isBrowserAuthPath(path string) bool {
 // credential-derived trusted context resolved at ingress.
 func trustProtectedPath(path string) bool {
 	switch path {
-	case "/v1/authorization/decisions", "/v1/approvals/resolve", "/v1/step-grants", "/v1/tickets/verify", "/v1/audit/evidence":
+	case "/v1/authorization/decisions", "/v1/approvals/resolve", "/v1/step-grants", "/v1/tickets/verify", "/v1/audit/evidence",
+		"/v1/runtime/locate", "/v1/runtime/read":
 		return true
 	}
 	return false

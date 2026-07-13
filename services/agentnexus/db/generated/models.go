@@ -182,6 +182,18 @@ type ConfirmationCheckpoint struct {
 	ResolvedAt   pgtype.Timestamptz
 }
 
+// Customer-specific bindings (GA Task 2): endpoints, secret references and mappings pinned to one exact signed product pack. Never rewritten by a product upgrade.
+type ConnectorBinding struct {
+	TenantID        string
+	BindingKey      string
+	ProductKey      string
+	ProductVersion  string
+	ProductDigest   string
+	BindingDocument []byte
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+}
+
 type ConnectorHealthEvent struct {
 	ID                  string
 	EnterpriseID        string
@@ -217,6 +229,22 @@ type ConnectorPackage struct {
 	CreatedAt       pgtype.Timestamptz
 }
 
+// Signed, resellable, customer-agnostic Connector Product Packs (GA Task 2). One row per (tenant, product_key, version); a product upgrade inserts a new version and never rewrites a binding.
+type ConnectorProduct struct {
+	TenantID   string
+	ProductKey string
+	Version    string
+	// sha256 over the canonical pack content excluding signature and digest; the signature signs this digest.
+	Digest             string
+	SignatureAlgorithm string
+	SignatureKeyID     string
+	SignatureValue     string
+	SbomDigest         string
+	ProvenanceDigest   string
+	PackDocument       []byte
+	CreatedAt          pgtype.Timestamptz
+}
+
 type Enterprise struct {
 	ID        string
 	Name      string
@@ -248,6 +276,64 @@ type EnterpriseUser struct {
 	Email        pgtype.Text
 	Phone        pgtype.Text
 	CreatedAt    pgtype.Timestamptz
+}
+
+// Immutable server-side bindings of opaque evd_* evidence handles (GA Task 0D).
+type EvidenceHandle struct {
+	TenantRef          string
+	ID                 string
+	PrincipalRef       string
+	AgentClientRef     string
+	AgentReleaseRef    string
+	OrgVersion         int64
+	DataClass          string
+	BindingID          string
+	SourceVersion      int64
+	Purpose            string
+	BusinessContextRef string
+	ContentHash        string
+	ContentBytes       int64
+	RecordCount        int64
+	RecordOffset       int64
+	PageLimit          int64
+	ObjectKey          string
+	KeyRef             string
+	AuthorizationRef   string
+	Lineage            []byte
+	CachedReadAllowed  bool
+	StagedAt           pgtype.Timestamptz
+	ExpiresAt          pgtype.Timestamptz
+	RetentionExpiresAt pgtype.Timestamptz
+	CreatedAt          pgtype.Timestamptz
+}
+
+// Append-only evidence-handle lifecycle log: revoked / content_expired; reads fail closed on terminal events.
+type EvidenceHandleEvent struct {
+	TenantRef   string
+	ID          string
+	EvidenceRef string
+	Kind        string
+	Reason      string
+	Seq         pgtype.Int8
+	CreatedAt   pgtype.Timestamptz
+}
+
+// Private semantic registry (GA Task 0D): data class -> internal source binding; source_ref never crosses the public plane.
+type EvidenceSourceBinding struct {
+	TenantRef           string
+	ID                  string
+	DataClass           string
+	SourceRef           string
+	SourceVersion       int64
+	AccessCapability    string
+	SourceCapability    string
+	ResourceType        string
+	ResourceID          string
+	CachedReadAllowed   bool
+	RetentionTtlSeconds int64
+	DeletedAt           pgtype.Timestamptz
+	CreatedAt           pgtype.Timestamptz
+	UpdatedAt           pgtype.Timestamptz
 }
 
 type ExternalIdentity struct {

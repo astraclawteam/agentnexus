@@ -189,6 +189,9 @@ type BrowserAuthDependencies struct {
 	ApprovalStore         ApprovalRouteStore
 	ApprovalFactsVerifier ChangeFactsVerifier
 	Grants                grantService
+	// Evidence is the semantic evidence runtime behind /v1/runtime/locate and
+	// /v1/runtime/read (optional; the endpoints register when provided).
+	Evidence EvidenceService
 }
 
 type browserAuthHandler struct {
@@ -206,6 +209,7 @@ type browserAuthHandler struct {
 	approval                *approvalHandler
 	grants                  *grantHandler
 	auditEvidence           *auditEvidenceHandler
+	evidence                *evidenceHandler
 }
 
 func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, error) {
@@ -259,6 +263,13 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
+	var evidenceRuntime *evidenceHandler
+	if deps.Evidence != nil {
+		evidenceRuntime, err = newEvidenceHandler(deps.Config.EnterpriseID, deps.Evidence, deps.Audit)
+		if err != nil {
+			return nil, err
+		}
+	}
 	issuer := deps.TokenIssuer
 	if issuer == nil {
 		var err error
@@ -267,7 +278,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
-	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, trustResolver: trustResolver, authorization: authorization, approval: approvalRoutes, grants: grants, auditEvidence: auditEvidence}, nil
+	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, trustResolver: trustResolver, authorization: authorization, approval: approvalRoutes, grants: grants, auditEvidence: auditEvidence, evidence: evidenceRuntime}, nil
 }
 
 func browserRequestTimeout(value time.Duration) (time.Duration, error) {
@@ -297,6 +308,9 @@ func (h *browserAuthHandler) register(mux *http.ServeMux) {
 	}
 	if h.auditEvidence != nil {
 		h.auditEvidence.register(mux)
+	}
+	if h.evidence != nil {
+		h.evidence.register(mux)
 	}
 }
 

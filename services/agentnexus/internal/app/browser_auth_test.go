@@ -930,7 +930,9 @@ func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfil
 	stepGrants := memoryStepGrants{identities: map[string]trust.GrantIdentity{
 		harnessStepGrantToken: {TenantRef: "ent-1", PrincipalRef: "user-1", TicketRef: "ct-harness", GrantRef: "grant-harness", ExpiresAt: time.Now().Add(time.Hour)},
 	}}
-	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrappedSessions, Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver, AuthorizationPolicy: authorizationPolicySource(), TicketActors: RejectTicketActorAuthenticator{}, StepGrants: stepGrants})
+	harnessPolicy := authorizationPolicySource()
+	evidenceRuntime, _ := newGatewayEvidenceService(t, harnessPolicy, nil)
+	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrappedSessions, Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver, AuthorizationPolicy: harnessPolicy, TicketActors: RejectTicketActorAuthenticator{}, StepGrants: stepGrants, Evidence: evidenceRuntime})
 	if err != nil {
 		t.Fatal(err)
 	}

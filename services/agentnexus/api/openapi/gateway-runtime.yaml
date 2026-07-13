@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AgentNexus Gateway Runtime API
-  version: 1.1.0
+  version: 1.2.0
   description: >-
     Vendor-neutral Agent runtime contract v1 (ELC-NEXUS-1 candidate).
     Trusted identity — tenant, actor, organization snapshot, trust class,
@@ -114,6 +114,8 @@ paths:
     post:
       operationId: locateRuntimeEvidence
       summary: Locate evidence for declared business-semantic data needs; results are opaque evidence handles.
+      description: Semantic resolution is private — data classes resolve to internal source bindings server-side and connector topology never appears in responses or errors. The verified trusted context supplies identity and the sealed organization version.
+      security: [{browserSession: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -131,6 +133,8 @@ paths:
     post:
       operationId: readRuntimeEvidence
       summary: Read one located evidence handle through ticketed policy enforcement.
+      description: Reads are served from staged, encrypted evidence bound at locate time. An allowed response always states source_version, as_of and served_from_cache — a cached read never masquerades as real-time data — and invalidated, revoked, expired or source-deleted handles fail closed as a deny decision.
+      security: [{browserSession: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -514,6 +518,21 @@ components:
           additionalProperties: true
           description: Normalized, policy-masked business fields of the read evidence.
         receipt_ref: {$ref: '#/components/schemas/ReceiptRef'}
+        source_version:
+          type: integer
+          format: int64
+          description: Server-authored source content version this read reflects. Always present on an allowed read.
+        as_of:
+          type: string
+          format: date-time
+          description: When the served content was captured from its source. Always present on an allowed read; a cached response never masquerades as real-time data.
+        served_from_cache:
+          type: boolean
+          description: Explicit disclosure that the content was served from staged (cached) evidence rather than a live source read. Always present on an allowed read.
+        continuation_ref:
+          allOf:
+            - $ref: '#/components/schemas/EvidenceRef'
+          description: Opaque handle of the next page when constraints.max_results bounded this read; absence means the result is complete (results are never silently truncated).
     RiskLevel:
       type: string
       enum:

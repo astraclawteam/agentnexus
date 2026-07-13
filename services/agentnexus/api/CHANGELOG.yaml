@@ -5,6 +5,24 @@
 #  `make contracts-verify` together with the contract parity tests).
 protocol: agentnexus-public-contract
 entries:
+  - version: "1.2.0"
+    date: "2026-07-14"
+    breaking: false
+    title: "Activate semantic evidence reads with cache-honest response metadata (GA Task 0D)"
+    summary: >-
+      Additive, backward-compatible evolution of the frozen contract: the
+      already-frozen /v1/runtime/locate and /v1/runtime/read operations gain
+      their credential security bindings and EvidenceReadResponse gains
+      server-authored cache-honesty and pagination metadata. No request schema
+      changes; identity-out-of-request, opaque-handle and connector-topology
+      boundaries are preserved (semantic resolution stays private server-side).
+    changes:
+      - "POST /v1/runtime/locate and POST /v1/runtime/read now declare their credential bindings (browserSession / caseTicket); the trusted context is resolved once at ingress and request JSON still never carries identity."
+      - "EvidenceReadResponse gains OPTIONAL server-authored response fields: source_version (int64), as_of (date-time) and served_from_cache (boolean) — always emitted on an allowed read so a cached response states its provenance explicitly and never masquerades as real-time data."
+      - "EvidenceReadResponse gains an OPTIONAL continuation_ref (opaque evd_* handle): when constraints.max_results bounds a read, the next page is addressed by a fresh opaque handle carrying the same server-side binding; results are never silently truncated."
+      - "Semantics activated behind the frozen shapes: data classes resolve privately to internal source bindings; issued handles bind tenant, actor, Agent release, org version, source version, purpose, content hash, authorization lineage, TTL and an optional raw-content retention TTL server-side; expired, revoked, source-deleted and source-version-stale handles fail closed as deny; serving staged (cached) content requires an explicit cached-read grant; connector-backed data classes require the credential-derived connector capability (AstraClaw/Xiaozhi origins are denied)."
+    artifacts:
+      - "api/openapi/gateway-runtime.yaml"
   - version: "1.1.0"
     date: "2026-07-13"
     breaking: false
