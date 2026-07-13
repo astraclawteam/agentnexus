@@ -1,0 +1,21 @@
+# Digest lock of the frozen vendor-neutral public contract artifacts.
+# Regenerate with: go run ./cmd/contract-lock -update
+# Verify with:     go run ./cmd/contract-lock -verify
+protocol: agentnexus-public-contract
+normalization: lf
+generated_by: go run ./cmd/contract-lock -update
+files:
+  - path: api/CHANGELOG.yaml
+    sha256: sha256:2bc10b56700e6a0a432806a33f8268f634b8df59fd4dbd11d56a689b36d04ce2
+  - path: api/openapi/gateway-agent.yaml
+    sha256: sha256:8ad81f15fe41c7d356bd4e7169c544931a031a16c276d587998a5de5fa87ded7
+  - path: api/openapi/gateway-runtime.yaml
+    sha256: sha256:4153013aa7c1b8c6fc2abc0c16cee597633f3386d84038c28cbadc7079acb16c
+  - path: api/proto/agentnexus/actions/v1/actions.proto
+    sha256: sha256:5b06eebf06a3dba5784583ac3e37b0aab4cee7cb3055305c5b31558fa2c597a0
+  - path: api/proto/agentnexus/audit/v1/audit.proto
+    sha256: sha256:3ee0b75558ae2605e7c591a07dc3b9dfc703dcba3a46c87cb629af9f304a1ee4
+  - path: api/proto/agentnexus/evidence/v1/evidence.proto
+    sha256: sha256:abbe5082c9b6c0135f6c3047c56e0862934baa55c0aae37080d4b3e4d26389c6
+  - path: api/proto/agentnexus/trust/v1/trust.proto
+    sha256: sha256:7c63d372d5c3fefabd48d982e1af831da14fd65fb278071c3c5a8bf0e64d94eb

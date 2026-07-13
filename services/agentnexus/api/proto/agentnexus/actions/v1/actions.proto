@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package agentnexus.actions.v1;
+
+import "agentnexus/trust/v1/trust.proto";
+
+option go_package = "github.com/astraclawteam/agentnexus/services/agentnexus/api/proto/agentnexus/actions/v1;actionsv1";
+
+// Vendor-neutral action plane of the Agent runtime contract v1
+// (ELC-NEXUS-1 candidate). Actions are typed: a namespaced business-semantic
+// capability plus capability-typed parameters bound by an exact parameter
+// hash. The legacy untyped action+input shape is retired. Connector topology
+// never appears in these messages.
+
+// ActionStatus is the frozen Action lifecycle (implemented by the runtime
+// state machine).
+enum ActionStatus {
+  ACTION_STATUS_UNSPECIFIED = 0;
+  ACTION_STATUS_REQUESTED = 1;
+  ACTION_STATUS_AWAITING_APPROVAL = 2;
+  ACTION_STATUS_GRANTED = 3;
+  ACTION_STATUS_DISPATCHED = 4;
+  ACTION_STATUS_EXECUTING = 5;
+  ACTION_STATUS_SUCCEEDED = 6;
+  ACTION_STATUS_FAILED = 7;
+  ACTION_STATUS_RESULT_UNKNOWN = 8;
+  ACTION_STATUS_RECONCILING = 9;
+  ACTION_STATUS_COMPENSATING = 10;
+  ACTION_STATUS_HUMAN_TAKEOVER = 11;
+}
+
+// BusinessCapabilityRequest asks whether — and under which constraints — a
+// business-semantic capability may be exercised inside a business context.
+message BusinessCapabilityRequest {
+  string request_id = 1;
+  string trace_id = 2;
+  string business_context_ref = 3;
+  string capability = 4;
+  string parameter_hash = 5; // optional before parameters exist
+  string purpose = 6;
+  string expires_at = 7; // RFC 3339
+}
+
+// Precondition states an assumption that must still hold at execution time.
+message Precondition {
+  string kind = 1;
+  string reference = 2;
+  string expected = 3;
+}
+
+// ActionRequest is the only way an Agent asks for a side effect. The Agent
+// client and release are bound through the verified principal context, never
+// through this message.
+message ActionRequest {
+  string request_id = 1;
+  string trace_id = 2;
+  string business_context_ref = 3;
+  string capability = 4;
+  bytes parameters_json = 5; // capability-typed parameters, exact bytes
+  string parameter_hash = 6; // sha256:<64 hex> over parameters_json
+  string purpose = 7;
+  agentnexus.trust.v1.RiskDecision risk_decision = 8;
+  agentnexus.trust.v1.ApprovalPlanRef approval_plan_ref = 9;
+  string idempotency_key = 10;
+  repeated Precondition preconditions = 11;
+  string expires_at = 12; // RFC 3339
+  string expected_receipt_schema = 13;
+  string compensation_ref = 14; // optional compensating capability reference
+}
+
+// Action is the runtime's view of one requested side effect.
+message Action {
+  string action_ref = 1; // opaque act_* handle
+  ActionStatus status = 2;
+  string business_context_ref = 3;
+  string capability = 4;
+  string parameter_hash = 5;
+  string grant_ref = 6;
+  string approval_evidence_ref = 7;
+  string receipt_ref = 8;
+  string updated_at = 9; // RFC 3339
+}
+
+// ActionReceipt is the runtime's account of what actually happened to one
+// Action. Receipt signing lands with the audit signing task; the slot is
+// frozen here.
+message ActionReceipt {
+  string receipt_ref = 1; // opaque rcp_* handle
+  string action_ref = 2;
+  ActionStatus status = 3;
+  string capability = 4;
+  string parameter_hash = 5;
+  string receipt_schema = 6;
+  bytes result_json = 7;  // receipt payload typed by receipt_schema
+  string result_hash = 8; // sha256:<64 hex> over result_json
+  string issued_at = 9;   // RFC 3339
+  agentnexus.trust.v1.Signature signature = 10;
+}

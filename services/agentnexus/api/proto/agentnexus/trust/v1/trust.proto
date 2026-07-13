@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package agentnexus.trust.v1;
+
+option go_package = "github.com/astraclawteam/agentnexus/services/agentnexus/api/proto/agentnexus/trust/v1;trustv1";
+
+// Vendor-neutral trust plane of the Agent runtime contract v1
+// (ELC-NEXUS-1 candidate). Trusted identity is derived from verified
+// credentials only; none of these messages is ever populated from caller
+// request JSON without verification. Connector topology never appears here.
+
+// TrustClass is the verified trust classification of an Agent client.
+enum TrustClass {
+  TRUST_CLASS_UNSPECIFIED = 0;
+  TRUST_CLASS_FIRST_PARTY_TRUSTED = 1;
+  TRUST_CLASS_CERTIFIED_THIRD_PARTY = 2;
+  TRUST_CLASS_UNTRUSTED = 3;
+}
+
+// RiskLevel is the frozen risk classification vocabulary.
+enum RiskLevel {
+  RISK_LEVEL_UNSPECIFIED = 0;
+  RISK_LEVEL_LOW = 1;
+  RISK_LEVEL_MEDIUM = 2;
+  RISK_LEVEL_HIGH = 3;
+}
+
+// PrincipalContext is the verified identity context bound to every Agent
+// interaction: tenant, actor, Agent client and release, trust class and the
+// sealed organization snapshot. It is constructed exclusively from verified
+// credentials.
+message PrincipalContext {
+  string tenant_ref = 1;
+  string principal_ref = 2;
+  string agent_client_ref = 3;
+  string agent_release_ref = 4;
+  TrustClass trust_class = 5;
+  string org_snapshot_ref = 6;
+  string verified_at = 7; // RFC 3339
+  string expires_at = 8;  // RFC 3339
+}
+
+// Signature is a detached signature by a named key of a trusted authority.
+message Signature {
+  string algorithm = 1; // frozen v1 set: ed25519
+  string key_id = 2;
+  string value = 3; // base64-encoded signature bytes
+}
+
+// RiskDecision is the signed risk verdict of the calling risk authority,
+// bound to one exact operation (capability + parameter hash + business
+// context). AgentNexus verifies and transmits risk decisions; it never
+// authors one. An unsigned risk decision is rejected.
+message RiskDecision {
+  string decision_id = 1;
+  string authority = 2;
+  RiskLevel risk_level = 3;
+  repeated string reasons = 4;
+  string capability = 5;
+  string parameter_hash = 6; // sha256:<64 hex> over exact parameter bytes
+  string business_context_ref = 7;
+  string issued_at = 8;  // RFC 3339
+  string expires_at = 9; // RFC 3339
+  Signature signature = 10;
+}
+
+// ApprovalPlanRef is the digest-bound reference to an approval plan authored
+// by the approval authority. AgentNexus transmits plans; it never authors
+// them.
+message ApprovalPlanRef {
+  string plan_ref = 1;  // opaque apl_* handle
+  string plan_hash = 2; // sha256:<64 hex>
+  string authority = 3; // authoring approval authority, never agentnexus
+}
+
+// ApprovalRequest asks the approval authority to route one exact governed
+// operation.
+message ApprovalRequest {
+  string request_id = 1;
+  string trace_id = 2;
+  string business_context_ref = 3;
+  string capability = 4;
+  string parameter_hash = 5;
+  string purpose = 6;
+  ApprovalPlanRef plan = 7;
+  string expires_at = 8; // RFC 3339
+}
+
+// ApprovalDecision is the frozen approval outcome vocabulary.
+enum ApprovalDecision {
+  APPROVAL_DECISION_UNSPECIFIED = 0;
+  APPROVAL_DECISION_APPROVED = 1;
+  APPROVAL_DECISION_DENIED = 2;
+  APPROVAL_DECISION_NARROWED = 3;
+}
+
+// ApprovalEvidence is the attested proof that the approval authority decided
+// one exact operation.
+message ApprovalEvidence {
+  string approval_ref = 1; // opaque apv_* handle
+  string plan_ref = 2;
+  string plan_hash = 3;
+  string capability = 4;
+  string parameter_hash = 5;
+  ApprovalDecision decision = 6;
+  string approver_authority = 7;
+  string decided_at = 8; // RFC 3339
+  Signature attestation = 9;
+}
+
+// StepGrant authorizes exactly one exact sensitive operation: one capability
+// with one parameter hash inside one business context, once, until expiry.
+message StepGrant {
+  string grant_ref = 1; // opaque grant_* handle
+  string business_context_ref = 2;
+  string capability = 3;
+  string parameter_hash = 4;
+  bool one_use = 5; // one-use semantics are part of the type contract
+  string issued_at = 6;  // RFC 3339
+  string expires_at = 7; // RFC 3339
+}

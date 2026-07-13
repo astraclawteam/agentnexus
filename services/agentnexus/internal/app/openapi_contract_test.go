@@ -10,7 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestGatewayRuntimePublicContract(t *testing.T) {
+func TestOpenAPIGatewayRuntimeContract(t *testing.T) {
 	openAPI, err := os.ReadFile(filepath.Join("..", "..", "api", "openapi", "gateway-runtime.yaml"))
 	if err != nil {
 		t.Fatalf("read gateway runtime OpenAPI: %v", err)
@@ -41,17 +41,22 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 		}
 	}
 	permissions := []any{"suggest", "edit", "publish_low_risk", "approve_high_risk", "workflow_edit", "workflow_advanced", "service_mode"}
-	permissionSchema, ok := schemas["AgentAtlasPermission"].(map[string]any)
+	permissionSchema, ok := schemas["PrincipalPermission"].(map[string]any)
 	if !ok {
-		t.Fatal("AgentAtlasPermission schema missing")
+		t.Fatal("PrincipalPermission schema missing")
 	}
 	assertEnum(t, permissionSchema, permissions)
 	for _, schemaName := range []string{"BrowserSession", "PermissionDecision"} {
 		items := nestedMap(t, property(t, namedSchema(t, schemas, schemaName), "permissions"), "items")
-		if items["$ref"] != "#/components/schemas/AgentAtlasPermission" {
+		if items["$ref"] != "#/components/schemas/PrincipalPermission" {
 			t.Fatalf("%s permission items=%v", schemaName, items)
 		}
 	}
+	riskLevelSchema, ok := schemas["RiskLevel"].(map[string]any)
+	if !ok {
+		t.Fatal("RiskLevel schema missing")
+	}
+	assertEnum(t, riskLevelSchema, []any{"low", "medium", "high"})
 	tokenRequest := namedSchema(t, schemas, "BrowserTokenRequest")
 	assertObjectProperties(t, tokenRequest, []string{"grant_type", "code", "code_verifier", "redirect_uri"}, nil)
 	tokenSecurity := nestedMap(t, document, "components", "securitySchemes", "consoleClientSecret")
@@ -62,13 +67,13 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 	t.Run("BrowserSession", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "BrowserSession")
 		assertObjectProperties(t, schema, []string{
-			"authenticated", "enterprise_id", "enterprise_user_id", "display_name",
+			"authenticated", "tenant_ref", "principal_ref", "display_name",
 			"org_version", "org_unit_ids", "permissions", "advanced_mode_allowed",
 			"idle_expires_at", "absolute_expires_at",
 		}, nil)
 		assertPropertyType(t, schema, "authenticated", "boolean")
-		assertPropertyType(t, schema, "enterprise_id", "string")
-		assertPropertyType(t, schema, "enterprise_user_id", "string")
+		assertPropertyType(t, schema, "tenant_ref", "string")
+		assertPropertyType(t, schema, "principal_ref", "string")
 		assertPropertyType(t, schema, "display_name", "string")
 		assertPropertyType(t, schema, "org_version", "integer")
 		assertStringArray(t, schema, "org_unit_ids")
@@ -85,7 +90,7 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 		assertEnum(t, property(t, schema, "decision"), []any{"allow", "deny"})
 		assertStringArray(t, schema, "org_unit_ids")
 		assertStringArray(t, schema, "mask_fields")
-		assertEnum(t, property(t, schema, "risk_level"), []any{"low", "medium", "high"})
+		assertRiskLevelRef(t, schema, "risk_level")
 		assertPropertyType(t, schema, "fallback_action", "string")
 		assertPropertyType(t, schema, "org_version", "integer")
 	})
@@ -101,7 +106,7 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 		assertEnum(t, property(t, schema, "mode"), []any{
 			"single_confirmation", "upward_review", "enterprise_knowledge_admin_queue",
 		})
-		assertEnum(t, property(t, schema, "risk_level"), []any{"low", "medium", "high"})
+		assertRiskLevelRef(t, schema, "risk_level")
 		assertStringArray(t, schema, "risk_reasons")
 		assertPropertyType(t, schema, "requester_user_id", "string")
 		assertPropertyType(t, schema, "reviewer_user_id", "string")
@@ -115,16 +120,25 @@ func TestGatewayRuntimePublicContract(t *testing.T) {
 
 	t.Run("ApprovalResolveRequest", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "ApprovalResolveRequest")
-		assertObjectProperties(t, schema, []string{"org_version", "org_unit_id", "resource_type", "resource_id", "action", "changed_fields", "impacted_org_unit_ids", "impacted_user_count", "published_behavior_change", "external_side_effect", "requested_risk", "facts_issued_at", "facts_expires_at", "facts_nonce"}, nil)
+		assertObjectProperties(t, schema, []string{"resource_type", "resource_id", "action", "changed_fields", "impacted_org_unit_ids", "impacted_user_count", "published_behavior_change", "external_side_effect", "requested_risk", "facts_issued_at", "facts_expires_at", "facts_nonce"}, nil)
 		if _, exists := nestedMap(t, schema, "properties")["requester_user_id"]; exists {
 			t.Fatal("request body must not contain requester_user_id")
+		}
+		if _, exists := nestedMap(t, schema, "properties")["org_version"]; exists {
+			t.Fatal("request must not supply the trusted organization version")
+		}
+		if _, exists := nestedMap(t, schema, "properties")["org_unit_id"]; exists {
+			t.Fatal("request must not supply the trusted organization scope")
 		}
 	})
 	t.Run("StepGrantRequest", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "StepGrantRequest")
-		assertObjectProperties(t, schema, []string{"case_ticket_id", "org_unit_id", "org_version", "resource_type", "resource_id", "action", "ttl_seconds"}, nil)
+		assertObjectProperties(t, schema, []string{"request_id", "business_context_ref", "capability", "parameter_hash", "purpose", "ttl_seconds"}, []string{"trace_id"})
 		if _, exists := nestedMap(t, schema, "properties")["enterprise_id"]; exists {
 			t.Fatal("request must not trust enterprise_id")
+		}
+		if _, exists := nestedMap(t, schema, "properties")["org_version"]; exists {
+			t.Fatal("request must not supply the trusted organization version")
 		}
 	})
 }
@@ -247,5 +261,14 @@ func assertEnum(t *testing.T, schema map[string]any, want []any) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("enum = %v, want %v", got, want)
+	}
+}
+
+// assertRiskLevelRef asserts a property references the single shared
+// RiskLevel schema (the enum itself is asserted once on that schema).
+func assertRiskLevelRef(t *testing.T, schema map[string]any, name string) {
+	t.Helper()
+	if got := property(t, schema, name)["$ref"]; got != "#/components/schemas/RiskLevel" {
+		t.Fatalf("property %s = %v, want $ref to the shared RiskLevel schema", name, got)
 	}
 }

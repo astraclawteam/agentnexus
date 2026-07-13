@@ -28,13 +28,13 @@ func TestAuditRequestedActionIsPublishedInOpenAPIAndProto(t *testing.T) {
 	assertEnum(t, actions, []any{"workflow_draft_created", "workflow_version_published", "dream_policy_created", "dream_policy_create_requested", "dream_job_run", "retrieval_plan_created", "evidence_located", "evidence_read", "answer_trace_created", "sensitive_artifact_parsed", "visibility_rule_changed"})
 	auditPath := nestedMap(t, document, "paths", "/v1/audit/evidence", "post")
 	security := auditPath["security"].([]any)
-	_, hasServiceSecurity := security[0].(map[string]any)["agentAtlasServiceSecret"]
+	_, hasServiceSecurity := security[0].(map[string]any)["trustedServiceSecret"]
 	if len(security) != 1 || !hasServiceSecurity {
-		t.Fatal("audit endpoint must require dedicated AgentAtlas service Basic auth")
+		t.Fatal("audit endpoint must require dedicated trusted first-party service Basic auth")
 	}
-	serviceSecret := nestedMap(t, document, "components", "securitySchemes", "agentAtlasServiceSecret")
-	if serviceSecret["type"] != "http" || serviceSecret["scheme"] != "basic" || !strings.Contains(serviceSecret["description"].(string), "client_id=agentatlas") {
-		t.Fatalf("AgentAtlas service security scheme=%v", serviceSecret)
+	serviceSecret := nestedMap(t, document, "components", "securitySchemes", "trustedServiceSecret")
+	if serviceSecret["type"] != "http" || serviceSecret["scheme"] != "basic" || !strings.Contains(serviceSecret["description"].(string), "trusted first-party service") {
+		t.Fatalf("trusted service security scheme=%v", serviceSecret)
 	}
 	responses := nestedMap(t, auditPath, "responses")
 	for _, status := range []string{"201", "400", "401", "503"} {
@@ -43,9 +43,12 @@ func TestAuditRequestedActionIsPublishedInOpenAPIAndProto(t *testing.T) {
 		}
 	}
 	requestSchema := nestedMap(t, document, "components", "schemas", "AuditEvidenceRequest")
-	assertObjectProperties(t, requestSchema, []string{"ticket_id", "enterprise_id", "action", "resource_type", "resource_id"}, []string{"trace_id", "details"})
+	assertObjectProperties(t, requestSchema, []string{"business_context_ref", "action", "resource_type", "resource_id"}, []string{"request_id", "trace_id", "details"})
 	if properties := nestedMap(t, requestSchema, "properties"); properties["workflow_run_id"] != nil {
 		t.Fatal("audit request must not silently accept an unpersisted workflow_run_id")
+	}
+	if properties := nestedMap(t, requestSchema, "properties"); properties["enterprise_id"] != nil {
+		t.Fatal("audit request must not carry caller-supplied tenant identity; it comes from the verified service credentials")
 	}
 	if branches, ok := requestSchema["oneOf"].([]any); !ok || len(branches) != 2 {
 		t.Fatalf("audit resource binding oneOf=%v", requestSchema["oneOf"])

@@ -2,10 +2,25 @@ syntax = "proto3";
 
 package agentnexus.audit.v1;
 
+import "agentnexus/actions/v1/actions.proto";
+
 option go_package = "github.com/astraclawteam/agentnexus/services/agentnexus/api/proto/agentnexus/audit/v1;auditv1";
 
+// Vendor-neutral audit plane of the Agent runtime contract v1
+// (ELC-NEXUS-1 candidate). Every event binds the verified principal, the
+// Agent client release, the sealed organization snapshot, the exact
+// operation, the signed risk decision, the approval evidence, the grant, the
+// action transition and the receipt into a tenant-sequenced hash chain.
+// Chain signing lands with the audit signing task; the fields are frozen
+// here. Connector topology never appears in these messages.
+//
+// Wire note: the v1.0.0 field numbering in this file is the FIRST frozen
+// assignment and is wire-incompatible with any pre-GA draft of audit.proto.
+// Never decode bytes produced before this freeze with this schema.
+
 // AuditAction publishes the bounded actions accepted by the HTTP audit append
-// contract. AuditEvent.action remains a string for wire compatibility.
+// contract. AuditEvent.action carries the bounded AuditAction value by its
+// lowercase name for service audit events.
 enum AuditAction {
   AUDIT_ACTION_UNSPECIFIED = 0;
   WORKFLOW_DRAFT_CREATED = 1;
@@ -23,26 +38,35 @@ enum AuditAction {
 
 message AuditEvent {
   string id = 1;
-  string enterprise_id = 2;
-  string case_ticket_id = 3;
-  string step_grant_id = 4;
-  string actor_user_id = 5;
-  string connector_instance_id = 6;
-  string resource_type = 7;
-  string resource_id = 8;
-  string action = 9;
-  string decision = 10;
-  string input_hash = 11;
-  string output_hash = 12;
-  EvidencePointer evidence_pointer = 13;
-  string prev_hash = 14;
-  string event_hash = 15;
+  string tenant_ref = 2;   // opaque verified tenant reference
+  uint64 tenant_seq = 3;   // per-tenant monotonic sequence, starts at 1
+  string business_context_ref = 4;
+  string principal_ref = 5; // opaque verified actor reference
+  string agent_client_ref = 6;
+  string agent_release_ref = 7;
+  string org_snapshot_ref = 8;
+  string capability = 9;
+  string parameter_hash = 10; // sha256:<64 hex>
+  string risk_decision_ref = 11;
+  string approval_evidence_ref = 12;
+  string grant_ref = 13;
+  string action_ref = 14;
+  agentnexus.actions.v1.ActionStatus status_from = 15;
+  agentnexus.actions.v1.ActionStatus status_to = 16;
+  string receipt_ref = 17;
+  string resource_type = 18; // business resource type for service audit events
+  string resource_id = 19;
+  string action = 20; // bounded AuditAction value for service audit events
+  string occurred_at = 21; // RFC 3339
+  EvidencePointer evidence_pointer = 22;
+  string prev_hash = 23;  // sha256:<64 hex>; empty only for the genesis event
+  string event_hash = 24; // sha256:<64 hex>; populated by audit signing
 }
 
 message AuditChain {
   string id = 1;
-  string enterprise_id = 2;
-  string case_ticket_id = 3;
+  string tenant_ref = 2;
+  string business_context_ref = 3;
   repeated AuditEvent events = 4;
   string head_hash = 5;
 }

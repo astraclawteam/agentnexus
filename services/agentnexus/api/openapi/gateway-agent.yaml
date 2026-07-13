@@ -1,8 +1,12 @@
 openapi: 3.0.3
 info:
   title: AgentNexus Gateway Agent API
-  version: 0.1.0
-  description: Agent Control Plane entrypoints for task runs, messages, and confirmations.
+  version: 1.0.0
+  description: >-
+    Agent Control Plane entrypoints for run onboarding, messages, and
+    confirmations (vendor-neutral contract v1, ELC-NEXUS-1 candidate).
+    Trusted identity is derived from verified credentials only and never
+    travels in request JSON.
 paths:
   /v1/agent/runs:
     post:
@@ -72,18 +76,21 @@ components:
     RequestEnvelope:
       type: object
       required:
-        - enterprise_id
-        - actor_user_id
         - request_id
       properties:
-        enterprise_id:
-          type: string
-        actor_user_id:
-          type: string
         request_id:
           type: string
+          minLength: 1
+          maxLength: 128
         trace_id:
           type: string
+          maxLength: 128
+      description: >-
+        Correlation only. Trusted identity is derived from verified
+        credentials and never accepted from request JSON. Unknown request
+        fields are rejected server-side (OpenAPI 3.0 cannot express
+        additionalProperties false across allOf composition; the Go SDK rules
+        are normative).
     CreateRunRequest:
       allOf:
         - $ref: '#/components/schemas/RequestEnvelope'

@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package agentnexus.evidence.v1;
+
+option go_package = "github.com/astraclawteam/agentnexus/services/agentnexus/api/proto/agentnexus/evidence/v1;evidencev1";
+
+// Vendor-neutral evidence plane of the Agent runtime contract v1
+// (ELC-NEXUS-1 candidate). Evidence is declared as business-semantic data
+// needs and addressed through opaque handles; connector topology (instances,
+// endpoints, tables, API paths) never appears in these messages.
+
+// Constraints bounds a request without ever addressing connector topology.
+message Constraints {
+  int64 max_results = 1;
+  repeated string allowed_fields = 2;
+  repeated string prohibited_uses = 3;
+}
+
+// DataNeed declares one business-semantic data need.
+message DataNeed {
+  string need_id = 1;
+  string data_class = 2; // business vocabulary term, never a connector location
+  string purpose = 3;
+  repeated string fields = 4;
+  Constraints constraints = 5;
+}
+
+// EvidenceRequest asks the runtime to locate evidence for declared data
+// needs. Trusted identity is bound by the verified principal context, never
+// by this message.
+message EvidenceRequest {
+  string request_id = 1;
+  string trace_id = 2;
+  string business_context_ref = 3; // opaque wc_* handle; empty opens a work case
+  repeated DataNeed data_needs = 4;
+  string purpose = 5;
+  Constraints constraints = 6;
+  string expires_at = 7; // RFC 3339
+}
+
+// EvidenceHandle is the opaque typed handle through which located evidence
+// is addressed.
+message EvidenceHandle {
+  string evidence_ref = 1; // opaque evd_* handle
+  string data_class = 2;
+  string summary = 3;
+  string expires_at = 4; // RFC 3339
+}
+
+// EvidenceReadRequest reads one located evidence handle under policy.
+message EvidenceReadRequest {
+  string request_id = 1;
+  string trace_id = 2;
+  string business_context_ref = 3;
+  string evidence_ref = 4;
+  repeated string fields = 5;
+  string purpose = 6;
+  Constraints constraints = 7;
+  string expires_at = 8; // RFC 3339
+}

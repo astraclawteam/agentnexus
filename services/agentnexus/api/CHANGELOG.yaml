@@ -1,0 +1,40 @@
+# Machine-readable protocol changelog of the AgentNexus public contract.
+# Digest pins of the artifacts named here live in api/contract.lock
+# (regenerate: `go run ./cmd/contract-lock -update`;
+#  verify:     `go run ./cmd/contract-lock -verify`, wired as
+#  `make contracts-verify` together with the contract parity tests).
+protocol: agentnexus-public-contract
+entries:
+  - version: "1.0.0"
+    date: "2026-07-13"
+    breaking: true
+    title: "Freeze the vendor-neutral Agent runtime contract (ELC-NEXUS-1 candidate)"
+    summary: >-
+      One-time versioned cutover of every public Agent-facing schema. No
+      dual-shape support and no legacy fields remain. The service runtime
+      adopts the new envelope in the follow-up runtime cutover task; this
+      entry freezes the contract surface.
+    changes:
+      - "Trusted identity removed from all public request/response schemas: enterprise_id, actor_user_id and enterprise_user_id no longer exist anywhere; tenant, actor, organization version, trust class, risk authority and approval authority derive from verified credentials only."
+      - "No request body carries trusted organization facts: org_version/org_unit_id removed from AuthorizationDecisionRequest, StepGrantRequest and ApprovalResolveRequest; the server-authored sealed snapshot version remains only in responses (BrowserSession, PermissionDecision)."
+      - "Connector topology removed from the public surface: connector_instance_id and resource selectors (ResourceRef/LocatedResource, resource_name) are replaced by business-semantic data classes and opaque handles (wc_/evd_/grant_/act_/rcp_/apl_/apv_ prefixes); connector topology stays in connector-internal messages (agentnexus/connectors/v1)."
+      - "Actions are typed: the untyped action+input pair is retired; ActionRequest binds business_context_ref, namespaced capability, capability-typed parameters, sha256 parameter_hash, purpose, constraints, signed RiskDecision, transmitted ApprovalPlanRef, idempotency_key, preconditions, expiry, expected_receipt_schema and optional compensation_ref."
+      - "RiskDecision is signed by the calling risk authority and bound to the exact operation (capability + parameter_hash + business_context_ref); unsigned decisions are rejected. AgentNexus transmits but never authors risk decisions or approval plans."
+      - "Step Grants bind one exact operation: capability + parameter_hash + one-use semantics replace resource_type/resource_id/action/scope selectors."
+      - "Action lifecycle states frozen: requested, awaiting_approval, granted, dispatched, executing, succeeded, failed, result_unknown, reconciling, compensating, human_takeover."
+      - "audit/v1 AuditEvent rebound to the new envelope: tenant_ref + tenant_seq, principal_ref, agent_client_ref/agent_release_ref, org_snapshot_ref, capability, parameter_hash, risk_decision_ref, approval_evidence_ref, grant_ref, action transition (status_from/status_to), receipt_ref, prev_hash/event_hash."
+      - "AgentAtlas-specific generic names removed (AgentAtlasPermission -> PrincipalPermission, decideAgentAtlasPermission -> decideAuthorization, agentAtlasServiceSecret -> trustedServiceSecret); AgentAtlas is a trusted first-party client of neutral types."
+      - "New public protobuf packages agentnexus.evidence.v1, agentnexus.actions.v1 and agentnexus.trust.v1; new Go SDK module github.com/astraclawteam/agentnexus/sdk/go/runtime carries the canonical types and validation."
+      - "Decision — receipts are handle-addressed: Action responses carry an opaque receipt_ref (rcp_* handle) in all three artifacts (OpenAPI, Go SDK, actions/v1) and the full ActionReceipt is fetched via GET /v1/runtime/receipts/{receipt_ref}. Embedding was rejected to keep responses opaque-handle disciplined and receipt retrieval idempotent and separately authorizable."
+      - "ActionReceipt requires capability and parameter_hash: a receipt binds the exact operation it accounts for."
+      - "Decision — contract precedence: the Go SDK (sdk/go/runtime) is the normative validation surface; OpenAPI annotations are descriptive. OpenAPI 3.0 cannot express additionalProperties: false across allOf composition, so unknown envelope fields are rejected server-side per the SDK rules. SDK length limits count bytes (Go len); OpenAPI minLength/maxLength annotations count Unicode code points."
+    artifacts:
+      - "api/openapi/gateway-runtime.yaml"
+      - "api/openapi/gateway-agent.yaml"
+      - "api/proto/agentnexus/evidence/v1/evidence.proto"
+      - "api/proto/agentnexus/actions/v1/actions.proto"
+      - "api/proto/agentnexus/trust/v1/trust.proto"
+      - "api/proto/agentnexus/audit/v1/audit.proto"
+    sdk:
+      module: "github.com/astraclawteam/agentnexus/sdk/go/runtime"
+      note: "canonical Go types + canonical validation for the frozen contract"
