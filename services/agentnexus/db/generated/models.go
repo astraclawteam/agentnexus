@@ -8,6 +8,55 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+// Immutable Agent-client certification revisions (GA Task 0C).
+type AgentCertification struct {
+	TenantRef                 string
+	ID                        string
+	AgentClientID             string
+	Revision                  int64
+	TrustClass                string
+	Publisher                 string
+	Product                   string
+	Origin                    string
+	VersionMin                string
+	VersionMax                string
+	SigningKeyID              string
+	SigningKeyAlgorithm       string
+	SigningKeyPublicKey       string
+	ReleaseManifestDigest     string
+	CapabilityCeiling         []byte
+	SignedBuildManifest       bool
+	EnterpriseRegistered      bool
+	CertifiedDecisionProvider bool
+	IssuedAt                  pgtype.Timestamptz
+	ExpiresAt                 pgtype.Timestamptz
+	CreatedAt                 pgtype.Timestamptz
+}
+
+// Append-only, hash-chained certification status log: active/revoked/expired/superseded.
+type AgentCertificationStatusChange struct {
+	TenantRef       string
+	ID              string
+	CertificationID string
+	Status          string
+	Reason          string
+	PrevHash        string
+	EventHash       string
+	Seq             pgtype.Int8
+	CreatedAt       pgtype.Timestamptz
+}
+
+// Registered Agent clients (GA Task 0C); tenant_ref is the opaque verified tenant reference.
+type AgentClient struct {
+	TenantRef            string
+	ID                   string
+	Publisher            string
+	Product              string
+	Origin               string
+	EnterpriseRegistered bool
+	CreatedAt            pgtype.Timestamptz
+}
+
 type ApprovalQueueItem struct {
 	ID                          string
 	EnterpriseID                string

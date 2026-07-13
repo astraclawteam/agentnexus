@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AgentNexus Gateway Runtime API
-  version: 1.0.0
+  version: 1.1.0
   description: >-
     Vendor-neutral Agent runtime contract v1 (ELC-NEXUS-1 candidate).
     Trusted identity — tenant, actor, organization snapshot, trust class,
@@ -283,6 +283,96 @@ paths:
         '400': {description: Invalid action, resource binding, or bounded details.}
         '401': {description: Invalid service credentials or Case Ticket.}
         '503': {description: Ticket or audit persistence unavailable.}
+  /v1/agent-clients:
+    post:
+      operationId: registerAgentClient
+      summary: Register (enterprise-register) an Agent client under the verified tenant.
+      description: >-
+        Records an Agent client so it can be certified. The tenant is derived
+        from the verified first-party service credentials, never from the body.
+        Registration is the enterprise-registration act that first-party status
+        additionally requires; it does not by itself grant any trust class.
+      security: [{trustedServiceSecret: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AgentClientRegistrationRequest'}
+      responses:
+        '201':
+          description: Agent client registered; opaque agent_client_ref returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentClientRegistrationResponse'}
+        '400': {description: Invalid registration body.}
+        '401': {description: Invalid service credentials.}
+        '503': {description: Trust registry unavailable.}
+  /v1/agent-clients/{agent_client_ref}/certifications:
+    post:
+      operationId: certifyAgentClient
+      summary: Issue an immutable certification revision for a registered Agent client.
+      description: >-
+        The certifying authority binds a publisher, product, semantic version
+        range, signing key, signed release-manifest digest, trust class and
+        capability ceiling into one immutable revision. first_party_trusted
+        additionally requires enterprise registration and a signed build
+        manifest; the capability ceiling is the maximum a customer policy may
+        ever grant. The trust class here is the authority's certification
+        decision about the client, not a self-asserted caller identity.
+      security: [{trustedServiceSecret: []}]
+      parameters:
+        - name: agent_client_ref
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/AgentClientRef'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AgentCertificationRequest'}
+      responses:
+        '201':
+          description: Immutable certification revision created and marked active.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentCertificationResponse'}
+        '400': {description: Invalid binding, or first-party status without enterprise registration or a signed manifest.}
+        '401': {description: Invalid service credentials.}
+        '404': {description: Unknown agent_client_ref.}
+        '503': {description: Trust registry unavailable.}
+  /v1/agent-clients/{agent_client_ref}/certifications/{certification_ref}/revocations:
+    post:
+      operationId: revokeAgentCertification
+      summary: Revoke a certification revision (append-only status change).
+      description: >-
+        Appends a revocation to the certification's append-only, hash-chained
+        status log. The immutable revision and every prior status row are left
+        untouched; a revoked release fails before any grant is issued.
+      security: [{trustedServiceSecret: []}]
+      parameters:
+        - name: agent_client_ref
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/AgentClientRef'}
+        - name: certification_ref
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/CertificationRef'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AgentCertificationRevocationRequest'}
+      responses:
+        '200':
+          description: Revocation recorded.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentCertificationRevocationResponse'}
+        '400': {description: Invalid revocation body.}
+        '401': {description: Invalid service credentials.}
+        '404': {description: Unknown certification_ref.}
+        '503': {description: Trust registry unavailable.}
 components:
   securitySchemes:
     trustedServiceSecret:
@@ -844,3 +934,109 @@ components:
         id_token: {type: string}
         token_type: {type: string, enum: [Bearer]}
         expires_in: {type: integer, minimum: 1}
+    AgentClientRef:
+      type: string
+      pattern: '^agc_[A-Za-z0-9_-]{16,128}$'
+      description: Opaque Agent-client handle.
+    CertificationRef:
+      type: string
+      pattern: '^cert_[A-Za-z0-9_-]{16,128}$'
+      description: Opaque certification revision handle.
+    TrustClass:
+      type: string
+      description: Frozen Agent-client trust classes. Derived and server-authored; untrusted is the absence of a certification.
+      enum:
+        - first_party_trusted
+        - certified_third_party
+        - untrusted
+    VersionRange:
+      type: object
+      additionalProperties: false
+      description: Semantic-version window a certification binds. Min is inclusive, max is exclusive; an empty bound is open on that side.
+      properties:
+        min_inclusive: {type: string, maxLength: 64}
+        max_exclusive: {type: string, maxLength: 64}
+    SigningKey:
+      type: object
+      additionalProperties: false
+      required: [key_id, algorithm, public_key]
+      description: Public signing key the certified release's build manifest must be signed by. Rotating the key is a new signing identity that requires recertification.
+      properties:
+        key_id: {type: string, minLength: 1, maxLength: 256}
+        algorithm: {type: string, enum: [ed25519]}
+        public_key: {type: string, minLength: 1, description: Base64-encoded public key bytes.}
+    AgentClientRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, publisher, product]
+      description: >-
+        Registers an Agent client. The tenant is derived from the verified
+        first-party service credentials and never travels in this body.
+      properties:
+        request_id: {type: string, minLength: 1, maxLength: 128}
+        trace_id: {type: string, maxLength: 128}
+        publisher: {type: string, minLength: 1, maxLength: 256}
+        product: {type: string, minLength: 1, maxLength: 256}
+        origin: {type: string, maxLength: 128, description: Declared client origin (trace metadata); origins that can only lower capability, such as the AstraClaw/Xiaozhi runtime, never receive enterprise connector capability.}
+    AgentClientRegistrationResponse:
+      type: object
+      additionalProperties: false
+      required: [agent_client_ref, publisher, product, registered]
+      properties:
+        agent_client_ref: {$ref: '#/components/schemas/AgentClientRef'}
+        publisher: {type: string}
+        product: {type: string}
+        registered: {type: boolean, enum: [true]}
+    AgentCertificationRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, trust_class, version_range, signing_key, release_manifest_digest, manifest_signature, capability_ceiling, ttl_seconds]
+      description: >-
+        A certification decision by the certifying authority. Publisher and
+        product are resolved from agent_client_ref, never duplicated here. A
+        valid manifest_signature over release_manifest_digest is the signed
+        build manifest first-party status requires; the capability ceiling is
+        the maximum a customer policy may narrow but never raise.
+      properties:
+        request_id: {type: string, minLength: 1, maxLength: 128}
+        trace_id: {type: string, maxLength: 128}
+        trust_class: {type: string, enum: [first_party_trusted, certified_third_party], description: The authority's certification decision; untrusted is never certifiable.}
+        version_range: {$ref: '#/components/schemas/VersionRange'}
+        signing_key: {$ref: '#/components/schemas/SigningKey'}
+        release_manifest_digest: {$ref: '#/components/schemas/Sha256Ref'}
+        manifest_signature: {$ref: '#/components/schemas/Signature'}
+        capability_ceiling:
+          type: array
+          items: {$ref: '#/components/schemas/Capability'}
+          description: Maximum business-semantic capabilities; connector capabilities are stripped for AstraClaw/Xiaozhi origins.
+        certified_decision_provider: {type: boolean, description: Whether a certified Policy Decision Provider backs this certification; a certified third party reaches a side effect only when true.}
+        ttl_seconds: {type: integer, minimum: 1, maximum: 31536000}
+    AgentCertificationResponse:
+      type: object
+      additionalProperties: false
+      required: [certification_ref, trust_class, revision, status, capability_ceiling, expires_at]
+      properties:
+        certification_ref: {$ref: '#/components/schemas/CertificationRef'}
+        trust_class: {$ref: '#/components/schemas/TrustClass'}
+        revision: {type: integer, minimum: 1}
+        status: {type: string, enum: [active]}
+        capability_ceiling:
+          type: array
+          items: {$ref: '#/components/schemas/Capability'}
+        expires_at: {type: string, format: date-time}
+    AgentCertificationRevocationRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, reason]
+      properties:
+        request_id: {type: string, minLength: 1, maxLength: 128}
+        trace_id: {type: string, maxLength: 128}
+        reason: {type: string, minLength: 1, maxLength: 1024}
+    AgentCertificationRevocationResponse:
+      type: object
+      additionalProperties: false
+      required: [certification_ref, status, revoked_at]
+      properties:
+        certification_ref: {$ref: '#/components/schemas/CertificationRef'}
+        status: {type: string, enum: [revoked]}
+        revoked_at: {type: string, format: date-time}

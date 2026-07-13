@@ -5,6 +5,24 @@
 #  `make contracts-verify` together with the contract parity tests).
 protocol: agentnexus-public-contract
 entries:
+  - version: "1.1.0"
+    date: "2026-07-13"
+    breaking: false
+    title: "Add Agent-client registration, certification and revocation (GA Task 0C)"
+    summary: >-
+      Additive, backward-compatible evolution of the frozen contract: new
+      Agent-client trust-registry operations and schemas. No existing schema,
+      field, operation or enum changes; identity-out-of-request and opaque-handle
+      discipline are preserved (the tenant derives from verified first-party
+      service credentials and never travels in a request body).
+    changes:
+      - "New operations on gateway-runtime.yaml: POST /v1/agent-clients (registerAgentClient), POST /v1/agent-clients/{agent_client_ref}/certifications (certifyAgentClient) and POST /v1/agent-clients/{agent_client_ref}/certifications/{certification_ref}/revocations (revokeAgentCertification), all under trustedServiceSecret."
+      - "New opaque handles agc_ (AgentClientRef) and cert_ (CertificationRef); a certification binds publisher, product, semantic version range (VersionRange), signing key (SigningKey), signed release-manifest digest (Sha256Ref), trust class and capability ceiling."
+      - "TrustClass schema documents the frozen classes first_party_trusted / certified_third_party / untrusted; untrusted is the absence of a certification and is never certifiable. A certification request's trust_class is the certifying authority's decision about the client, not a self-asserted caller identity, so it is not caller-supplied trusted identity."
+      - "first_party_trusted requires enterprise registration and a signed build manifest (manifest_signature over release_manifest_digest); the capability ceiling is the maximum a customer policy may narrow but never raise; AstraClaw/Xiaozhi origins never receive enterprise connector capability; a certified third party reaches a side effect only with a certified decision provider."
+      - "Certification revisions are immutable and status changes (active/revoked/superseded/expired) are append-only; revocation appends and never mutates prior rows."
+    artifacts:
+      - "api/openapi/gateway-runtime.yaml"
   - version: "1.0.0"
     date: "2026-07-13"
     breaking: true
