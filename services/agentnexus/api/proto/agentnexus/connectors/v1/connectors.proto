@@ -33,10 +33,109 @@ enum ConnectorStatus {
   CONNECTOR_STATUS_DENIED = 2;
   CONNECTOR_STATUS_FAILED = 3;
   CONNECTOR_STATUS_WAITING_EXTERNAL_RECEIPT = 4;
+  // Host-enforced bounded signals added by the connector isolation host (GA
+  // Task 4). Existing values 0-4 are stable; these extend the enum.
+  //
+  // CONNECTOR_STATUS_DENIED_POLICY is a host-enforced policy denial evaluated
+  // BEFORE the connector runs: a filesystem escape, an undeclared network
+  // egress target, or a package-digest mismatch against the pinned
+  // ProductRef.Digest.
+  CONNECTOR_STATUS_DENIED_POLICY = 5;
+  // CONNECTOR_STATUS_RESOURCE_EXHAUSTED is a host-enforced resource bound: a
+  // wall-clock or CPU budget exceeded, a memory ceiling hit, or oversized
+  // output truncated. It is always a bounded failure, never a hang or OOM.
+  CONNECTOR_STATUS_RESOURCE_EXHAUSTED = 6;
 }
 
 message CredentialRef {
   string provider = 1;
   string ref = 2;
   string version = 3;
+}
+
+// --- Connector isolation host RPC (GA Task 4) ------------------------------
+//
+// The stable, bounded, versioned envelope the connector host speaks to a
+// connector process or container. This stays connector-internal (it carries
+// connector topology such as connector_instance_id and resource_name) and never
+// appears in Agent-facing protos. The authoritative Go form is
+// internal/connectors/host (protocol.go); these messages mirror it on the wire.
+
+// HostConnectorRequest is the host -> connector request envelope. It is length
+// limited and pins host_protocol_version; a mismatch is a bounded rejection.
+message HostConnectorRequest {
+  string host_protocol_version = 1;
+  string connector_instance_id = 2;
+  string request_id = 3;
+  string capability = 4;
+  string resource_name = 5;
+  string operation = 6;
+  string action = 7;
+  bytes input_json = 8;
+  ResourcePolicy policy = 9;
+  repeated FilesystemAccess filesystem = 10;
+  repeated NetworkTarget network = 11;
+  SecretGrant secret = 12;
+  int64 deadline_unix_ms = 13;
+  int64 max_output_bytes = 14;
+}
+
+// HostConnectorResponse is the connector -> host response envelope. output_hash
+// binds the returned bytes and output_truncated signals a bounded, capped
+// result rather than a silent partial one.
+message HostConnectorResponse {
+  string host_protocol_version = 1;
+  string request_id = 2;
+  ConnectorStatus status = 3;
+  bytes output_json = 4;
+  string output_hash = 5;
+  bool output_truncated = 6;
+  string error = 7;
+}
+
+// ResourcePolicy is the manifest-derived sandbox policy the host enforces. The
+// expected_package_digest binds the connector to the pinned ProductRef.Digest;
+// allowed_egress is derived from the Customer Binding endpoints; the resource
+// budgets bound CPU, memory, wall-clock, output and process count.
+message ResourcePolicy {
+  string expected_package_digest = 1;
+  string isolation = 2;
+  int64 wall_clock_ms = 3;
+  int64 cpu_budget_ms = 4;
+  int64 memory_bytes = 5;
+  int64 max_output_bytes = 6;
+  int32 max_concurrency = 7;
+  int32 max_requests_per_minute = 8;
+  int32 pids_limit = 9;
+  repeated string filesystem_roots = 10;
+  repeated NetworkTarget allowed_egress = 11;
+  bool contain_child_processes = 12;
+}
+
+// FilesystemAccess is one declared filesystem path the host validates against
+// the sandbox roots before dispatch.
+message FilesystemAccess {
+  string path = 1;
+  bool write = 2;
+}
+
+// NetworkTarget is one declared egress endpoint the host validates against the
+// allowed egress list before dispatch.
+message NetworkTarget {
+  string host = 1;
+  int32 port = 2;
+}
+
+// SecretGrant carries ONLY non-secret, operation-scoped Secret Handle metadata
+// to the connector. The connector redeems it at the Secret Provider; a master
+// credential or derived material is never placed in this message.
+message SecretGrant {
+  string handle_id = 1;
+  string connector_ref = 2;
+  string resource_name = 3;
+  string operation = 4;
+  string action = 5;
+  string version = 6;
+  int64 expires_at_unix_ms = 7;
+  bool single_use = 8;
 }
