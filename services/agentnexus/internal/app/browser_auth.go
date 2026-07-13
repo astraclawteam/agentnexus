@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 )
 
 const browserSessionCookie = "nexus_browser_session"
@@ -90,10 +92,78 @@ type BrowserAuditSink interface {
 	LogoutBrowserSession(context.Context, string, BrowserAuditEvent) (browserauth.BrowserSession, error)
 }
 
-type agentAtlasServiceAuthenticator struct{ config browserauth.OIDCConfig }
+// browserSessionResolver is the narrow session-lookup surface the trust
+// resolver needs.
+type browserSessionResolver interface {
+	GetSession(context.Context, string) (browserauth.BrowserSession, error)
+}
 
-func (a agentAtlasServiceAuthenticator) AuthenticateService(clientID, secret string) bool {
-	return clientID == "agentatlas" && a.config.AuthenticateConsoleClient(clientID, secret)
+// browserSessionTrustVerifier adapts the browser session service onto the
+// trust resolver's session source.
+type browserSessionTrustVerifier struct{ sessions browserSessionResolver }
+
+func (v browserSessionTrustVerifier) VerifyBrowserSession(ctx context.Context, token string) (trust.SessionIdentity, error) {
+	session, err := v.sessions.GetSession(ctx, token)
+	if errors.Is(err, browserauth.ErrSessionUnavailable) {
+		return trust.SessionIdentity{}, errors.Join(trust.ErrSourceUnavailable, err)
+	}
+	if err != nil {
+		return trust.SessionIdentity{}, errors.Join(trust.ErrCredentialRejected, err)
+	}
+	return trust.SessionIdentity{TenantRef: session.EnterpriseID, PrincipalRef: session.UserID, ExpiresAt: session.IdleExpiresAt}, nil
+}
+
+// consoleServiceCredentialVerifier verifies the confidential first-party
+// service client (AgentAtlas console). The tenant and client identity come
+// from the verified credential, never from request data.
+type consoleServiceCredentialVerifier struct{ config browserauth.OIDCConfig }
+
+func (v consoleServiceCredentialVerifier) VerifyServiceCredential(_ context.Context, clientID, secret string) (trust.ServiceIdentity, error) {
+	if clientID == "agentatlas" && v.config.AuthenticateConsoleClient(clientID, secret) {
+		return trust.ServiceIdentity{TenantRef: v.config.EnterpriseID, ClientRef: clientID, ReleaseRef: trust.UnregisteredReleaseRef}, nil
+	}
+	return trust.ServiceIdentity{}, trust.ErrCredentialRejected
+}
+
+// snapshotIntegrityLogger surfaces sealed-snapshot integrity failures (cycle,
+// dangling reference, duplicate, unknown role, over-limit) to the operational
+// log, so a corrupt org-policy pipeline is a visible high-risk deny rather
+// than a silent baseline deny.
+type snapshotIntegrityLogger struct{}
+
+func (snapshotIntegrityLogger) SealedSnapshotIntegrityFailure(_ context.Context, tenantRef, principalRef string, orgVersion int64) {
+	log.Printf("sealed org snapshot integrity failure: tenant=%s principal=%s org_version=%d", tenantRef, principalRef, orgVersion)
+}
+
+// sealedOrgVersionResolver pins the sealed organization snapshot version of
+// a verified principal at ingress.
+type sealedOrgVersionResolver struct{ source policy.SnapshotSource }
+
+func (v sealedOrgVersionResolver) ResolveSealedOrgVersion(ctx context.Context, tenantRef, principalRef string) (int64, error) {
+	snapshot, err := v.source.LoadAccessSnapshot(ctx, tenantRef, principalRef)
+	if err != nil {
+		return 0, errors.Join(trust.ErrSourceUnavailable, err)
+	}
+	return snapshot.OrgVersion, nil
+}
+
+// browserTrustAuditSink records trust rejections in the browser audit trail.
+// The persisted action names the reason and, when present, the offending
+// FIELD (e.g. the forged header's name) — never the attacker-controlled
+// value, which the resolver deliberately does not carry.
+type browserTrustAuditSink struct{ sink BrowserAuditSink }
+
+func (s browserTrustAuditSink) RecordTrustRejection(ctx context.Context, rejection trust.Rejection) {
+	if s.sink == nil {
+		return
+	}
+	action := "trusted_context." + rejection.Reason
+	if rejection.Field != "" {
+		action += ":" + rejection.Field
+	}
+	auditCtx, cancel := boundedCleanupContext(ctx)
+	defer cancel()
+	_ = s.sink.AppendBrowserAudit(auditCtx, BrowserAuditEvent{EnterpriseID: rejection.TenantRef, ActorUserID: rejection.PrincipalRef, Action: action, Decision: "deny"})
 }
 
 type BrowserAuthDependencies struct {
@@ -108,12 +178,17 @@ type BrowserAuthDependencies struct {
 	RequestTimeout          time.Duration
 	AuthorizeRateLimiter    browserauth.AuthorizeRateLimiter
 	AuthorizeSourceResolver AuthorizeSourceResolver
-	AuthorizationPolicy     policy.AtlasPolicySource
-	TicketActors            TicketActorAuthenticator
-	ApprovalSource          ApprovalSnapshotSource
-	ApprovalStore           ApprovalRouteStore
-	ApprovalFactsVerifier   ChangeFactsVerifier
-	Grants                  grantService
+	AuthorizationPolicy     policy.SnapshotSource
+	// OrgVersions resolves the sealed org snapshot version at ingress with a
+	// single query. When nil, the resolver falls back to reading the version
+	// off the full AuthorizationPolicy snapshot (used by in-memory tests).
+	OrgVersions           trust.OrgSnapshotResolver
+	TicketActors          trust.AccessTicketVerifier
+	StepGrants            trust.StepGrantVerifier
+	ApprovalSource        ApprovalSnapshotSource
+	ApprovalStore         ApprovalRouteStore
+	ApprovalFactsVerifier ChangeFactsVerifier
+	Grants                grantService
 }
 
 type browserAuthHandler struct {
@@ -126,6 +201,7 @@ type browserAuthHandler struct {
 	issuer                  IDTokenIssuer
 	authorizeRateLimiter    browserauth.AuthorizeRateLimiter
 	authorizeSourceResolver AuthorizeSourceResolver
+	trustResolver           *trust.Resolver
 	authorization           *authorizationHandler
 	approval                *approvalHandler
 	grants                  *grantHandler
@@ -136,7 +212,26 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 	if deps.Sessions == nil || deps.Upstream == nil || deps.Identities == nil || deps.Profiles == nil || deps.Audit == nil || deps.AuthorizeRateLimiter == nil || deps.AuthorizeSourceResolver == nil || deps.AuthorizationPolicy == nil || deps.TicketActors == nil {
 		return nil, errors.New("browser auth dependencies incomplete")
 	}
-	authorization, err := newAuthorizationHandler(authorizationDependencies{EnterpriseID: deps.Config.EnterpriseID, Sessions: deps.Sessions, TicketActors: deps.TicketActors, Evaluator: policy.NewAgentAtlasEvaluator(deps.AuthorizationPolicy)})
+	orgVersions := deps.OrgVersions
+	if orgVersions == nil {
+		orgVersions = sealedOrgVersionResolver{source: deps.AuthorizationPolicy}
+	}
+	trustResolver, err := trust.NewResolver(trust.ResolverConfig{
+		TenantRef:     deps.Config.EnterpriseID,
+		Sessions:      browserSessionTrustVerifier{sessions: deps.Sessions},
+		AccessTickets: deps.TicketActors,
+		StepGrants:    deps.StepGrants,
+		Services:      consoleServiceCredentialVerifier{config: deps.Config},
+		OrgSnapshots:  orgVersions,
+		Audit:         browserTrustAuditSink{sink: deps.Audit},
+		Protected: func(r *http.Request) bool {
+			return trustProtectedPath(r.URL.Path)
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	authorization, err := newAuthorizationHandler(authorizationDependencies{EnterpriseID: deps.Config.EnterpriseID, Evaluator: policy.NewCapabilityEvaluator(deps.AuthorizationPolicy, policy.WithSnapshotIntegrityObserver(snapshotIntegrityLogger{})), Audit: deps.Audit})
 	if err != nil {
 		return nil, err
 	}
@@ -145,21 +240,21 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 		if deps.ApprovalSource == nil || deps.ApprovalStore == nil {
 			return nil, errors.New("approval dependencies incomplete")
 		}
-		approvalRoutes, err = newApprovalHandler(approvalDependencies{EnterpriseID: deps.Config.EnterpriseID, Sessions: deps.Sessions, TicketActors: deps.TicketActors, Source: deps.ApprovalSource, Store: deps.ApprovalStore, FactsVerifier: deps.ApprovalFactsVerifier})
+		approvalRoutes, err = newApprovalHandler(approvalDependencies{EnterpriseID: deps.Config.EnterpriseID, Source: deps.ApprovalSource, Store: deps.ApprovalStore, FactsVerifier: deps.ApprovalFactsVerifier, Audit: deps.Audit})
 		if err != nil {
 			return nil, err
 		}
 	}
 	var grants *grantHandler
 	if deps.Grants != nil {
-		grants, err = newGrantHandler(authorization, deps.Grants)
+		grants, err = newGrantHandler(deps.Config.EnterpriseID, deps.Grants, deps.Audit)
 		if err != nil {
 			return nil, err
 		}
 	}
 	var auditEvidence *auditEvidenceHandler
 	if deps.AuditEvidence != nil {
-		auditEvidence, err = newAuditEvidenceHandler(deps.Config.EnterpriseID, deps.TicketActors, deps.AuditEvidence, agentAtlasServiceAuthenticator{config: deps.Config})
+		auditEvidence, err = newAuditEvidenceHandler(deps.Config.EnterpriseID, deps.TicketActors, deps.AuditEvidence, deps.Audit)
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +267,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
-	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, authorization: authorization, approval: approvalRoutes, grants: grants, auditEvidence: auditEvidence}, nil
+	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, trustResolver: trustResolver, authorization: authorization, approval: approvalRoutes, grants: grants, auditEvidence: auditEvidence}, nil
 }
 
 func browserRequestTimeout(value time.Duration) (time.Duration, error) {

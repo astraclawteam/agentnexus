@@ -11,6 +11,7 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -68,8 +69,8 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 }
 
 // Kept as focused wiring seams for the command's fail-closed unit tests.
-func productionAuthorizationDependencies(enterpriseID string, pool *pgxpool.Pool) (policy.AtlasPolicySource, app.TicketActorAuthenticator) {
-	return app.NewPostgresAtlasPolicySource(pool), app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)
+func productionAuthorizationDependencies(enterpriseID string, pool *pgxpool.Pool) (policy.SnapshotSource, trust.AccessTicketVerifier) {
+	return app.NewPostgresSnapshotSource(pool), app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)
 }
 
 func productionApprovalDependencies(pool *pgxpool.Pool) (app.ApprovalSnapshotSource, app.ApprovalRouteStore) {

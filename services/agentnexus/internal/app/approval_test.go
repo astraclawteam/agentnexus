@@ -13,6 +13,8 @@ import (
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 )
 
 type stubApprovalSource struct {
@@ -54,7 +56,7 @@ func (s *capturingApprovalStore) RecordResolution(_ context.Context, req approva
 func TestApprovalResolveUsesAuthenticatedActorAndReturnsFrozenRoute(t *testing.T) {
 	source := directApprovalSource(t, "ent-1", 12, "user-1")
 	store := &capturingApprovalStore{}
-	router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, source, store)
+	router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1", IdleExpiresAt: time.Now().Add(time.Hour)}}, nil, source, store)
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(validApprovalBody()))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	addApprovalHeaders(req)
@@ -77,7 +79,7 @@ func TestApprovalResolveUsesAuthenticatedActorAndReturnsFrozenRoute(t *testing.T
 }
 
 func TestApprovalResolveUsesCaseTicketActor(t *testing.T) {
-	tickets := &stubTicketActors{actor: AuthorizationActor{EnterpriseID: "ent-1", UserID: "ticket-user"}}
+	tickets := &stubTicketActors{identity: trust.TicketIdentity{TenantRef: "ent-1", PrincipalRef: "ticket-user", TicketRef: "ct-1", ExpiresAt: time.Now().Add(time.Hour)}}
 	source := directApprovalSource(t, "ent-1", 12, "ticket-user")
 	store := &capturingApprovalStore{}
 	router := newApprovalTestRouter(t, stubAuthorizationSessions{}, tickets, source, store)
@@ -110,7 +112,7 @@ func TestApprovalResolveRejectsStrictJSONAndRequesterOverride(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), &capturingApprovalStore{})
+			router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1", IdleExpiresAt: time.Now().Add(time.Hour)}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), &capturingApprovalStore{})
 			req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", tt.contentType)
 			addApprovalHeaders(req)
@@ -126,7 +128,7 @@ func TestApprovalResolveRejectsStrictJSONAndRequesterOverride(t *testing.T) {
 
 func TestApprovalResolveFailsClosedWithoutLeakingCandidates(t *testing.T) {
 	source := &stubApprovalSource{err: errors.New("candidate secret-user database unavailable")}
-	router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, source, &capturingApprovalStore{})
+	router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1", IdleExpiresAt: time.Now().Add(time.Hour)}}, nil, source, &capturingApprovalStore{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(validApprovalBody()))
 	req.Header.Set("Content-Type", "application/json")
 	addApprovalHeaders(req)
@@ -147,7 +149,7 @@ func TestApprovalResolveRequiresCanonicalSingleSecurityHeaders(t *testing.T) {
 		func(r *http.Request) { r.Header.Add("X-Approval-Facts-Attestation", "second") },
 	}
 	for i, mutate := range tests {
-		router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), &capturingApprovalStore{})
+		router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1", IdleExpiresAt: time.Now().Add(time.Hour)}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), &capturingApprovalStore{})
 		req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(validApprovalBody()))
 		req.Header.Set("Content-Type", "application/json")
 		addApprovalHeaders(req)
@@ -163,7 +165,7 @@ func TestApprovalResolveRequiresCanonicalSingleSecurityHeaders(t *testing.T) {
 
 func TestApprovalResolveMissingFactsRejectsAndUnknownOrUnverifiedFactsForceHigh(t *testing.T) {
 	missing := strings.Replace(validApprovalBody(), `,"external_side_effect":false`, "", 1)
-	router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), &capturingApprovalStore{})
+	router := newApprovalTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1", IdleExpiresAt: time.Now().Add(time.Hour)}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), &capturingApprovalStore{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(missing))
 	req.Header.Set("Content-Type", "application/json")
 	addApprovalHeaders(req)
@@ -183,7 +185,7 @@ func TestApprovalResolveMissingFactsRejectsAndUnknownOrUnverifiedFactsForceHigh(
 		{body: validApprovalBody(), verifier: RejectChangeFactsVerifier{}, reason: approval.RiskReasonUnverifiedChangeFacts},
 	} {
 		store := &capturingApprovalStore{}
-		router = newApprovalTestRouterWithVerifier(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), store, tc.verifier)
+		router = newApprovalTestRouterWithVerifier(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1", IdleExpiresAt: time.Now().Add(time.Hour)}}, nil, directApprovalSource(t, "ent-1", 12, "user-1"), store, tc.verifier)
 		req = httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(tc.body))
 		req.Header.Set("Content-Type", "application/json")
 		addApprovalHeaders(req)
@@ -206,7 +208,7 @@ func TestApprovalResolveReplaysBeforeExpiredVerificationOrUnavailableSource(t *t
 	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: "user-1", OrgPath: []string{"team"}, PolicyVersion: 3}
 	store := &capturingApprovalStore{replay: &route}
 	source := &stubApprovalSource{err: errors.New("source unavailable after org version advanced")}
-	router := newApprovalTestRouterWithVerifier(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, source, store, failingFactsVerifier{})
+	router := newApprovalTestRouterWithVerifier(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1", IdleExpiresAt: time.Now().Add(time.Hour)}}, nil, source, store, failingFactsVerifier{})
 	body := strings.Replace(validApprovalBody(), `"facts_expires_at":"2026-07-11T00:05:00Z"`, `"facts_expires_at":"2020-01-01T00:05:00Z"`, 1)
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -219,7 +221,7 @@ func TestApprovalResolveReplaysBeforeExpiredVerificationOrUnavailableSource(t *t
 	}
 
 	store = &capturingApprovalStore{lookupErr: ErrApprovalIdempotencyConflict}
-	router = newApprovalTestRouterWithVerifier(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1"}}, nil, source, store, failingFactsVerifier{})
+	router = newApprovalTestRouterWithVerifier(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent-1", UserID: "user-1", IdleExpiresAt: time.Now().Add(time.Hour)}}, nil, source, store, failingFactsVerifier{})
 	req = httptest.NewRequest(http.MethodPost, "/v1/approvals/resolve", strings.NewReader(validApprovalBody()))
 	req.Header.Set("Content-Type", "application/json")
 	addApprovalHeaders(req)
@@ -264,19 +266,48 @@ func TestBrowserHandlerRegistersApprovalAndExistingProtectedRoutes(t *testing.T)
 	}
 }
 
-func newApprovalTestRouter(t *testing.T, sessions authorizationSessionResolver, tickets TicketActorAuthenticator, source ApprovalSnapshotSource, store ApprovalRouteStore) http.Handler {
+func newApprovalTestRouter(t *testing.T, sessions browserSessionResolver, tickets trust.AccessTicketVerifier, source ApprovalSnapshotSource, store ApprovalRouteStore) http.Handler {
 	return newApprovalTestRouterWithVerifier(t, sessions, tickets, source, store, trustingFactsVerifier{})
 }
 
-func newApprovalTestRouterWithVerifier(t *testing.T, sessions authorizationSessionResolver, tickets TicketActorAuthenticator, source ApprovalSnapshotSource, store ApprovalRouteStore, verifier ChangeFactsVerifier) http.Handler {
+// approvalSnapshotVersionSource resolves any principal to org version 12 so
+// the ingress trust resolver can seal the approval requester's context in
+// tests.
+type approvalSnapshotVersionSource struct{}
+
+func (approvalSnapshotVersionSource) LoadAccessSnapshot(_ context.Context, tenantRef, principalRef string) (policy.SealedAccessSnapshot, error) {
+	if tenantRef == "" || principalRef == "" {
+		return policy.SealedAccessSnapshot{}, policy.ErrPolicyUnavailable
+	}
+	return policy.SealedAccessSnapshot{TenantRef: tenantRef, OrgVersion: 12}, nil
+}
+
+func newApprovalTestRouterWithVerifier(t *testing.T, sessions browserSessionResolver, tickets trust.AccessTicketVerifier, source ApprovalSnapshotSource, store ApprovalRouteStore, verifier ChangeFactsVerifier) http.Handler {
 	t.Helper()
-	handler, err := newApprovalHandler(approvalDependencies{EnterpriseID: "ent-1", Sessions: sessions, TicketActors: tickets, Source: source, Store: store, FactsVerifier: verifier})
+	audit := &recordingTrustAudit{}
+	handler, err := newApprovalHandler(approvalDependencies{EnterpriseID: "ent-1", Source: source, Store: store, FactsVerifier: verifier, Audit: audit})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux := http.NewServeMux()
+	mux := newGatewayAPIMux("gateway-api", "test")
 	handler.register(mux)
-	return browserResponseHeaders(mux)
+	cfg := trust.ResolverConfig{
+		TenantRef:    "ent-1",
+		OrgSnapshots: sealedOrgVersionResolver{source: approvalSnapshotVersionSource{}},
+		Audit:        browserTrustAuditSink{sink: audit},
+		Protected: func(r *http.Request) bool {
+			return trustProtectedPath(r.URL.Path)
+		},
+	}
+	if sessions != nil {
+		cfg.Sessions = browserSessionTrustVerifier{sessions: sessions}
+	}
+	cfg.AccessTickets = tickets
+	resolver, err := trust.NewResolver(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return browserRequestDeadline(resolver.Middleware(browserResponseHeaders(mux)), time.Second)
 }
 
 func directApprovalSource(t *testing.T, enterprise string, version int64, requester string) *stubApprovalSource {

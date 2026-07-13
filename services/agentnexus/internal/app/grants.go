@@ -13,6 +13,7 @@ import (
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 )
 
 type GrantResourceOwner struct {
@@ -27,46 +28,54 @@ type GrantResourceOwnerResolver interface {
 	ResolveGrantResourceOwner(context.Context, string, string, string) (GrantResourceOwner, error)
 }
 
+// ScopedGrantAuthorizer authorizes step grants against the server-resolved
+// resource owner and the sealed capability policy. The organization
+// placement and version never come from the caller: placement is the owner
+// registry's, the version is the actor's sealed ingress version.
 type ScopedGrantAuthorizer struct {
 	owners    GrantResourceOwnerResolver
-	evaluator atlasDecisionEvaluator
+	evaluator capabilityDecisionEvaluator
 }
 
-func NewScopedGrantAuthorizer(owners GrantResourceOwnerResolver, evaluator atlasDecisionEvaluator) *ScopedGrantAuthorizer {
+func NewScopedGrantAuthorizer(owners GrantResourceOwnerResolver, evaluator capabilityDecisionEvaluator) *ScopedGrantAuthorizer {
 	return &ScopedGrantAuthorizer{owners: owners, evaluator: evaluator}
 }
 
 func (a *ScopedGrantAuthorizer) AuthorizeGrant(ctx context.Context, actor tickets.Actor, input tickets.CreateStepGrantInput) (tickets.GrantAuthorization, error) {
-	if a == nil || a.owners == nil || a.evaluator == nil || input.ResourceType != string(policy.ResourceDreamEvidence) || input.Action != string(policy.ActionDreamEvidenceRead) {
+	if a == nil || a.owners == nil || a.evaluator == nil || input.ResourceType != string(policy.ResourceDreamEvidence) || input.Action != "read" || actor.OrgVersion < 1 {
 		return tickets.GrantAuthorization{}, tickets.ErrGrantDenied
 	}
 	owner, err := a.owners.ResolveGrantResourceOwner(ctx, actor.EnterpriseID, input.ResourceType, input.ResourceID)
 	if err != nil {
 		return tickets.GrantAuthorization{}, tickets.ErrGrantUnavailable
 	}
-	if owner.EnterpriseID != actor.EnterpriseID || owner.ResourceType != input.ResourceType || owner.ResourceID != input.ResourceID || owner.OrgUnitID != input.OrgUnitID || owner.OrgVersion != input.OrgVersion {
+	if owner.EnterpriseID != actor.EnterpriseID || owner.ResourceType != input.ResourceType || owner.ResourceID != input.ResourceID || !canonicalAuthorizationValue(owner.OrgUnitID) || owner.OrgVersion != actor.OrgVersion {
 		return tickets.GrantAuthorization{}, tickets.ErrGrantDenied
 	}
-	decision, err := a.evaluator.Evaluate(ctx, policy.ScopedRequest{EnterpriseID: actor.EnterpriseID, ActorUserID: actor.UserID, OrgUnitID: input.OrgUnitID, OrgVersion: input.OrgVersion, ResourceType: policy.ResourceDreamEvidence, ResourceID: input.ResourceID, Action: policy.ActionDreamEvidenceRead})
+	decision, err := a.evaluator.Evaluate(ctx, policy.CapabilityRequest{
+		TenantRef:        actor.EnterpriseID,
+		PrincipalRef:     actor.UserID,
+		SealedOrgVersion: actor.OrgVersion,
+		ResourceType:     policy.ResourceDreamEvidence,
+		ResourceID:       input.ResourceID,
+		Capability:       policy.CapabilityEvidenceRead,
+		TargetOrgUnitID:  owner.OrgUnitID,
+	})
 	if err != nil {
 		return tickets.GrantAuthorization{}, tickets.ErrGrantUnavailable
 	}
 	allowed := decision.Decision == policy.DecisionAllow &&
-		decision.OrgVersion == input.OrgVersion &&
-		decision.RiskLevel == policy.AtlasRiskHigh &&
-		decision.FallbackAction == "" &&
+		decision.OrgVersion == actor.OrgVersion &&
+		decision.RiskLevel == policy.CapabilityRiskHigh &&
+		decision.FallbackCapability == "" &&
 		len(decision.MaskFields) == 0 &&
 		len(decision.Permissions) == 1 && decision.Permissions[0] == policy.PermissionApproveHighRisk &&
 		validGrantEvidenceScopes(decision.OrgUnitIDs)
-	normalizedScopes := []string{}
-	if allowed {
-		normalizedScopes = []string{input.OrgUnitID}
-	}
-	return tickets.GrantAuthorization{Allowed: allowed, EnterpriseID: actor.EnterpriseID, OrgVersion: decision.OrgVersion, OrgUnitIDs: normalizedScopes}, nil
+	return tickets.GrantAuthorization{Allowed: allowed, EnterpriseID: actor.EnterpriseID, OrgVersion: decision.OrgVersion, OrgUnitID: owner.OrgUnitID}, nil
 }
 
 func validGrantEvidenceScopes(scopes []string) bool {
-	if len(scopes) == 0 || len(scopes) > policy.MaxAtlasMemberships {
+	if len(scopes) == 0 || len(scopes) > policy.MaxSealedMemberships {
 		return false
 	}
 	seen := make(map[string]struct{}, len(scopes))
@@ -86,19 +95,20 @@ const maxGrantRequestBytes = 16 << 10
 
 type grantService interface {
 	AuthorizeAndCreateGrant(context.Context, tickets.Actor, tickets.CreateStepGrantInput) (tickets.StepGrant, error)
-	VerifyGrant(context.Context, tickets.VerifyStepGrantInput) (tickets.StepGrant, error)
+	VerifyGrant(context.Context, tickets.Actor, tickets.VerifyStepGrantInput) (tickets.StepGrant, error)
 }
 
 type grantHandler struct {
-	auth    *authorizationHandler
-	service grantService
+	enterpriseID string
+	service      grantService
+	audit        BrowserAuditSink
 }
 
-func newGrantHandler(auth *authorizationHandler, service grantService) (*grantHandler, error) {
-	if auth == nil || service == nil {
+func newGrantHandler(enterpriseID string, service grantService, audit BrowserAuditSink) (*grantHandler, error) {
+	if enterpriseID == "" || service == nil {
 		return nil, errors.New("grant dependencies incomplete")
 	}
-	return &grantHandler{auth: auth, service: service}, nil
+	return &grantHandler{enterpriseID: enterpriseID, service: service, audit: audit}, nil
 }
 
 func (h *grantHandler) register(mux *http.ServeMux) {
@@ -106,9 +116,26 @@ func (h *grantHandler) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/tickets/verify", h.verify)
 }
 
+// grantActor derives the tickets actor from the immutable trusted context.
+func (h *grantHandler) grantActor(r *http.Request) (tickets.Actor, trust.Context, int) {
+	trustedCtx, status := trustedRequestContext(r)
+	if status != 0 {
+		return tickets.Actor{}, trust.Context{}, status
+	}
+	if trustedCtx.Principal.TenantRef != h.enterpriseID {
+		return tickets.Actor{}, trust.Context{}, http.StatusUnauthorized
+	}
+	return tickets.Actor{
+		EnterpriseID: trustedCtx.Principal.TenantRef,
+		UserID:       trustedCtx.Principal.PrincipalRef,
+		CaseTicketID: trustedCtx.CaseTicketRef,
+		OrgVersion:   trustedCtx.OrgVersion,
+	}, trustedCtx, 0
+}
+
 func (h *grantHandler) create(w http.ResponseWriter, r *http.Request) {
 	setNoStore(w)
-	actor, status := h.auth.authenticateActor(r)
+	actor, trustedCtx, status := h.grantActor(r)
 	if status != 0 {
 		writeGrantError(w, status)
 		return
@@ -119,18 +146,28 @@ func (h *grantHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct {
 		CaseTicketID string `json:"case_ticket_id"`
-		OrgUnitID    string `json:"org_unit_id"`
-		OrgVersion   int64  `json:"org_version"`
 		ResourceType string `json:"resource_type"`
 		ResourceID   string `json:"resource_id"`
 		Action       string `json:"action"`
 		TTLSeconds   int64  `json:"ttl_seconds"`
 	}
-	if !decodeExactGrantFields(fields, map[string]any{"case_ticket_id": &input.CaseTicketID, "org_unit_id": &input.OrgUnitID, "org_version": &input.OrgVersion, "resource_type": &input.ResourceType, "resource_id": &input.ResourceID, "action": &input.Action, "ttl_seconds": &input.TTLSeconds}) || input.TTLSeconds <= 0 || input.TTLSeconds > int64((24*time.Hour)/time.Second) {
+	// ttl_seconds is bounded here only to the frozen contract's 1..86400 range.
+	// The requested TTL is then clamped DOWN to tickets.MaxStepGrantTTL by
+	// AuthorizeAndCreateGrant; this cap is not silent — the response's
+	// expires_at reflects the actually granted (capped) lifetime, so the caller
+	// always sees the true expiry rather than the value it asked for.
+	if !h.decodeExactGrantFields(r, trustedCtx, fields, map[string]any{"case_ticket_id": &input.CaseTicketID, "resource_type": &input.ResourceType, "resource_id": &input.ResourceID, "action": &input.Action, "ttl_seconds": &input.TTLSeconds}) || input.TTLSeconds <= 0 || input.TTLSeconds > int64((24*time.Hour)/time.Second) {
 		writeGrantError(w, http.StatusBadRequest)
 		return
 	}
-	grant, err := h.service.AuthorizeAndCreateGrant(r.Context(), tickets.Actor{EnterpriseID: actor.EnterpriseID, UserID: actor.UserID, CaseTicketID: actor.CaseTicketID}, tickets.CreateStepGrantInput{CaseTicketID: input.CaseTicketID, OrgUnitID: input.OrgUnitID, OrgVersion: input.OrgVersion, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, TTL: time.Duration(input.TTLSeconds) * time.Second})
+	// The business-context lineage in the body may never contradict the
+	// credential's own Case Ticket: body values never win.
+	if actor.CaseTicketID != "" && input.CaseTicketID != actor.CaseTicketID {
+		auditTrustViolation(r.Context(), h.audit, actor.EnterpriseID, actor.UserID, "trusted_context.lineage_conflict")
+		writeGrantError(w, http.StatusForbidden)
+		return
+	}
+	grant, err := h.service.AuthorizeAndCreateGrant(r.Context(), actor, tickets.CreateStepGrantInput{CaseTicketID: input.CaseTicketID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, TTL: time.Duration(input.TTLSeconds) * time.Second})
 	if err != nil {
 		writeGrantServiceError(w, err)
 		return
@@ -140,7 +177,7 @@ func (h *grantHandler) create(w http.ResponseWriter, r *http.Request) {
 
 func (h *grantHandler) verify(w http.ResponseWriter, r *http.Request) {
 	setNoStore(w)
-	actor, status := h.auth.authenticateActor(r)
+	actor, trustedCtx, status := h.grantActor(r)
 	if status != 0 {
 		writeGrantError(w, status)
 		return
@@ -150,11 +187,11 @@ func (h *grantHandler) verify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct{ Token, ResourceType, ResourceID, Action, Scope string }
-	if !decodeExactGrantFields(fields, map[string]any{"token": &input.Token, "resource_type": &input.ResourceType, "resource_id": &input.ResourceID, "action": &input.Action, "scope": &input.Scope}) {
+	if !h.decodeExactGrantFields(r, trustedCtx, fields, map[string]any{"token": &input.Token, "resource_type": &input.ResourceType, "resource_id": &input.ResourceID, "action": &input.Action, "scope": &input.Scope}) {
 		writeGrantError(w, http.StatusBadRequest)
 		return
 	}
-	grant, err := h.service.VerifyGrant(r.Context(), tickets.VerifyStepGrantInput{Token: input.Token, EnterpriseID: actor.EnterpriseID, ActorUserID: actor.UserID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, Scope: input.Scope})
+	grant, err := h.service.VerifyGrant(r.Context(), actor, tickets.VerifyStepGrantInput{Token: input.Token, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, Scope: input.Scope})
 	if err != nil {
 		writeGrantServiceError(w, err)
 		return
@@ -219,7 +256,16 @@ func decodeUniqueGrantObject(w http.ResponseWriter, r *http.Request) (map[string
 	return fields, true
 }
 
-func decodeExactGrantFields(fields map[string]json.RawMessage, targets map[string]any) bool {
+// decodeExactGrantFields decodes the exact expected member set. A member
+// carrying trusted identity or organization facts is rejected AND audited;
+// body values never win.
+func (h *grantHandler) decodeExactGrantFields(r *http.Request, trustedCtx trust.Context, fields map[string]json.RawMessage, targets map[string]any) bool {
+	for key := range fields {
+		if _, expected := targets[key]; !expected && trust.ForgedIdentityField(key) {
+			auditTrustViolation(r.Context(), h.audit, trustedCtx.Principal.TenantRef, trustedCtx.Principal.PrincipalRef, "trusted_context.forged_body_field")
+			return false
+		}
+	}
 	if len(fields) != len(targets) {
 		return false
 	}

@@ -11,6 +11,7 @@ import (
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -36,6 +37,7 @@ type grantWriteTxBeginner interface {
 }
 type grantReader interface {
 	GetGrantResourceOwner(context.Context, db.GetGrantResourceOwnerParams) (db.SensitiveResourceOwnership, error)
+	GetStepGrantByTokenHash(context.Context, db.GetStepGrantByTokenHashParams) (db.GetStepGrantByTokenHashRow, error)
 }
 
 type postgresGrantPool struct{ pool *pgxpool.Pool }
@@ -125,6 +127,49 @@ func (s *PostgresGrantStore) ResolveGrantResourceOwner(ctx context.Context, ente
 	return GrantResourceOwner{EnterpriseID: row.EnterpriseID, ResourceType: row.ResourceType, ResourceID: row.ResourceID, OrgUnitID: row.OrgUnitID, OrgVersion: row.OrgVersion}, nil
 }
 
+// LookupStepGrantIdentity resolves the verified identity bound to a Step Grant
+// credential (tenant, actor, Case Ticket lineage and grant ref) from its
+// opaque token hash. It is the persistence half of the trust layer's Step
+// Grant context source; the trust resolver enforces the grant's expiry
+// fail-closed. Errors translate onto the verifier sentinel contract.
+func (s *PostgresGrantStore) LookupStepGrantIdentity(ctx context.Context, enterpriseID, tokenHash string) (trust.GrantIdentity, error) {
+	if s == nil || s.reader == nil || !canonicalAuthorizationValue(enterpriseID) || len(tokenHash) != 64 {
+		return trust.GrantIdentity{}, trust.ErrSourceUnavailable
+	}
+	row, err := s.reader.GetStepGrantByTokenHash(ctx, db.GetStepGrantByTokenHashParams{EnterpriseID: enterpriseID, TokenHash: tokenHash})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return trust.GrantIdentity{}, trust.ErrCredentialRejected
+	}
+	if err != nil {
+		return trust.GrantIdentity{}, errors.Join(trust.ErrSourceUnavailable, err)
+	}
+	if row.EnterpriseID != enterpriseID || row.TokenHash != tokenHash || !canonicalAuthorizationValue(row.ID) || !canonicalAuthorizationValue(row.ActorUserID) || !canonicalAuthorizationValue(row.CaseTicketID) || !row.ExpiresAt.Valid {
+		return trust.GrantIdentity{}, trust.ErrCredentialRejected
+	}
+	return trust.GrantIdentity{TenantRef: row.EnterpriseID, PrincipalRef: row.ActorUserID, TicketRef: row.CaseTicketID, GrantRef: row.ID, ExpiresAt: row.ExpiresAt.Time}, nil
+}
+
+// stepGrantTrustVerifier adapts the grant store onto the trust layer's Step
+// Grant credential source, hashing the presented opaque token before lookup.
+type stepGrantTrustVerifier struct {
+	enterpriseID string
+	store        *PostgresGrantStore
+}
+
+// NewPostgresStepGrantVerifier wires the fourth advertised trusted-context
+// source (Step Grant) in production so `Authorization: StepGrant <token>`
+// resolves a verified principal context.
+func NewPostgresStepGrantVerifier(enterpriseID string, store *PostgresGrantStore) trust.StepGrantVerifier {
+	return stepGrantTrustVerifier{enterpriseID: enterpriseID, store: store}
+}
+
+func (v stepGrantTrustVerifier) VerifyStepGrant(ctx context.Context, token string) (trust.GrantIdentity, error) {
+	if v.store == nil || !canonicalAuthorizationValue(v.enterpriseID) {
+		return trust.GrantIdentity{}, trust.ErrSourceUnavailable
+	}
+	return v.store.LookupStepGrantIdentity(ctx, v.enterpriseID, tickets.HashStepGrantToken(token))
+}
+
 func (s *PostgresGrantStore) CreateStepGrantAndAudit(ctx context.Context, grant tickets.StepGrant, auditID string) (result tickets.StepGrant, resultErr error) {
 	if s == nil || s.writer == nil || len(grant.TokenHash) != 64 || grant.Token != "" || auditID == "" {
 		return tickets.StepGrant{}, tickets.ErrGrantUnavailable
@@ -201,7 +246,7 @@ func grantEvidenceHashes(grant tickets.StepGrant) (string, string) {
 	return hex.EncodeToString(in[:]), hex.EncodeToString(out[:])
 }
 
-func (s *PostgresGrantStore) VerifyStepGrantAndAudit(ctx context.Context, input tickets.VerifyStepGrantInput, tokenHash, auditID string, now time.Time) (result tickets.StepGrant, resultErr error) {
+func (s *PostgresGrantStore) VerifyStepGrantAndAudit(ctx context.Context, actor tickets.Actor, input tickets.VerifyStepGrantInput, tokenHash, auditID string, now time.Time) (result tickets.StepGrant, resultErr error) {
 	if s == nil || s.writer == nil || len(tokenHash) != 64 || auditID == "" {
 		return tickets.StepGrant{}, tickets.ErrGrantUnavailable
 	}
@@ -216,7 +261,7 @@ func (s *PostgresGrantStore) VerifyStepGrantAndAudit(ctx context.Context, input 
 			resultErr = errors.Join(resultErr, rollbackErr)
 		}
 	}()
-	row, err := tx.GetStepGrantByTokenHash(ctx, db.GetStepGrantByTokenHashParams{EnterpriseID: input.EnterpriseID, TokenHash: tokenHash})
+	row, err := tx.GetStepGrantByTokenHash(ctx, db.GetStepGrantByTokenHashParams{EnterpriseID: actor.EnterpriseID, TokenHash: tokenHash})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return tickets.StepGrant{}, tickets.ErrGrantDenied
@@ -228,7 +273,7 @@ func (s *PostgresGrantStore) VerifyStepGrantAndAudit(ctx context.Context, input 
 		return tickets.StepGrant{}, tickets.ErrGrantUnavailable
 	}
 	grant := tickets.StepGrant{ID: row.ID, TokenHash: row.TokenHash, EnterpriseID: row.EnterpriseID, ActorUserID: row.ActorUserID, CaseTicketID: row.CaseTicketID, OrgUnitID: row.OrgUnitID, OrgVersion: row.OrgVersion, ResourceType: row.ResourceType, ResourceID: row.ResourceID, Action: row.Action, Scopes: scopes, ExpiresAt: row.ExpiresAt.Time, CreatedAt: row.CreatedAt.Time}
-	if grant.EnterpriseID != input.EnterpriseID || grant.ActorUserID != input.ActorUserID || grant.ResourceType != input.ResourceType || grant.ResourceID != input.ResourceID || grant.Action != input.Action || len(grant.Scopes) != 1 || grant.Scopes[0] != input.Scope || !now.Before(grant.ExpiresAt) {
+	if grant.EnterpriseID != actor.EnterpriseID || grant.ActorUserID != actor.UserID || grant.ResourceType != input.ResourceType || grant.ResourceID != input.ResourceID || grant.Action != input.Action || len(grant.Scopes) != 1 || grant.Scopes[0] != input.Scope || !now.Before(grant.ExpiresAt) {
 		return tickets.StepGrant{}, tickets.ErrGrantDenied
 	}
 	if _, err = tx.AcquireEnterpriseAuditLock(ctx, grant.EnterpriseID); err != nil {
@@ -238,7 +283,7 @@ func (s *PostgresGrantStore) VerifyStepGrantAndAudit(ctx context.Context, input 
 	if err != nil {
 		return tickets.StepGrant{}, errors.Join(tickets.ErrGrantUnavailable, err)
 	}
-	inputHash, outputHash := grantVerificationEvidenceHashes(input, grant, now)
+	inputHash, outputHash := grantVerificationEvidenceHashes(actor, input, grant, now)
 	event := audit.NewEvent(audit.EventInput{ID: auditID, EnterpriseID: grant.EnterpriseID, CaseTicketID: grant.CaseTicketID, StepGrantID: grant.ID, ActorUserID: grant.ActorUserID, ResourceType: grant.ResourceType, ResourceID: grant.ResourceID, Action: "step_grant.verify", Decision: "allow", InputHash: inputHash, OutputHash: outputHash, EvidencePointer: grant.ID}, previous)
 	if err = tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, CaseTicketID: textValue(event.CaseTicketID), StepGrantID: textValue(event.StepGrantID), ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, InputHash: textValue(event.InputHash), OutputHash: textValue(event.OutputHash), EvidencePointer: textValue(event.EvidencePointer), PrevHash: textValue(event.PrevHash), EventHash: event.EventHash}); err != nil {
 		return tickets.StepGrant{}, errors.Join(tickets.ErrGrantUnavailable, err)
@@ -249,11 +294,11 @@ func (s *PostgresGrantStore) VerifyStepGrantAndAudit(ctx context.Context, input 
 	return grant, nil
 }
 
-func grantVerificationEvidenceHashes(input tickets.VerifyStepGrantInput, grant tickets.StepGrant, verifiedAt time.Time) (string, string) {
+func grantVerificationEvidenceHashes(actor tickets.Actor, input tickets.VerifyStepGrantInput, grant tickets.StepGrant, verifiedAt time.Time) (string, string) {
 	raw, _ := json.Marshal(struct {
 		EnterpriseID, ActorUserID, CaseTicketID, StepGrantID, ResourceType, ResourceID, Action, Scope string
 		VerifiedAt                                                                                    int64
-	}{input.EnterpriseID, input.ActorUserID, grant.CaseTicketID, grant.ID, input.ResourceType, input.ResourceID, input.Action, input.Scope, verifiedAt.UnixNano()})
+	}{actor.EnterpriseID, actor.UserID, grant.CaseTicketID, grant.ID, input.ResourceType, input.ResourceID, input.Action, input.Scope, verifiedAt.UnixNano()})
 	in := sha256.Sum256(raw)
 	out := sha256.Sum256([]byte(grant.TokenHash + ":allow"))
 	return hex.EncodeToString(in[:]), hex.EncodeToString(out[:])

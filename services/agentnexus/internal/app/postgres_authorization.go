@@ -6,11 +6,49 @@ import (
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type atlasPolicyTx interface {
+// latestOrgVersionReader reads the current sealed organization snapshot
+// version with a single indexed query.
+type latestOrgVersionReader interface {
+	GetLatestAuthorizationOrgVersion(context.Context, string) (int64, error)
+}
+
+// postgresOrgVersionSource resolves the sealed org snapshot version pinned at
+// ingress. It runs ONE `GetLatestAuthorizationOrgVersion` query (the same
+// sealed-version selection LoadAccessSnapshot performs internally) and never
+// materializes the up-to-10k-row org snapshot, which the capability evaluator
+// loads later only when a decision is actually taken.
+type postgresOrgVersionSource struct {
+	reader latestOrgVersionReader
+}
+
+// NewPostgresOrgVersionSource is the ingress org-version resolver used by the
+// trust layer; distinct from the full snapshot source used by the evaluator.
+func NewPostgresOrgVersionSource(pool *pgxpool.Pool) trust.OrgSnapshotResolver {
+	return &postgresOrgVersionSource{reader: db.New(pool)}
+}
+
+func (s *postgresOrgVersionSource) ResolveSealedOrgVersion(ctx context.Context, tenantRef, _ string) (int64, error) {
+	if s == nil || s.reader == nil || tenantRef == "" {
+		return 0, trust.ErrSourceUnavailable
+	}
+	version, err := s.reader.GetLatestAuthorizationOrgVersion(ctx, tenantRef)
+	if err != nil {
+		// No sealed policy (pgx.ErrNoRows) or a database fault both fail closed
+		// as retryable-unavailable; the caller maps this to 503.
+		return 0, errors.Join(trust.ErrSourceUnavailable, err)
+	}
+	if version < 1 {
+		return 0, trust.ErrSourceUnavailable
+	}
+	return version, nil
+}
+
+type policySnapshotTx interface {
 	GetLatestAuthorizationOrgVersion(context.Context, string) (int64, error)
 	ListAuthorizationOrgUnits(context.Context, db.ListAuthorizationOrgUnitsParams) ([]db.OrgPolicySnapshotUnit, error)
 	ListAuthorizationMemberships(context.Context, db.ListAuthorizationMembershipsParams) ([]db.OrgPolicySnapshotMembership, error)
@@ -18,61 +56,61 @@ type atlasPolicyTx interface {
 	Rollback(context.Context) error
 }
 
-type atlasPolicyTxBeginner interface {
-	BeginAtlasPolicyTx(context.Context, pgx.TxOptions) (atlasPolicyTx, error)
+type policySnapshotTxBeginner interface {
+	BeginPolicySnapshotTx(context.Context, pgx.TxOptions) (policySnapshotTx, error)
 }
 
-type postgresAtlasPolicyPool struct {
+type postgresPolicySnapshotPool struct {
 	pool *pgxpool.Pool
 }
 
-func (p *postgresAtlasPolicyPool) BeginAtlasPolicyTx(ctx context.Context, options pgx.TxOptions) (atlasPolicyTx, error) {
+func (p *postgresPolicySnapshotPool) BeginPolicySnapshotTx(ctx context.Context, options pgx.TxOptions) (policySnapshotTx, error) {
 	if p == nil || p.pool == nil {
-		return nil, policy.ErrAtlasPolicyUnavailable
+		return nil, policy.ErrPolicyUnavailable
 	}
 	tx, err := p.pool.BeginTx(ctx, options)
 	if err != nil {
 		return nil, err
 	}
-	return &postgresAtlasPolicyTx{Tx: tx, queries: db.New(tx)}, nil
+	return &postgresPolicySnapshotTx{Tx: tx, queries: db.New(tx)}, nil
 }
 
-type postgresAtlasPolicyTx struct {
+type postgresPolicySnapshotTx struct {
 	pgx.Tx
 	queries *db.Queries
 }
 
-func (t *postgresAtlasPolicyTx) GetLatestAuthorizationOrgVersion(ctx context.Context, enterpriseID string) (int64, error) {
+func (t *postgresPolicySnapshotTx) GetLatestAuthorizationOrgVersion(ctx context.Context, enterpriseID string) (int64, error) {
 	return t.queries.GetLatestAuthorizationOrgVersion(ctx, enterpriseID)
 }
 
-func (t *postgresAtlasPolicyTx) ListAuthorizationOrgUnits(ctx context.Context, params db.ListAuthorizationOrgUnitsParams) ([]db.OrgPolicySnapshotUnit, error) {
+func (t *postgresPolicySnapshotTx) ListAuthorizationOrgUnits(ctx context.Context, params db.ListAuthorizationOrgUnitsParams) ([]db.OrgPolicySnapshotUnit, error) {
 	return t.queries.ListAuthorizationOrgUnits(ctx, params)
 }
 
-func (t *postgresAtlasPolicyTx) ListAuthorizationMemberships(ctx context.Context, params db.ListAuthorizationMembershipsParams) ([]db.OrgPolicySnapshotMembership, error) {
+func (t *postgresPolicySnapshotTx) ListAuthorizationMemberships(ctx context.Context, params db.ListAuthorizationMembershipsParams) ([]db.OrgPolicySnapshotMembership, error) {
 	return t.queries.ListAuthorizationMemberships(ctx, params)
 }
 
-type postgresAtlasPolicySource struct {
-	pool atlasPolicyTxBeginner
+type postgresSnapshotSource struct {
+	pool policySnapshotTxBeginner
 }
 
-func NewPostgresAtlasPolicySource(pool *pgxpool.Pool) policy.AtlasPolicySource {
-	return newPostgresAtlasPolicySourceWithPool(&postgresAtlasPolicyPool{pool: pool})
+func NewPostgresSnapshotSource(pool *pgxpool.Pool) policy.SnapshotSource {
+	return newPostgresSnapshotSourceWithPool(&postgresPolicySnapshotPool{pool: pool})
 }
 
-func newPostgresAtlasPolicySourceWithPool(pool atlasPolicyTxBeginner) *postgresAtlasPolicySource {
-	return &postgresAtlasPolicySource{pool: pool}
+func newPostgresSnapshotSourceWithPool(pool policySnapshotTxBeginner) *postgresSnapshotSource {
+	return &postgresSnapshotSource{pool: pool}
 }
 
-func (s *postgresAtlasPolicySource) LoadAccessSnapshot(ctx context.Context, enterpriseID, actorUserID string) (policy.AtlasAccessSnapshot, error) {
+func (s *postgresSnapshotSource) LoadAccessSnapshot(ctx context.Context, enterpriseID, actorUserID string) (policy.SealedAccessSnapshot, error) {
 	if s == nil || s.pool == nil || enterpriseID == "" || actorUserID == "" {
-		return policy.AtlasAccessSnapshot{}, policy.ErrAtlasPolicyUnavailable
+		return policy.SealedAccessSnapshot{}, policy.ErrPolicyUnavailable
 	}
-	tx, err := s.pool.BeginAtlasPolicyTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.pool.BeginPolicySnapshotTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return policy.AtlasAccessSnapshot{}, errors.Join(policy.ErrAtlasPolicyUnavailable, err)
+		return policy.SealedAccessSnapshot{}, errors.Join(policy.ErrPolicyUnavailable, err)
 	}
 	defer func() {
 		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
@@ -82,54 +120,54 @@ func (s *postgresAtlasPolicySource) LoadAccessSnapshot(ctx context.Context, ente
 
 	version, err := tx.GetLatestAuthorizationOrgVersion(ctx, enterpriseID)
 	if err != nil || version < 1 {
-		return policy.AtlasAccessSnapshot{}, errors.Join(policy.ErrAtlasPolicyUnavailable, err)
+		return policy.SealedAccessSnapshot{}, errors.Join(policy.ErrPolicyUnavailable, err)
 	}
 	units, err := tx.ListAuthorizationOrgUnits(ctx, db.ListAuthorizationOrgUnitsParams{EnterpriseID: enterpriseID, VersionNumber: version})
 	if err != nil {
-		return policy.AtlasAccessSnapshot{}, errors.Join(policy.ErrAtlasPolicyUnavailable, err)
+		return policy.SealedAccessSnapshot{}, errors.Join(policy.ErrPolicyUnavailable, err)
 	}
 	if err := ctx.Err(); err != nil {
-		return policy.AtlasAccessSnapshot{}, errors.Join(policy.ErrAtlasPolicyUnavailable, err)
+		return policy.SealedAccessSnapshot{}, errors.Join(policy.ErrPolicyUnavailable, err)
 	}
-	if len(units) > policy.MaxAtlasOrgUnits {
-		return policy.AtlasAccessSnapshot{}, policy.ErrAtlasPolicyUnavailable
+	if len(units) > policy.MaxSealedOrgUnits {
+		return policy.SealedAccessSnapshot{}, policy.ErrPolicyUnavailable
 	}
 	memberships, err := tx.ListAuthorizationMemberships(ctx, db.ListAuthorizationMembershipsParams{EnterpriseID: enterpriseID, VersionNumber: version, EnterpriseUserID: actorUserID})
 	if err != nil {
-		return policy.AtlasAccessSnapshot{}, errors.Join(policy.ErrAtlasPolicyUnavailable, err)
+		return policy.SealedAccessSnapshot{}, errors.Join(policy.ErrPolicyUnavailable, err)
 	}
 	if err := ctx.Err(); err != nil {
-		return policy.AtlasAccessSnapshot{}, errors.Join(policy.ErrAtlasPolicyUnavailable, err)
+		return policy.SealedAccessSnapshot{}, errors.Join(policy.ErrPolicyUnavailable, err)
 	}
-	if len(memberships) > policy.MaxAtlasMemberships {
-		return policy.AtlasAccessSnapshot{}, policy.ErrAtlasPolicyUnavailable
+	if len(memberships) > policy.MaxSealedMemberships {
+		return policy.SealedAccessSnapshot{}, policy.ErrPolicyUnavailable
 	}
 
-	snapshot := policy.AtlasAccessSnapshot{EnterpriseID: enterpriseID, OrgVersion: version, OrgUnits: make([]policy.AtlasOrgUnit, 0, len(units)), Memberships: make([]policy.AtlasMembership, 0, len(memberships))}
+	snapshot := policy.SealedAccessSnapshot{TenantRef: enterpriseID, OrgVersion: version, OrgUnits: make([]policy.SealedOrgUnit, 0, len(units)), Memberships: make([]policy.SealedMembership, 0, len(memberships))}
 	for _, unit := range units {
 		if err := ctx.Err(); err != nil {
-			return policy.AtlasAccessSnapshot{}, errors.Join(policy.ErrAtlasPolicyUnavailable, err)
+			return policy.SealedAccessSnapshot{}, errors.Join(policy.ErrPolicyUnavailable, err)
 		}
 		if unit.EnterpriseID != enterpriseID || unit.VersionNumber != version {
-			return policy.AtlasAccessSnapshot{}, policy.ErrAtlasPolicyUnavailable
+			return policy.SealedAccessSnapshot{}, policy.ErrPolicyUnavailable
 		}
 		parentID := ""
 		if unit.ParentID.Valid {
 			parentID = unit.ParentID.String
 		}
-		snapshot.OrgUnits = append(snapshot.OrgUnits, policy.AtlasOrgUnit{ID: unit.OrgUnitID, ParentID: parentID})
+		snapshot.OrgUnits = append(snapshot.OrgUnits, policy.SealedOrgUnit{ID: unit.OrgUnitID, ParentID: parentID})
 	}
 	for _, membership := range memberships {
 		if err := ctx.Err(); err != nil {
-			return policy.AtlasAccessSnapshot{}, errors.Join(policy.ErrAtlasPolicyUnavailable, err)
+			return policy.SealedAccessSnapshot{}, errors.Join(policy.ErrPolicyUnavailable, err)
 		}
 		if membership.EnterpriseID != enterpriseID || membership.VersionNumber != version || membership.EnterpriseUserID != actorUserID {
-			return policy.AtlasAccessSnapshot{}, policy.ErrAtlasPolicyUnavailable
+			return policy.SealedAccessSnapshot{}, policy.ErrPolicyUnavailable
 		}
-		snapshot.Memberships = append(snapshot.Memberships, policy.AtlasMembership{OrgUnitID: membership.OrgUnitID, Role: membership.Role})
+		snapshot.Memberships = append(snapshot.Memberships, policy.SealedMembership{OrgUnitID: membership.OrgUnitID, Role: membership.Role})
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return policy.AtlasAccessSnapshot{}, errors.Join(policy.ErrAtlasPolicyUnavailable, err)
+		return policy.SealedAccessSnapshot{}, errors.Join(policy.ErrPolicyUnavailable, err)
 	}
 	return snapshot, nil
 }

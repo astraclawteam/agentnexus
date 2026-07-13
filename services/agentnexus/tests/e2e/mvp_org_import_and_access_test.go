@@ -122,25 +122,33 @@ func TestMVPOrgImportAndAccess(t *testing.T) {
 	}
 
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
-	ticketService := tickets.NewService(tickets.NewMemoryStore(), tickets.WithClock(func() time.Time { return now }), tickets.WithIDGenerator(sequenceIDs("case_ticket_1", "step_grant_1")))
-	caseTicket, err := ticketService.CreateCaseTicket(tickets.CreateCaseTicketInput{
-		EnterpriseID: enterprise.ID,
-		ActorUserID:  "user_ada",
-		RequestID:    "claw_req_1",
-		TraceID:      "trace_mvp_1",
-		TTL:          30 * time.Minute,
+	// Identity is credential-derived: the trust layer resolves the verified
+	// actor at ingress and the ticket service mints only from it.
+	verifiedActor := tickets.Actor{EnterpriseID: enterprise.ID, UserID: "user_ada", OrgVersion: 1}
+	store := tickets.NewMemoryStore()
+	ticketService := tickets.NewService(store, tickets.WithClock(func() time.Time { return now }), tickets.WithIDGenerator(sequenceIDs("case_ticket_1", "step_grant_1")))
+	caseTicket, err := ticketService.IssueCaseTicket(ctx, verifiedActor, tickets.IssueCaseTicketInput{
+		RequestID: "claw_req_1",
+		TraceID:   "trace_mvp_1",
+		TTL:       30 * time.Minute,
 	})
 	if err != nil {
-		t.Fatalf("CreateCaseTicket returned error: %v", err)
+		t.Fatalf("IssueCaseTicket returned error: %v", err)
 	}
-	stepGrant, err := ticketService.CreateStepGrant(tickets.CreateStepGrantInput{
-		EnterpriseID: enterprise.ID,
+	// The scoped read grant persists through the store; its tenant, actor and
+	// sealed version come from the verified actor, never from caller input.
+	stepGrant, err := store.CreateStepGrant(tickets.StepGrant{
+		ID:           "step_grant_1",
+		EnterpriseID: verifiedActor.EnterpriseID,
+		ActorUserID:  verifiedActor.UserID,
 		CaseTicketID: caseTicket.ID,
+		OrgVersion:   verifiedActor.OrgVersion,
 		ResourceType: "knowledge_space",
 		ResourceID:   "ks_legal_contracts",
 		Action:       "read",
 		Scopes:       policyResult.DataScope,
-		TTL:          10 * time.Minute,
+		ExpiresAt:    now.Add(10 * time.Minute),
+		CreatedAt:    now,
 	})
 	if err != nil {
 		t.Fatalf("CreateStepGrant returned error: %v", err)

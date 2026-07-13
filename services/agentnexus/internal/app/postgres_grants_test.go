@@ -9,9 +9,73 @@ import (
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type fakeGrantReader struct {
+	row db.GetStepGrantByTokenHashRow
+	err error
+}
+
+func (f fakeGrantReader) GetGrantResourceOwner(context.Context, db.GetGrantResourceOwnerParams) (db.SensitiveResourceOwnership, error) {
+	return db.SensitiveResourceOwnership{}, errors.New("unused")
+}
+
+func (f fakeGrantReader) GetStepGrantByTokenHash(context.Context, db.GetStepGrantByTokenHashParams) (db.GetStepGrantByTokenHashRow, error) {
+	return f.row, f.err
+}
+
+func TestStepGrantTrustVerifierResolvesIdentityAndTranslatesErrors(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC)
+	validHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	validRow := db.GetStepGrantByTokenHashRow{ID: "grant_1", EnterpriseID: "ent_1", ActorUserID: "user_1", CaseTicketID: "ticket_1", TokenHash: validHash, ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true}}
+
+	t.Run("resolves bound identity", func(t *testing.T) {
+		store := &PostgresGrantStore{reader: fakeGrantReader{row: validRow}}
+		identity, err := store.LookupStepGrantIdentity(context.Background(), "ent_1", validHash)
+		if err != nil {
+			t.Fatalf("LookupStepGrantIdentity: %v", err)
+		}
+		if identity.TenantRef != "ent_1" || identity.PrincipalRef != "user_1" || identity.TicketRef != "ticket_1" || identity.GrantRef != "grant_1" || !identity.ExpiresAt.Equal(now.Add(time.Minute)) {
+			t.Fatalf("identity=%+v", identity)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		store *PostgresGrantStore
+		hash  string
+		want  error
+	}{
+		{name: "no reader", store: &PostgresGrantStore{}, hash: validHash, want: trust.ErrSourceUnavailable},
+		{name: "short hash", store: &PostgresGrantStore{reader: fakeGrantReader{row: validRow}}, hash: "short", want: trust.ErrSourceUnavailable},
+		{name: "no rows rejects", store: &PostgresGrantStore{reader: fakeGrantReader{err: pgx.ErrNoRows}}, hash: validHash, want: trust.ErrCredentialRejected},
+		{name: "database fault unavailable", store: &PostgresGrantStore{reader: fakeGrantReader{err: errors.New("db down")}}, hash: validHash, want: trust.ErrSourceUnavailable},
+		{name: "cross enterprise row rejected", store: &PostgresGrantStore{reader: fakeGrantReader{row: func() db.GetStepGrantByTokenHashRow { r := validRow; r.EnterpriseID = "ent_2"; return r }()}}, hash: validHash, want: trust.ErrCredentialRejected},
+		{name: "grant without expiry rejected", store: &PostgresGrantStore{reader: fakeGrantReader{row: func() db.GetStepGrantByTokenHashRow { r := validRow; r.ExpiresAt = pgtype.Timestamptz{}; return r }()}}, hash: validHash, want: trust.ErrCredentialRejected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.store.LookupStepGrantIdentity(context.Background(), "ent_1", tc.hash)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err=%v want %v", err, tc.want)
+			}
+		})
+	}
+
+	t.Run("adapter hashes token before lookup", func(t *testing.T) {
+		hashed := tickets.HashStepGrantToken("opaque-grant-token")
+		row := validRow
+		row.TokenHash = hashed
+		verifier := NewPostgresStepGrantVerifier("ent_1", &PostgresGrantStore{reader: fakeGrantReader{row: row}})
+		identity, err := verifier.VerifyStepGrant(context.Background(), "opaque-grant-token")
+		if err != nil || identity.GrantRef != "grant_1" {
+			t.Fatalf("identity=%+v err=%v", identity, err)
+		}
+	})
+}
 
 type fakeGrantWriteTx struct {
 	owner                 db.SensitiveResourceOwnership
@@ -131,7 +195,8 @@ func TestPostgresGrantStoreRollsBackAuditFailureAndRejectsStaleOwnership(t *test
 func TestPostgresGrantStoreVerifiesAndAuditsInOneTransaction(t *testing.T) {
 	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
 	row := db.GetStepGrantByTokenHashRow{ID: "grant_1", EnterpriseID: "ent_1", CaseTicketID: "ticket_1", ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", Scopes: []byte(`["dream:evidence:read"]`), ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true}, CreatedAt: pgtype.Timestamptz{Time: now.Add(-time.Minute), Valid: true}, TokenHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ActorUserID: "user_1", OrgVersion: 7, OrgUnitID: "research"}
-	input := tickets.VerifyStepGrantInput{EnterpriseID: "ent_1", ActorUserID: "user_1", ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", Scope: "dream:evidence:read"}
+	actor := tickets.Actor{EnterpriseID: "ent_1", UserID: "user_1", OrgVersion: 7}
+	input := tickets.VerifyStepGrantInput{ResourceType: "dream_evidence", ResourceID: "ev-1", Action: "read", Scope: "dream:evidence:read"}
 	for _, tc := range []struct {
 		name       string
 		fail       string
@@ -143,7 +208,7 @@ func TestPostgresGrantStoreVerifiesAndAuditsInOneTransaction(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &fakeGrantWriteTx{grantRow: row, fail: tc.fail}
 			store := newPostgresGrantStoreWithPool(fakeGrantPool{tx})
-			_, err := store.VerifyStepGrantAndAudit(context.Background(), input, row.TokenHash, "verify_audit", now)
+			_, err := store.VerifyStepGrantAndAudit(context.Background(), actor, input, row.TokenHash, "verify_audit", now)
 			if tc.wantCommit && err != nil {
 				t.Fatal(err)
 			}

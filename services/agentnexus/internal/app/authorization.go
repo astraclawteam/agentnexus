@@ -9,145 +9,124 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 )
 
 const maxAuthorizationRequestBytes = 16 << 10
 
-var (
-	ErrInvalidTicketActor     = errors.New("invalid ticket actor")
-	ErrTicketActorUnavailable = errors.New("ticket actor unavailable")
-)
-
-type AuthorizationActor struct {
-	EnterpriseID string
-	UserID       string
-	CaseTicketID string
-}
-
-type TicketActorAuthenticator interface {
-	AuthenticateTicketActor(context.Context, string) (AuthorizationActor, error)
-}
-
-type RejectTicketActorAuthenticator struct{}
-
-func (RejectTicketActorAuthenticator) AuthenticateTicketActor(context.Context, string) (AuthorizationActor, error) {
-	return AuthorizationActor{}, ErrInvalidTicketActor
-}
-
-type authorizationSessionResolver interface {
-	GetSession(context.Context, string) (browserauth.BrowserSession, error)
-}
-
-type atlasDecisionEvaluator interface {
-	Evaluate(context.Context, policy.ScopedRequest) (policy.PermissionDecision, error)
+type capabilityDecisionEvaluator interface {
+	Evaluate(context.Context, policy.CapabilityRequest) (policy.PermissionDecision, error)
 }
 
 type authorizationDependencies struct {
 	EnterpriseID string
-	Sessions     authorizationSessionResolver
-	TicketActors TicketActorAuthenticator
-	Evaluator    atlasDecisionEvaluator
+	Evaluator    capabilityDecisionEvaluator
+	Audit        BrowserAuditSink
 }
 
 type authorizationHandler struct {
 	enterpriseID string
-	sessions     authorizationSessionResolver
-	ticketActors TicketActorAuthenticator
-	evaluator    atlasDecisionEvaluator
+	evaluator    capabilityDecisionEvaluator
+	audit        BrowserAuditSink
 }
 
+// authorizationDecisionRequest is the frozen AuthorizationDecisionRequest
+// shape: correlation, resource binding and capability only. Identity and
+// organization facts derive from the verified trusted context.
 type authorizationDecisionRequest struct {
-	OrgUnitID    string              `json:"org_unit_id"`
-	OrgVersion   int64               `json:"org_version"`
+	RequestID    string              `json:"request_id"`
+	TraceID      string              `json:"trace_id"`
 	ResourceType policy.ResourceType `json:"resource_type"`
 	ResourceID   string              `json:"resource_id"`
-	Action       policy.AtlasAction  `json:"action"`
+	Capability   policy.Capability   `json:"capability"`
+	Purpose      string              `json:"purpose"`
 }
 
 func newAuthorizationHandler(deps authorizationDependencies) (*authorizationHandler, error) {
-	if deps.EnterpriseID == "" || deps.Sessions == nil || deps.Evaluator == nil {
+	if deps.EnterpriseID == "" || deps.Evaluator == nil {
 		return nil, errors.New("authorization dependencies incomplete")
 	}
-	return &authorizationHandler{enterpriseID: deps.EnterpriseID, sessions: deps.Sessions, ticketActors: deps.TicketActors, evaluator: deps.Evaluator}, nil
+	return &authorizationHandler{enterpriseID: deps.EnterpriseID, evaluator: deps.Evaluator, audit: deps.Audit}, nil
 }
 
 func (h *authorizationHandler) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/authorization/decisions", h.decide)
 }
 
+// trustedRequestContext returns the immutable credential-derived context the
+// ingress middleware resolved, mapped onto a transport status on failure.
+func trustedRequestContext(r *http.Request) (trust.Context, int) {
+	resolved, err := trust.FromRequest(r)
+	if err != nil {
+		return trust.Context{}, trust.HTTPStatus(err)
+	}
+	return resolved, 0
+}
+
+// auditTrustViolation records a rejected trust input. Best-effort: an audit
+// outage never turns a rejection into an acceptance.
+func auditTrustViolation(ctx context.Context, sink BrowserAuditSink, enterpriseID, actorUserID, action string) {
+	if sink == nil {
+		return
+	}
+	auditCtx, cancel := boundedCleanupContext(ctx)
+	defer cancel()
+	_ = sink.AppendBrowserAudit(auditCtx, BrowserAuditEvent{EnterpriseID: enterpriseID, ActorUserID: actorUserID, Action: action, Decision: "deny"})
+}
+
 func (h *authorizationHandler) decide(w http.ResponseWriter, r *http.Request) {
 	setNoStore(w)
-	actor, status := h.authenticateActor(r)
+	trustedCtx, status := trustedRequestContext(r)
 	if status != 0 {
 		writeAuthorizationError(w, status)
 		return
 	}
-
-	var input authorizationDecisionRequest
-	if !decodeAuthorizationRequest(w, r, &input) {
+	if trustedCtx.Principal.TenantRef != h.enterpriseID {
+		writeAuthorizationError(w, http.StatusUnauthorized)
 		return
 	}
-	decision, err := h.evaluator.Evaluate(r.Context(), policy.ScopedRequest{
-		EnterpriseID: actor.EnterpriseID,
-		ActorUserID:  actor.UserID,
-		OrgUnitID:    input.OrgUnitID,
-		OrgVersion:   input.OrgVersion,
-		ResourceType: input.ResourceType,
-		ResourceID:   input.ResourceID,
-		Action:       input.Action,
+
+	var input authorizationDecisionRequest
+	if !h.decodeAuthorizationRequest(w, r, trustedCtx, &input) {
+		return
+	}
+	requestContext, err := NewRequestContext(trustedCtx, input.RequestID, input.TraceID)
+	if err != nil {
+		writeAuthorizationError(w, http.StatusBadRequest)
+		return
+	}
+
+	if policy.IsConnectorCapability(input.Capability) && !trustedCtx.ConnectorCapabilityAllowed {
+		auditTrustViolation(r.Context(), h.audit, trustedCtx.Principal.TenantRef, trustedCtx.Principal.PrincipalRef, "trusted_context.connector_capability_denied")
+		writeJSON(w, http.StatusOK, policy.DeniedCapabilityDecision(trustedCtx.OrgVersion, policy.CapabilityRiskHigh))
+		return
+	}
+
+	decision, err := h.evaluator.Evaluate(r.Context(), policy.CapabilityRequest{
+		TenantRef:        requestContext.Principal.TenantRef,
+		PrincipalRef:     requestContext.Principal.PrincipalRef,
+		SealedOrgVersion: requestContext.OrgVersion,
+		ResourceType:     input.ResourceType,
+		ResourceID:       input.ResourceID,
+		Capability:       input.Capability,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, unavailableAuthorizationDecision(input.OrgVersion))
+		writeJSON(w, http.StatusServiceUnavailable, policy.DeniedCapabilityDecision(requestContext.OrgVersion, policy.CapabilityRiskHigh))
 		return
 	}
 	writeJSON(w, http.StatusOK, decision)
 }
 
-func (h *authorizationHandler) authenticateActor(r *http.Request) (AuthorizationActor, int) {
-	var sessionCookies []*http.Cookie
-	for _, cookie := range r.Cookies() {
-		if cookie.Name == browserSessionCookie {
-			sessionCookies = append(sessionCookies, cookie)
-		}
+func validAuthorizationResourceType(value policy.ResourceType) bool {
+	switch value {
+	case policy.ResourceKnowledge, policy.ResourceWorkflow, policy.ResourceService, policy.ResourceDreamEvidence:
+		return true
 	}
-	authorizationValues := r.Header.Values("Authorization")
-	if len(sessionCookies) > 1 {
-		return AuthorizationActor{}, http.StatusUnauthorized
-	}
-	if len(sessionCookies) == 1 && len(authorizationValues) > 0 {
-		return AuthorizationActor{}, http.StatusUnauthorized
-	}
-	if len(sessionCookies) == 1 {
-		session, sessionErr := h.sessions.GetSession(r.Context(), sessionCookies[0].Value)
-		if errors.Is(sessionErr, browserauth.ErrSessionUnavailable) {
-			return AuthorizationActor{}, http.StatusServiceUnavailable
-		}
-		if sessionErr != nil || session.EnterpriseID != h.enterpriseID || session.UserID == "" {
-			return AuthorizationActor{}, http.StatusUnauthorized
-		}
-		return AuthorizationActor{EnterpriseID: session.EnterpriseID, UserID: session.UserID}, 0
-	}
-
-	if len(authorizationValues) != 1 || h.ticketActors == nil {
-		return AuthorizationActor{}, http.StatusUnauthorized
-	}
-	parts := strings.Fields(authorizationValues[0])
-	if len(parts) != 2 || parts[0] != "CaseTicket" || parts[1] == "" || len(parts[1]) > 4096 {
-		return AuthorizationActor{}, http.StatusUnauthorized
-	}
-	actor, err := h.ticketActors.AuthenticateTicketActor(r.Context(), parts[1])
-	if errors.Is(err, ErrTicketActorUnavailable) {
-		return AuthorizationActor{}, http.StatusServiceUnavailable
-	}
-	if err != nil || actor.EnterpriseID != h.enterpriseID || actor.UserID == "" {
-		return AuthorizationActor{}, http.StatusUnauthorized
-	}
-	return actor, 0
+	return false
 }
 
-func decodeAuthorizationRequest(w http.ResponseWriter, r *http.Request, target *authorizationDecisionRequest) bool {
+func (h *authorizationHandler) decodeAuthorizationRequest(w http.ResponseWriter, r *http.Request, trustedCtx trust.Context, target *authorizationDecisionRequest) bool {
 	contentTypes := r.Header.Values("Content-Type")
 	if len(contentTypes) != 1 {
 		writeAuthorizationError(w, http.StatusUnsupportedMediaType)
@@ -165,7 +144,7 @@ func decodeAuthorizationRequest(w http.ResponseWriter, r *http.Request, target *
 		writeAuthorizationError(w, http.StatusBadRequest)
 		return false
 	}
-	seen := make(map[string]struct{}, 5)
+	seen := make(map[string]struct{}, 6)
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		key, ok := keyToken.(string)
@@ -184,17 +163,25 @@ func decodeAuthorizationRequest(w http.ResponseWriter, r *http.Request, target *
 			return false
 		}
 		switch key {
-		case "org_unit_id":
-			err = json.Unmarshal(raw, &target.OrgUnitID)
-		case "org_version":
-			err = json.Unmarshal(raw, &target.OrgVersion)
+		case "request_id":
+			err = json.Unmarshal(raw, &target.RequestID)
+		case "trace_id":
+			err = json.Unmarshal(raw, &target.TraceID)
 		case "resource_type":
 			err = json.Unmarshal(raw, &target.ResourceType)
 		case "resource_id":
 			err = json.Unmarshal(raw, &target.ResourceID)
-		case "action":
-			err = json.Unmarshal(raw, &target.Action)
+		case "capability":
+			err = json.Unmarshal(raw, &target.Capability)
+		case "purpose":
+			err = json.Unmarshal(raw, &target.Purpose)
 		default:
+			// Trusted identity and organization facts can never arrive in
+			// request JSON: rejected AND audited; other unknown members are
+			// plain schema violations.
+			if trust.ForgedIdentityField(key) {
+				auditTrustViolation(r.Context(), h.audit, trustedCtx.Principal.TenantRef, trustedCtx.Principal.PrincipalRef, "trusted_context.forged_body_field")
+			}
 			writeAuthorizationError(w, http.StatusBadRequest)
 			return false
 		}
@@ -212,22 +199,22 @@ func decodeAuthorizationRequest(w http.ResponseWriter, r *http.Request, target *
 		writeAuthorizationError(w, http.StatusBadRequest)
 		return false
 	}
-	if len(seen) != 5 || target.OrgVersion < 1 {
+	for _, required := range []string{"request_id", "resource_type", "resource_id", "capability"} {
+		if _, exists := seen[required]; !exists {
+			writeAuthorizationError(w, http.StatusBadRequest)
+			return false
+		}
+	}
+	if !canonicalAuthorizationValue(target.RequestID) || len(target.RequestID) > 128 ||
+		(target.TraceID != "" && (!canonicalAuthorizationValue(target.TraceID) || len(target.TraceID) > 128)) ||
+		!validAuthorizationResourceType(target.ResourceType) ||
+		!canonicalAuthorizationValue(target.ResourceID) || len(target.ResourceID) > 256 ||
+		!canonicalAuthorizationValue(string(target.Capability)) || len(target.Capability) > 256 ||
+		len(target.Purpose) > 1024 {
 		writeAuthorizationError(w, http.StatusBadRequest)
 		return false
 	}
 	return true
-}
-
-func unavailableAuthorizationDecision(orgVersion int64) policy.PermissionDecision {
-	return policy.PermissionDecision{
-		Decision:    policy.DecisionDeny,
-		Permissions: []policy.AtlasPermission{},
-		OrgUnitIDs:  []string{},
-		MaskFields:  []string{},
-		RiskLevel:   policy.AtlasRiskHigh,
-		OrgVersion:  orgVersion,
-	}
 }
 
 func canonicalAuthorizationValue(value string) bool {

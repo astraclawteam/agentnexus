@@ -12,6 +12,11 @@ func NewGatewayAPIRouter(serviceName, version string) http.Handler {
 	return newGatewayAPIMux(serviceName, version)
 }
 
+// NewGatewayAPIRouterWithDependencies wires the browser gateway. The trusted
+// context is resolved exactly ONCE at ingress by the trust resolver
+// middleware: it screens every request for identity-forging headers and
+// binds the immutable credential-derived context for the protected runtime
+// endpoints. Handlers never authenticate on their own.
 func NewGatewayAPIRouterWithDependencies(serviceName, version string, deps BrowserAuthDependencies) (http.Handler, error) {
 	mux := newGatewayAPIMux(serviceName, version)
 	handler, err := newBrowserAuthHandler(deps)
@@ -23,7 +28,8 @@ func NewGatewayAPIRouterWithDependencies(serviceName, version string, deps Brows
 	if err != nil {
 		return nil, err
 	}
-	return browserRequestDeadline(browserResponseHeaders(mux), timeout), nil
+	chain := handler.trustResolver.Middleware(browserResponseHeaders(mux))
+	return browserRequestDeadline(chain, timeout), nil
 }
 
 func browserRequestDeadline(next http.Handler, timeout time.Duration) http.Handler {
@@ -37,12 +43,22 @@ func browserRequestDeadline(next http.Handler, timeout time.Duration) http.Handl
 	})
 }
 func isBrowserAuthPath(path string) bool {
-	return path == "/.well-known/openid-configuration" || path == "/v1/authorization/decisions" || path == "/v1/approvals/resolve" || path == "/v1/step-grants" || path == "/v1/tickets/verify" || path == "/v1/audit/evidence" || strings.HasPrefix(path, "/oauth2/") || strings.HasPrefix(path, "/v1/browser-sessions/")
+	return path == "/.well-known/openid-configuration" || trustProtectedPath(path) || strings.HasPrefix(path, "/oauth2/") || strings.HasPrefix(path, "/v1/browser-sessions/")
+}
+
+// trustProtectedPath lists the runtime endpoints that require ONE immutable
+// credential-derived trusted context resolved at ingress.
+func trustProtectedPath(path string) bool {
+	switch path {
+	case "/v1/authorization/decisions", "/v1/approvals/resolve", "/v1/step-grants", "/v1/tickets/verify", "/v1/audit/evidence":
+		return true
+	}
+	return false
 }
 
 func browserResponseHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/oauth2/") || r.URL.Path == "/v1/authorization/decisions" || r.URL.Path == "/v1/approvals/resolve" || r.URL.Path == "/v1/step-grants" || r.URL.Path == "/v1/tickets/verify" || r.URL.Path == "/v1/audit/evidence" {
+		if strings.HasPrefix(r.URL.Path, "/oauth2/") || trustProtectedPath(r.URL.Path) {
 			setNoStore(w)
 		}
 		next.ServeHTTP(w, r)

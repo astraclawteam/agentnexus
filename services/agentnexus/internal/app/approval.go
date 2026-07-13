@@ -19,18 +19,18 @@ const maxApprovalRequestBytes = 16 << 10
 
 type approvalDependencies struct {
 	EnterpriseID  string
-	Sessions      authorizationSessionResolver
-	TicketActors  TicketActorAuthenticator
 	Source        ApprovalSnapshotSource
 	Store         ApprovalRouteStore
 	FactsVerifier ChangeFactsVerifier
+	Audit         BrowserAuditSink
 }
 
 type approvalHandler struct {
-	actor    *authorizationHandler
-	source   ApprovalSnapshotSource
-	store    ApprovalRouteStore
-	verifier ChangeFactsVerifier
+	enterpriseID string
+	source       ApprovalSnapshotSource
+	store        ApprovalRouteStore
+	verifier     ChangeFactsVerifier
+	audit        BrowserAuditSink
 }
 
 type approvalResolveRequest struct {
@@ -51,10 +51,10 @@ type approvalResolveRequest struct {
 }
 
 func newApprovalHandler(deps approvalDependencies) (*approvalHandler, error) {
-	if !canonicalAuthorizationValue(deps.EnterpriseID) || deps.Sessions == nil || deps.Source == nil || deps.Store == nil || deps.FactsVerifier == nil {
+	if !canonicalAuthorizationValue(deps.EnterpriseID) || deps.Source == nil || deps.Store == nil || deps.FactsVerifier == nil {
 		return nil, errors.New("approval dependencies incomplete")
 	}
-	return &approvalHandler{actor: &authorizationHandler{enterpriseID: deps.EnterpriseID, sessions: deps.Sessions, ticketActors: deps.TicketActors}, source: deps.Source, store: deps.Store, verifier: deps.FactsVerifier}, nil
+	return &approvalHandler{enterpriseID: deps.EnterpriseID, source: deps.Source, store: deps.Store, verifier: deps.FactsVerifier, audit: deps.Audit}, nil
 }
 
 func (h *approvalHandler) register(mux *http.ServeMux) {
@@ -63,11 +63,20 @@ func (h *approvalHandler) register(mux *http.ServeMux) {
 
 func (h *approvalHandler) resolve(w http.ResponseWriter, r *http.Request) {
 	setNoStore(w)
-	actor, status := h.actor.authenticateActor(r)
+	trustedCtx, status := trustedRequestContext(r)
 	if status != 0 {
 		writeAuthorizationError(w, status)
 		return
 	}
+	if trustedCtx.Principal.TenantRef != h.enterpriseID {
+		writeAuthorizationError(w, http.StatusUnauthorized)
+		return
+	}
+	// Identity comes ONLY from the ingress-resolved trusted context. The
+	// governed-change facts (including their org_version / org_unit_id) are
+	// the console BFF's attested payload; Task 0E replaces this resolver
+	// with approval transmission and retires those body facts.
+	actor := struct{ EnterpriseID, UserID string }{EnterpriseID: trustedCtx.Principal.TenantRef, UserID: trustedCtx.Principal.PrincipalRef}
 	idempotencyHash, signature, ok := decodeApprovalHeaders(w, r)
 	if !ok {
 		return

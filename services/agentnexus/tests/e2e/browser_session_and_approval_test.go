@@ -161,7 +161,10 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 		t.Fatalf("public profile permissions=%v advanced=%v", profile.Permissions, profile.AdvancedModeAllowed)
 	}
 
-	decisionBody := `{"org_unit_id":"team_research","org_version":1,"resource_type":"knowledge","resource_id":"knowledge-low","action":"knowledge.suggest"}`
+	// Trusted context cutover: identity, org scope and sealed version derive
+	// from the verified session; the request carries only correlation, the
+	// resource binding and the requested capability.
+	decisionBody := `{"request_id":"decision-e2e-1","resource_type":"knowledge","resource_id":"knowledge-low","capability":"knowledge.suggest"}`
 	decisionResponse := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/authorization/decisions", decisionBody, map[string]string{"Content-Type": "application/json"})
 	if decisionResponse.StatusCode != http.StatusOK {
 		t.Fatalf("decision status=%d body=%s", decisionResponse.StatusCode, readBody(t, decisionResponse))
@@ -190,7 +193,7 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 		t.Fatalf("high route=%+v", high)
 	}
 
-	grantBody := `{"case_ticket_id":"ticket-e2e","org_unit_id":"team_research","org_version":1,"resource_type":"dream_evidence","resource_id":"dream-evidence-1","action":"read","ttl_seconds":300}`
+	grantBody := `{"case_ticket_id":"ticket-e2e","resource_type":"dream_evidence","resource_id":"dream-evidence-1","action":"read","ttl_seconds":300}`
 	grant := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/step-grants", grantBody, map[string]string{"Content-Type": "application/json"})
 	if grant.StatusCode != http.StatusCreated {
 		t.Fatalf("grant status=%d body=%s", grant.StatusCode, readBody(t, grant))

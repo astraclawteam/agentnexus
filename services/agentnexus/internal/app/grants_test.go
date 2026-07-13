@@ -11,56 +11,78 @@ import (
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 )
 
-type fakeGrantSessions struct {
-	session browserauth.BrowserSession
-	err     error
-}
-
-func (f fakeGrantSessions) GetSession(context.Context, string) (browserauth.BrowserSession, error) {
-	return f.session, f.err
-}
-
 type fakeGrantService struct {
-	actor  tickets.Actor
-	create tickets.CreateStepGrantInput
-	verify tickets.VerifyStepGrantInput
-	err    error
+	actor       tickets.Actor
+	verifyActor tickets.Actor
+	create      tickets.CreateStepGrantInput
+	verify      tickets.VerifyStepGrantInput
+	err         error
 }
 
 func (f *fakeGrantService) AuthorizeAndCreateGrant(_ context.Context, actor tickets.Actor, input tickets.CreateStepGrantInput) (tickets.StepGrant, error) {
 	f.actor, f.create = actor, input
 	return tickets.StepGrant{ID: "grant_1", Token: "opaque", EnterpriseID: actor.EnterpriseID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, Scopes: []string{"dream:evidence:read"}, ExpiresAt: time.Date(2026, 7, 11, 10, 5, 0, 0, time.UTC)}, f.err
 }
-func (f *fakeGrantService) VerifyGrant(_ context.Context, input tickets.VerifyStepGrantInput) (tickets.StepGrant, error) {
-	f.verify = input
-	return tickets.StepGrant{ID: "grant_1", EnterpriseID: input.EnterpriseID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, Scopes: []string{input.Scope}}, f.err
+func (f *fakeGrantService) VerifyGrant(_ context.Context, actor tickets.Actor, input tickets.VerifyStepGrantInput) (tickets.StepGrant, error) {
+	f.verifyActor, f.verify = actor, input
+	return tickets.StepGrant{ID: "grant_1", EnterpriseID: actor.EnterpriseID, ActorUserID: actor.UserID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, Scopes: []string{input.Scope}}, f.err
+}
+
+// newGrantTestRouter wires the grant handler behind the trust middleware
+// exactly like production: identity is resolved once at ingress.
+func newGrantTestRouter(t *testing.T, sessions browserSessionResolver, service grantService) http.Handler {
+	t.Helper()
+	audit := &recordingTrustAudit{}
+	handler, err := newGrantHandler("ent_1", service, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := newGatewayAPIMux("gateway-api", "test")
+	handler.register(mux)
+	source := policy.NewMemorySnapshotSource()
+	source.StoreSnapshot("ent_1", "user_1", policy.SealedAccessSnapshot{TenantRef: "ent_1", OrgVersion: 7, OrgUnits: []policy.SealedOrgUnit{{ID: "research"}}, Memberships: []policy.SealedMembership{{OrgUnitID: "research", Role: "approve_high_risk"}}})
+	resolver := newGrantTestResolver(t, sessions, source, audit)
+	return browserRequestDeadline(resolver.Middleware(browserResponseHeaders(mux)), time.Second)
+}
+
+func newGrantTestResolver(t *testing.T, sessions browserSessionResolver, source policy.SnapshotSource, audit BrowserAuditSink) *trust.Resolver {
+	t.Helper()
+	resolver, err := trust.NewResolver(trust.ResolverConfig{
+		TenantRef:    "ent_1",
+		Sessions:     browserSessionTrustVerifier{sessions: sessions},
+		OrgSnapshots: sealedOrgVersionResolver{source: source},
+		Audit:        browserTrustAuditSink{sink: audit},
+		Protected: func(r *http.Request) bool {
+			return trustProtectedPath(r.URL.Path)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolver
 }
 
 func TestGrantRoutesUseAuthenticatedActorAndNoStore(t *testing.T) {
 	token := "session-token"
-	auth := &authorizationHandler{enterpriseID: "ent_1", sessions: fakeGrantSessions{session: browserauth.BrowserSession{EnterpriseID: "ent_1", UserID: "user_1"}}, ticketActors: RejectTicketActorAuthenticator{}}
 	service := &fakeGrantService{}
-	handler, err := newGrantHandler(auth, service)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mux := http.NewServeMux()
-	handler.register(mux)
+	router := newGrantTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent_1", UserID: "user_1", IdleExpiresAt: time.Now().Add(time.Hour)}}, service)
 
-	body := `{"case_ticket_id":"ticket_1","org_unit_id":"research","org_version":7,"resource_type":"dream_evidence","resource_id":"ev-1","action":"read","ttl_seconds":600}`
+	body := `{"case_ticket_id":"ticket_1","resource_type":"dream_evidence","resource_id":"ev-1","action":"read","ttl_seconds":600}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/step-grants", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: token})
 	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, req)
+	router.ServeHTTP(response, req)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	if service.actor.EnterpriseID != "ent_1" || service.actor.UserID != "user_1" {
-		t.Fatalf("actor=%+v", service.actor)
+	if service.actor.EnterpriseID != "ent_1" || service.actor.UserID != "user_1" || service.actor.OrgVersion != 7 {
+		t.Fatalf("actor=%+v: identity and sealed org version must be credential-derived", service.actor)
 	}
 	if service.create.TTL != 10*time.Minute {
 		t.Fatalf("ttl=%s", service.create.TTL)
@@ -81,28 +103,23 @@ func TestGrantRoutesUseAuthenticatedActorAndNoStore(t *testing.T) {
 	verifyReq.Header.Set("Content-Type", "application/json")
 	verifyReq.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: token})
 	verifyResponse := httptest.NewRecorder()
-	mux.ServeHTTP(verifyResponse, verifyReq)
+	router.ServeHTTP(verifyResponse, verifyReq)
 	if verifyResponse.Code != http.StatusOK {
 		t.Fatalf("verify status=%d body=%s", verifyResponse.Code, verifyResponse.Body.String())
 	}
-	if service.verify.EnterpriseID != "ent_1" || service.verify.ActorUserID != "user_1" {
-		t.Fatalf("verify trusted body enterprise: %+v", service.verify)
+	if service.verifyActor.EnterpriseID != "ent_1" || service.verifyActor.UserID != "user_1" {
+		t.Fatalf("verify actor must be credential-derived: %+v", service.verifyActor)
 	}
 }
 
 func TestGrantRoutesFailClosedWithConsistentErrors(t *testing.T) {
-	auth := &authorizationHandler{enterpriseID: "ent_1", sessions: fakeGrantSessions{err: browserauth.ErrInvalidSession}, ticketActors: RejectTicketActorAuthenticator{}}
 	service := &fakeGrantService{err: tickets.ErrGrantUnavailable}
-	handler, err := newGrantHandler(auth, service)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mux := http.NewServeMux()
-	handler.register(mux)
+	router := newGrantTestRouter(t, stubAuthorizationSessions{err: browserauth.ErrInvalidSession}, service)
 	req := httptest.NewRequest(http.MethodPost, "/v1/step-grants", strings.NewReader(`{"unknown":true}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "session"})
 	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, req)
+	router.ServeHTTP(response, req)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("unauth status=%d", response.Code)
 	}
@@ -112,19 +129,13 @@ func TestGrantRoutesFailClosedWithConsistentErrors(t *testing.T) {
 }
 
 func TestGrantRouteRejectsOversizedJSONBeforeService(t *testing.T) {
-	auth := &authorizationHandler{enterpriseID: "ent_1", sessions: fakeGrantSessions{session: browserauth.BrowserSession{EnterpriseID: "ent_1", UserID: "user_1"}}, ticketActors: RejectTicketActorAuthenticator{}}
 	service := &fakeGrantService{}
-	handler, err := newGrantHandler(auth, service)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mux := http.NewServeMux()
-	handler.register(mux)
+	router := newGrantTestRouter(t, stubAuthorizationSessions{session: browserauth.BrowserSession{EnterpriseID: "ent_1", UserID: "user_1", IdleExpiresAt: time.Now().Add(time.Hour)}}, service)
 	req := httptest.NewRequest(http.MethodPost, "/v1/step-grants", strings.NewReader(`{"padding":"`+strings.Repeat("x", maxGrantRequestBytes)+`"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: browserSessionCookie, Value: "session"})
 	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, req)
+	router.ServeHTTP(response, req)
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}

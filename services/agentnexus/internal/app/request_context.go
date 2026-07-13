@@ -1,31 +1,60 @@
 package app
 
-import "errors"
+import (
+	"errors"
+	"strings"
 
+	"github.com/astraclawteam/agentnexus/sdk/go/runtime"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
+)
+
+// RequestContext is the typed per-request context propagated internally: the
+// immutable credential-derived principal plus public correlation data.
+//
+// The legacy envelope parser (ParseRequestContext over caller-supplied
+// enterprise_id/actor_user_id values) is retired: request envelopes carry
+// correlation ONLY, and identity exists exclusively on the verified
+// principal resolved at ingress.
 type RequestContext struct {
-	EnterpriseID string
-	ActorUserID  string
-	RequestID    string
-	TraceID      string
+	// Principal is the immutable credential-derived principal context.
+	Principal runtime.PrincipalContext
+	// Source is the credential kind that produced the principal.
+	Source trust.Source
+	// OrgVersion is the sealed organization snapshot version pinned at
+	// ingress.
+	OrgVersion int64
+	// RequestID and TraceID are public correlation values from the request
+	// envelope. They carry no trust.
+	RequestID string
+	TraceID   string
 }
 
-func ParseRequestContext(values map[string]string) (RequestContext, error) {
-	ctx := RequestContext{
-		EnterpriseID: values["enterprise_id"],
-		ActorUserID:  values["actor_user_id"],
-		RequestID:    values["request_id"],
-		TraceID:      values["trace_id"],
-	}
+// ErrUntrustedRequestContext reports an attempt to build a request context
+// without a verified principal.
+var ErrUntrustedRequestContext = errors.New("request context requires a credential-derived principal")
 
-	if ctx.EnterpriseID == "" {
-		return RequestContext{}, errors.New("enterprise_id is required")
+// NewRequestContext binds envelope correlation to the immutable trusted
+// context resolved at ingress. There is deliberately no constructor from
+// caller-supplied identity values.
+func NewRequestContext(trustedCtx trust.Context, requestID, traceID string) (RequestContext, error) {
+	if err := trustedCtx.Principal.Validate(); err != nil {
+		return RequestContext{}, errors.Join(ErrUntrustedRequestContext, err)
 	}
-	if ctx.ActorUserID == "" {
-		return RequestContext{}, errors.New("actor_user_id is required")
+	if !canonicalCorrelationValue(requestID) || len(requestID) > 128 {
+		return RequestContext{}, errors.New("request_id must be canonical and at most 128 bytes")
 	}
-	if ctx.RequestID == "" {
-		return RequestContext{}, errors.New("request_id is required")
+	if traceID != "" && (!canonicalCorrelationValue(traceID) || len(traceID) > 128) {
+		return RequestContext{}, errors.New("trace_id must be canonical and at most 128 bytes")
 	}
+	return RequestContext{
+		Principal:  trustedCtx.Principal,
+		Source:     trustedCtx.Source,
+		OrgVersion: trustedCtx.OrgVersion,
+		RequestID:  requestID,
+		TraceID:    traceID,
+	}, nil
+}
 
-	return ctx, nil
+func canonicalCorrelationValue(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value
 }

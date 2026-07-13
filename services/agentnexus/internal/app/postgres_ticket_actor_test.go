@@ -12,6 +12,7 @@ import (
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -62,9 +63,9 @@ func TestPostgresTicketActorAuthenticatorValidatesEnterpriseStatusAndExpiry(t *t
 	t.Run("active", func(t *testing.T) {
 		database := &ticketActorDB{row: ticketActorRow{ticket: valid}}
 		authenticator := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", database, func() time.Time { return now })
-		actor, err := authenticator.AuthenticateTicketActor(context.Background(), "opaque-ticket")
-		if err != nil || actor != (AuthorizationActor{EnterpriseID: "enterprise-1", UserID: "user-1", CaseTicketID: "ticket-internal"}) {
-			t.Fatalf("actor=%#v error=%v", actor, err)
+		identity, err := authenticator.VerifyAccessTicket(context.Background(), "opaque-ticket")
+		if err != nil || identity.TenantRef != "enterprise-1" || identity.PrincipalRef != "user-1" || identity.TicketRef != "ticket-internal" {
+			t.Fatalf("identity=%#v error=%v", identity, err)
 		}
 		if len(database.args) != 2 || database.args[0] != "enterprise-1" || database.args[1] != tickets.HashCaseTicketToken("opaque-ticket") {
 			t.Fatalf("query args = %#v", database.args)
@@ -73,8 +74,8 @@ func TestPostgresTicketActorAuthenticatorValidatesEnterpriseStatusAndExpiry(t *t
 
 	t.Run("legacy database id is not a bearer", func(t *testing.T) {
 		database := &ticketActorDB{row: ticketActorRow{err: pgx.ErrNoRows}}
-		_, err := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", database, func() time.Time { return now }).AuthenticateTicketActor(context.Background(), "ticket-internal")
-		if !errors.Is(err, ErrInvalidTicketActor) {
+		_, err := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", database, func() time.Time { return now }).VerifyAccessTicket(context.Background(), "ticket-internal")
+		if !errors.Is(err, trust.ErrCredentialRejected) {
 			t.Fatalf("err=%v", err)
 		}
 		if database.args[1] == "ticket-internal" {
@@ -88,18 +89,18 @@ func TestPostgresTicketActorAuthenticatorValidatesEnterpriseStatusAndExpiry(t *t
 		rowErr error
 		want   error
 	}{
-		{name: "unknown", rowErr: pgx.ErrNoRows, want: ErrInvalidTicketActor},
-		{name: "expired", ticket: func() db.CaseTicket { v := valid; v.ExpiresAt.Time = now; return v }(), want: ErrInvalidTicketActor},
-		{name: "inactive", ticket: func() db.CaseTicket { v := valid; v.Status = "revoked"; return v }(), want: ErrInvalidTicketActor},
-		{name: "cross enterprise", ticket: func() db.CaseTicket { v := valid; v.EnterpriseID = "enterprise-2"; return v }(), want: ErrInvalidTicketActor},
-		{name: "noncanonical actor", ticket: func() db.CaseTicket { v := valid; v.ActorUserID = " user-1"; return v }(), want: ErrInvalidTicketActor},
-		{name: "noncanonical request", ticket: func() db.CaseTicket { v := valid; v.RequestID = " request-1"; return v }(), want: ErrInvalidTicketActor},
-		{name: "noncanonical trace", ticket: func() db.CaseTicket { v := valid; v.TraceID = pgtype.Text{String: " trace-1", Valid: true}; return v }(), want: ErrInvalidTicketActor},
-		{name: "database", rowErr: errors.New("database offline"), want: ErrTicketActorUnavailable},
+		{name: "unknown", rowErr: pgx.ErrNoRows, want: trust.ErrCredentialRejected},
+		{name: "expired", ticket: func() db.CaseTicket { v := valid; v.ExpiresAt.Time = now; return v }(), want: trust.ErrCredentialRejected},
+		{name: "inactive", ticket: func() db.CaseTicket { v := valid; v.Status = "revoked"; return v }(), want: trust.ErrCredentialRejected},
+		{name: "cross enterprise", ticket: func() db.CaseTicket { v := valid; v.EnterpriseID = "enterprise-2"; return v }(), want: trust.ErrCredentialRejected},
+		{name: "noncanonical actor", ticket: func() db.CaseTicket { v := valid; v.ActorUserID = " user-1"; return v }(), want: trust.ErrCredentialRejected},
+		{name: "noncanonical request", ticket: func() db.CaseTicket { v := valid; v.RequestID = " request-1"; return v }(), want: trust.ErrCredentialRejected},
+		{name: "noncanonical trace", ticket: func() db.CaseTicket { v := valid; v.TraceID = pgtype.Text{String: " trace-1", Valid: true}; return v }(), want: trust.ErrCredentialRejected},
+		{name: "database", rowErr: errors.New("database offline"), want: trust.ErrSourceUnavailable},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			database := &ticketActorDB{row: ticketActorRow{ticket: test.ticket, err: test.rowErr}}
-			_, err := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", database, func() time.Time { return now }).AuthenticateTicketActor(context.Background(), "opaque-ticket")
+			_, err := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", database, func() time.Time { return now }).VerifyAccessTicket(context.Background(), "opaque-ticket")
 			if !errors.Is(err, test.want) || strings.Contains(err.Error(), "opaque-ticket") {
 				t.Fatalf("error=%v want=%v", err, test.want)
 			}
@@ -107,16 +108,16 @@ func TestPostgresTicketActorAuthenticatorValidatesEnterpriseStatusAndExpiry(t *t
 	}
 
 	t.Run("nil database", func(t *testing.T) {
-		_, err := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", nil, func() time.Time { return now }).AuthenticateTicketActor(context.Background(), "opaque-ticket")
-		if !errors.Is(err, ErrTicketActorUnavailable) {
+		_, err := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", nil, func() time.Time { return now }).VerifyAccessTicket(context.Background(), "opaque-ticket")
+		if !errors.Is(err, trust.ErrSourceUnavailable) {
 			t.Fatalf("error=%v", err)
 		}
 	})
 	t.Run("canceled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", &ticketActorDB{row: ticketActorRow{ticket: valid}}, func() time.Time { return now }).AuthenticateTicketActor(ctx, "opaque-ticket")
-		if !errors.Is(err, ErrTicketActorUnavailable) || !errors.Is(err, context.Canceled) {
+		_, err := newPostgresTicketActorAuthenticatorWithDB("enterprise-1", &ticketActorDB{row: ticketActorRow{ticket: valid}}, func() time.Time { return now }).VerifyAccessTicket(ctx, "opaque-ticket")
+		if !errors.Is(err, trust.ErrSourceUnavailable) || !errors.Is(err, context.Canceled) {
 			t.Fatalf("error=%v", err)
 		}
 	})

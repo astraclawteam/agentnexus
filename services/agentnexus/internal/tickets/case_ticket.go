@@ -57,47 +57,56 @@ type StepGrant struct {
 	CreatedAt    time.Time
 }
 
+// VerifyStepGrantInput binds one exact operation. It carries NO identity:
+// the tenant/actor pair comes exclusively from the verified Actor.
 type VerifyStepGrantInput struct {
 	Token        string
-	EnterpriseID string
-	ActorUserID  string
 	ResourceType string
 	ResourceID   string
 	Action       string
 	Scope        string
 }
 
-type CreateCaseTicketInput struct {
-	EnterpriseID string
-	ActorUserID  string
-	RequestID    string
-	TraceID      string
-	TTL          time.Duration
+// IssueCaseTicketInput carries correlation only. Identity (tenant, actor)
+// comes exclusively from the credential-derived Actor: the legacy
+// CreateCaseTicketInput envelope with caller-supplied EnterpriseID and
+// ActorUserID is retired.
+type IssueCaseTicketInput struct {
+	RequestID string
+	TraceID   string
+	TTL       time.Duration
 }
 
+// CreateStepGrantInput binds one exact operation request. It carries no
+// tenant, actor or organization facts: those derive from the verified Actor
+// and the server-side resource owner resolution.
 type CreateStepGrantInput struct {
-	EnterpriseID string
 	CaseTicketID string
-	OrgUnitID    string
-	OrgVersion   int64
 	ResourceType string
 	ResourceID   string
 	Action       string
-	Scopes       []string
 	TTL          time.Duration
 }
 
+// Actor is the credential-derived internal actor: the trust layer resolves
+// it at ingress and it is the ONLY identity input this package accepts.
 type Actor struct {
 	EnterpriseID string
 	UserID       string
 	CaseTicketID string
+	// OrgVersion is the sealed organization snapshot version pinned at
+	// ingress. Step grants are bound to it.
+	OrgVersion int64
 }
 
+// GrantAuthorization is the server-side authorization answer: the placement
+// (OrgUnitID) is resolved from the governed resource owner registry, never
+// from the caller.
 type GrantAuthorization struct {
 	Allowed      bool
 	EnterpriseID string
 	OrgVersion   int64
-	OrgUnitIDs   []string
+	OrgUnitID    string
 }
 
 type GrantAuthorizer interface {
@@ -175,7 +184,15 @@ func WithIDGenerator(newID func() string) Option {
 	}
 }
 
-func (s *Service) CreateCaseTicket(input CreateCaseTicketInput) (CaseTicket, error) {
+// IssueCaseTicket mints a Case Ticket for a verified actor. Identity comes
+// only from the actor; the input carries correlation and lifetime.
+func (s *Service) IssueCaseTicket(ctx context.Context, actor Actor, input IssueCaseTicketInput) (CaseTicket, error) {
+	if s == nil || s.store == nil || !canonical(actor.EnterpriseID) || !canonical(actor.UserID) || !canonical(input.RequestID) || (input.TraceID != "" && !canonical(input.TraceID)) || input.TTL <= 0 {
+		return CaseTicket{}, ErrInvalidGrant
+	}
+	if err := ctx.Err(); err != nil {
+		return CaseTicket{}, errors.Join(ErrGrantUnavailable, err)
+	}
 	now := s.now()
 	token, err := s.newToken()
 	if err != nil || !canonical(token) {
@@ -184,8 +201,8 @@ func (s *Service) CreateCaseTicket(input CreateCaseTicketInput) (CaseTicket, err
 	ticket := CaseTicket{
 		ID:           s.newID(),
 		TokenHash:    HashCaseTicketToken(token),
-		EnterpriseID: input.EnterpriseID,
-		ActorUserID:  input.ActorUserID,
+		EnterpriseID: actor.EnterpriseID,
+		ActorUserID:  actor.UserID,
 		RequestID:    input.RequestID,
 		TraceID:      input.TraceID,
 		Status:       TicketStatusActive,

@@ -107,7 +107,7 @@ func TestPostgresBrowserProfileUsesExactVersionAndValidatesBoundedRows(t *testin
 	}
 
 	t.Run("limit plus one", func(t *testing.T) {
-		rows := make([]db.OrgPolicySnapshotMembership, policy.MaxAtlasMemberships+1)
+		rows := make([]db.OrgPolicySnapshotMembership, policy.MaxSealedMemberships+1)
 		for i := range rows {
 			rows[i] = db.OrgPolicySnapshotMembership{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "unit", Role: "member"}
 		}
@@ -118,7 +118,7 @@ func TestPostgresBrowserProfileUsesExactVersionAndValidatesBoundedRows(t *testin
 	})
 
 	t.Run("exact limit", func(t *testing.T) {
-		rows := make([]db.OrgPolicySnapshotMembership, policy.MaxAtlasMemberships)
+		rows := make([]db.OrgPolicySnapshotMembership, policy.MaxSealedMemberships)
 		for i := range rows {
 			rows[i] = db.OrgPolicySnapshotMembership{EnterpriseID: "enterprise-1", VersionNumber: 17, EnterpriseUserID: "user-1", OrgUnitID: "unit", Role: "member"}
 		}

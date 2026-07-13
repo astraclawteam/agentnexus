@@ -15,6 +15,7 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 )
 
 func TestBuildRouterDisabledOmitsBrowserAuthRoutes(t *testing.T) {
@@ -73,10 +74,10 @@ func TestBuildRouterWiresAuthorizeRateLimiterAndTrustedSourceResolver(t *testing
 
 func TestBuildRouterWiresAuthorizationPolicyAndPostgresTicketActor(t *testing.T) {
 	source, tickets := productionAuthorizationDependencies("enterprise-1", nil)
-	if _, err := source.LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1"); !errors.Is(err, policy.ErrAtlasPolicyUnavailable) {
+	if _, err := source.LoadAccessSnapshot(context.Background(), "enterprise-1", "user-1"); !errors.Is(err, policy.ErrPolicyUnavailable) {
 		t.Fatalf("nil Postgres source error = %v", err)
 	}
-	if _, err := tickets.AuthenticateTicketActor(context.Background(), "opaque-ticket"); !errors.Is(err, app.ErrTicketActorUnavailable) {
+	if _, err := tickets.VerifyAccessTicket(context.Background(), "opaque-ticket"); !errors.Is(err, trust.ErrSourceUnavailable) {
 		t.Fatalf("production ticket adapter error = %v", err)
 	}
 	_, file, _, _ := runtime.Caller(0)

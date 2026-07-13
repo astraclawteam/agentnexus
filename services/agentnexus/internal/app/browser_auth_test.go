@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 	"github.com/coreos/go-oidc/v3/oidc"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -25,6 +26,31 @@ import (
 
 const testVerifier = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
 const testConsoleClientSecret = "AgentAtlas-console-secret-C7mQ4vN8xR2pT6yK9dF3"
+
+// RejectTicketActorAuthenticator is a test double: an Access Ticket verifier
+// that rejects every ticket, used by harnesses that do not exercise the
+// ticket source.
+type RejectTicketActorAuthenticator struct{}
+
+func (RejectTicketActorAuthenticator) VerifyAccessTicket(context.Context, string) (trust.TicketIdentity, error) {
+	return trust.TicketIdentity{}, trust.ErrCredentialRejected
+}
+
+// memoryStepGrants is a test double Step Grant verifier backed by an in-memory
+// token→identity map.
+type memoryStepGrants struct {
+	identities map[string]trust.GrantIdentity
+}
+
+func (m memoryStepGrants) VerifyStepGrant(_ context.Context, token string) (trust.GrantIdentity, error) {
+	identity, ok := m.identities[token]
+	if !ok {
+		return trust.GrantIdentity{}, trust.ErrCredentialRejected
+	}
+	return identity, nil
+}
+
+const harnessStepGrantToken = "harness-step-grant-token-000000000000000000"
 
 func tokenBasicHeader(clientID, secret string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(clientID+":"+secret))
@@ -901,7 +927,10 @@ func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfil
 	if sourceResolver == nil {
 		sourceResolver = NewAuthorizeSourceResolver(nil)
 	}
-	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrappedSessions, Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver, AuthorizationPolicy: authorizationPolicySource(), TicketActors: RejectTicketActorAuthenticator{}})
+	stepGrants := memoryStepGrants{identities: map[string]trust.GrantIdentity{
+		harnessStepGrantToken: {TenantRef: "ent-1", PrincipalRef: "user-1", TicketRef: "ct-harness", GrantRef: "grant-harness", ExpiresAt: time.Now().Add(time.Hour)},
+	}}
+	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrappedSessions, Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver, AuthorizationPolicy: authorizationPolicySource(), TicketActors: RejectTicketActorAuthenticator{}, StepGrants: stepGrants})
 	if err != nil {
 		t.Fatal(err)
 	}

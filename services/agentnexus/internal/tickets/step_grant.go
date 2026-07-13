@@ -3,7 +3,6 @@ package tickets
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,30 +16,16 @@ const GrantRecordAudit GrantRecordStage = "audit"
 
 type GovernedGrantStore interface {
 	CreateStepGrantAndAudit(context.Context, StepGrant, string) (StepGrant, error)
-	VerifyStepGrantAndAudit(context.Context, VerifyStepGrantInput, string, string, time.Time) (StepGrant, error)
+	VerifyStepGrantAndAudit(context.Context, Actor, VerifyStepGrantInput, string, string, time.Time) (StepGrant, error)
 }
 
-func (s *Service) CreateStepGrant(input CreateStepGrantInput) (StepGrant, error) {
-	now := s.now()
-	grant := StepGrant{
-		ID:           s.newID(),
-		EnterpriseID: input.EnterpriseID,
-		CaseTicketID: input.CaseTicketID,
-		OrgUnitID:    input.OrgUnitID,
-		OrgVersion:   input.OrgVersion,
-		ResourceType: input.ResourceType,
-		ResourceID:   input.ResourceID,
-		Action:       input.Action,
-		Scopes:       append([]string(nil), input.Scopes...),
-		ExpiresAt:    now.Add(input.TTL),
-		CreatedAt:    now,
-	}
-	return s.store.CreateStepGrant(grant)
-}
-
+// AuthorizeAndCreateGrant mints a step grant for a verified actor. The
+// tenant, actor and sealed organization version come exclusively from the
+// Actor; the organization placement comes from the authorizer's server-side
+// resource owner resolution. Caller input binds only the exact operation.
 func (s *Service) AuthorizeAndCreateGrant(ctx context.Context, actor Actor, input CreateStepGrantInput) (StepGrant, error) {
-	if s == nil || s.store == nil || s.authorizer == nil || !canonical(actor.EnterpriseID) || !canonical(actor.UserID) || input.EnterpriseID != "" || input.Scopes != nil ||
-		!canonical(input.CaseTicketID) || !canonical(input.OrgUnitID) || input.OrgVersion < 1 ||
+	if s == nil || s.store == nil || s.authorizer == nil || !canonical(actor.EnterpriseID) || !canonical(actor.UserID) || actor.OrgVersion < 1 ||
+		!canonical(input.CaseTicketID) ||
 		!canonical(input.ResourceType) || !canonical(input.ResourceID) || !canonical(input.Action) || input.TTL <= 0 {
 		return StepGrant{}, ErrInvalidGrant
 	}
@@ -54,7 +39,7 @@ func (s *Service) AuthorizeAndCreateGrant(ctx context.Context, actor Actor, inpu
 		}
 		return StepGrant{}, ErrGrantUnavailable
 	}
-	if !authorization.Allowed || authorization.EnterpriseID != actor.EnterpriseID || authorization.OrgVersion != input.OrgVersion || !slices.Contains(authorization.OrgUnitIDs, input.OrgUnitID) {
+	if !authorization.Allowed || authorization.EnterpriseID != actor.EnterpriseID || authorization.OrgVersion != actor.OrgVersion || !canonical(authorization.OrgUnitID) {
 		return StepGrant{}, ErrGrantDenied
 	}
 	scope, ok := exactGrantScope(input.ResourceType, input.Action)
@@ -75,7 +60,7 @@ func (s *Service) AuthorizeAndCreateGrant(ctx context.Context, actor Actor, inpu
 	if !canonical(grantID) || !canonical(auditID) {
 		return StepGrant{}, ErrGrantUnavailable
 	}
-	grant := StepGrant{ID: grantID, Token: token, TokenHash: HashStepGrantToken(token), EnterpriseID: actor.EnterpriseID, ActorUserID: actor.UserID, CaseTicketID: input.CaseTicketID, OrgUnitID: input.OrgUnitID, OrgVersion: input.OrgVersion, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, Scopes: []string{scope}, ExpiresAt: now.Add(ttl), CreatedAt: now}
+	grant := StepGrant{ID: grantID, Token: token, TokenHash: HashStepGrantToken(token), EnterpriseID: actor.EnterpriseID, ActorUserID: actor.UserID, CaseTicketID: input.CaseTicketID, OrgUnitID: authorization.OrgUnitID, OrgVersion: actor.OrgVersion, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, Scopes: []string{scope}, ExpiresAt: now.Add(ttl), CreatedAt: now}
 	governedStore, ok := s.store.(GovernedGrantStore)
 	if !ok {
 		return StepGrant{}, ErrGrantUnavailable
@@ -93,8 +78,11 @@ func (s *Service) AuthorizeAndCreateGrant(ctx context.Context, actor Actor, inpu
 	return stored, nil
 }
 
-func (s *Service) VerifyGrant(ctx context.Context, input VerifyStepGrantInput) (StepGrant, error) {
-	if s == nil || !canonical(input.Token) || !canonical(input.EnterpriseID) || !canonical(input.ActorUserID) || !canonical(input.ResourceType) || !canonical(input.ResourceID) || !canonical(input.Action) || !canonical(input.Scope) {
+// VerifyGrant checks one exact operation binding for a verified actor. The
+// tenant/actor pair comes only from the Actor; a different actor replaying a
+// stolen token is denied.
+func (s *Service) VerifyGrant(ctx context.Context, actor Actor, input VerifyStepGrantInput) (StepGrant, error) {
+	if s == nil || !canonical(actor.EnterpriseID) || !canonical(actor.UserID) || !canonical(input.Token) || !canonical(input.ResourceType) || !canonical(input.ResourceID) || !canonical(input.Action) || !canonical(input.Scope) {
 		return StepGrant{}, ErrInvalidGrant
 	}
 	store, ok := s.store.(GovernedGrantStore)
@@ -105,14 +93,14 @@ func (s *Service) VerifyGrant(ctx context.Context, input VerifyStepGrantInput) (
 	if !canonical(auditID) {
 		return StepGrant{}, ErrGrantUnavailable
 	}
-	grant, err := store.VerifyStepGrantAndAudit(ctx, input, HashStepGrantToken(input.Token), auditID, s.now())
+	grant, err := store.VerifyStepGrantAndAudit(ctx, actor, input, HashStepGrantToken(input.Token), auditID, s.now())
 	if err != nil {
 		if errors.Is(err, ErrGrantUnavailable) {
 			return StepGrant{}, ErrGrantUnavailable
 		}
 		return StepGrant{}, ErrGrantDenied
 	}
-	if grant.EnterpriseID != input.EnterpriseID || grant.ActorUserID != input.ActorUserID || grant.ResourceType != input.ResourceType || grant.ResourceID != input.ResourceID || grant.Action != input.Action || len(grant.Scopes) != 1 || grant.Scopes[0] != input.Scope {
+	if grant.EnterpriseID != actor.EnterpriseID || grant.ActorUserID != actor.UserID || grant.ResourceType != input.ResourceType || grant.ResourceID != input.ResourceID || grant.Action != input.Action || len(grant.Scopes) != 1 || grant.Scopes[0] != input.Scope {
 		return StepGrant{}, ErrGrantDenied
 	}
 	grant.Token = ""
@@ -132,6 +120,10 @@ func (s *Service) IsGrantExpired(grant StepGrant, at time.Time) bool {
 	return !at.Before(grant.ExpiresAt)
 }
 
+// Store is the persistence port. CreateStepGrant is store-level persistence
+// used by governed implementations and in-memory fixtures; the ONLY minting
+// paths of the service are IssueCaseTicket and AuthorizeAndCreateGrant,
+// which take identity from the verified Actor.
 type Store interface {
 	CreateCaseTicket(CaseTicket) (CaseTicket, error)
 	CreateStepGrant(StepGrant) (StepGrant, error)
@@ -185,12 +177,12 @@ func (s *MemoryStore) CreateStepGrantAndAudit(_ context.Context, grant StepGrant
 	return grant, nil
 }
 
-func (s *MemoryStore) VerifyStepGrantAndAudit(_ context.Context, input VerifyStepGrantInput, tokenHash, auditID string, now time.Time) (StepGrant, error) {
+func (s *MemoryStore) VerifyStepGrantAndAudit(_ context.Context, actor Actor, input VerifyStepGrantInput, tokenHash, auditID string, now time.Time) (StepGrant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, grant := range s.grants {
-		if grant.EnterpriseID == input.EnterpriseID && grant.TokenHash == tokenHash {
-			if grant.ActorUserID != input.ActorUserID || grant.ResourceType != input.ResourceType || grant.ResourceID != input.ResourceID || grant.Action != input.Action || len(grant.Scopes) != 1 || grant.Scopes[0] != input.Scope || !now.Before(grant.ExpiresAt) {
+		if grant.EnterpriseID == actor.EnterpriseID && grant.TokenHash == tokenHash {
+			if grant.ActorUserID != actor.UserID || grant.ResourceType != input.ResourceType || grant.ResourceID != input.ResourceID || grant.Action != input.Action || len(grant.Scopes) != 1 || grant.Scopes[0] != input.Scope || !now.Before(grant.ExpiresAt) {
 				return StepGrant{}, ErrGrantDenied
 			}
 			if s.failGrantStage == GrantRecordAudit {

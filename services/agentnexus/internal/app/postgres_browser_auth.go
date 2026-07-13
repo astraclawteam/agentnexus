@@ -112,7 +112,7 @@ func (d *PostgresBrowserDirectory) ResolveBrowserProfile(ctx context.Context, en
 	if err := ctx.Err(); err != nil {
 		return BrowserProfile{}, err
 	}
-	if len(rows) > policy.MaxAtlasMemberships {
+	if len(rows) > policy.MaxSealedMemberships {
 		return BrowserProfile{}, errors.New("profile membership limit exceeded")
 	}
 	unitSet := make(map[string]struct{}, len(rows))

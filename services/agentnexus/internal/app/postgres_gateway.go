@@ -40,11 +40,13 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 	if err != nil {
 		return nil, err
 	}
-	authorizationPolicy := NewPostgresAtlasPolicySource(pool)
+	authorizationPolicy := NewPostgresSnapshotSource(pool)
+	orgVersions := NewPostgresOrgVersionSource(pool)
 	ticketActors := NewPostgresTicketActorAuthenticator(cfg.OIDC.EnterpriseID, pool, time.Now)
 	grantStore := NewPostgresGrantStore(pool)
+	stepGrantVerifier := NewPostgresStepGrantVerifier(cfg.OIDC.EnterpriseID, grantStore)
 	auditSink := NewPostgresBrowserAuditSink(pool)
-	grantService := tickets.NewService(grantStore, tickets.WithGrantAuthorizer(NewScopedGrantAuthorizer(grantStore, policy.NewAgentAtlasEvaluator(authorizationPolicy))))
+	grantService := tickets.NewService(grantStore, tickets.WithGrantAuthorizer(NewScopedGrantAuthorizer(grantStore, policy.NewCapabilityEvaluator(authorizationPolicy, policy.WithSnapshotIntegrityObserver(snapshotIntegrityLogger{})))))
 	return NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, BrowserAuthDependencies{
 		Config:                  cfg.OIDC,
 		Sessions:                browserauth.NewService(browserauth.NewPostgresStore(pool), browserauth.WithLoginAttemptLimits(cfg.LoginAttemptLimits)),
@@ -56,7 +58,9 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 		AuthorizeRateLimiter:    authorizeRateLimiter,
 		AuthorizeSourceResolver: NewAuthorizeSourceResolver(cfg.TrustedProxyCIDRs),
 		AuthorizationPolicy:     authorizationPolicy,
+		OrgVersions:             orgVersions,
 		TicketActors:            ticketActors,
+		StepGrants:              stepGrantVerifier,
 		ApprovalSource:          NewPostgresApprovalSource(pool),
 		ApprovalStore:           NewPostgresApprovalStore(pool),
 		ApprovalFactsVerifier:   cfg.ApprovalFactsVerifier,
