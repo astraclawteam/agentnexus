@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +22,14 @@ import (
 //   - an unsigned RiskDecision is rejected;
 //   - a missing/mismatching parameter hash is rejected;
 //   - a missing idempotency key is rejected;
-//   - a Step Grant not bound to one exact operation is rejected.
+//   - a Step Grant not bound to one exact operation is rejected;
+//   - (GA Task 0A amendment, plan dc81e80) an ObservationReceipt without
+//     source/version/authority/freshness and Action/Postcondition binding is
+//     rejected, PostconditionSpec/VerificationNeed reject empty/unbound
+//     specs, and no public type carries a business Outcome, goal_achieved or
+//     graph-provider field: ActionReceipt attests technical execution only,
+//     ObservationReceipt proves a bounded authoritative observation, and
+//     neither contains a business Outcome assertion.
 
 var contractNow = time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
 
@@ -762,18 +770,37 @@ func TestContractPrincipalContextFromVerifiedCredentialsOnly(t *testing.T) {
 }
 
 // TestContractNoTrustedIdentityFieldsInTypes proves at the type level that no
-// public DTO can even represent caller-supplied trusted identity or connector
-// topology: no JSON tag is enterprise_id/actor_user_id/connector_instance_id,
-// none contains "enterprise", and none starts with "connector_".
+// public DTO can even represent caller-supplied trusted identity, connector
+// topology, or (GA Task 0A amendment, plan dc81e80) business-outcome /
+// graph-provider authority. Walking every public type recursively: no JSON
+// tag is enterprise_id/actor_user_id/connector_instance_id, none contains
+// "enterprise", none starts with "connector_", none is or contains
+// "outcome"/"goal_achieved", and none is a graph-provider name (graph,
+// graph_*, *_graph). The outcome/graph matcher mirrors the parity gate's
+// forbiddenPublicFieldName (public_contract_parity_test.go) exactly, so the
+// SDK tag scan and the OpenAPI/proto name scan stay in lockstep.
 func TestContractNoTrustedIdentityFieldsInTypes(t *testing.T) {
 	types := []any{
 		PrincipalContext{}, Constraints{}, DataNeed{}, EvidenceRequest{}, EvidenceReadRequest{},
 		EvidenceHandle{}, BusinessCapabilityRequest{}, ActionRequest{}, Action{}, Precondition{},
-		RiskDecision{}, Signature{}, ApprovalPlanRef{}, ApprovalRequest{}, ApprovalEvidence{},
-		StepGrant{}, ActionReceipt{}, AuditEvent{},
+		PostconditionSpec{}, VerificationNeed{}, RiskDecision{}, Signature{}, ApprovalPlanRef{},
+		ApprovalRequest{}, ApprovalEvidence{}, StepGrant{}, ActionReceipt{}, ObservationReceipt{},
+		AuditEvent{},
 	}
 	forbidden := map[string]bool{
 		"enterprise_id": true, "actor_user_id": true, "connector_instance_id": true,
+	}
+	// assertsOutcomeAuthority mirrors the parity gate's outcome/goal_achieved/
+	// graph-provider name bans (forbiddenPublicFieldName) on Go JSON tags:
+	// ActionReceipt attests technical execution only, ObservationReceipt
+	// proves a bounded authoritative observation, and NO public type may
+	// carry a business Outcome verdict or address the calling Agent
+	// platform's result graph.
+	assertsOutcomeAuthority := func(tag string) bool {
+		if strings.Contains(tag, "outcome") || strings.Contains(tag, "goal_achieved") {
+			return true
+		}
+		return tag == "graph" || strings.HasPrefix(tag, "graph_") || strings.HasSuffix(tag, "_graph")
 	}
 	var walk func(t *testing.T, typ reflect.Type, owner string)
 	walk = func(t *testing.T, typ reflect.Type, owner string) {
@@ -792,6 +819,9 @@ func TestContractNoTrustedIdentityFieldsInTypes(t *testing.T) {
 			}
 			if forbidden[tag] || strings.Contains(tag, "enterprise") || strings.HasPrefix(tag, "connector_") {
 				t.Errorf("%s.%s json tag %q leaks trusted identity or connector topology", owner, field.Name, tag)
+			}
+			if assertsOutcomeAuthority(tag) {
+				t.Errorf("%s.%s json tag %q asserts business-outcome or graph-provider authority; AgentNexus never authors Outcomes and never owns the result graph", owner, field.Name, tag)
 			}
 			walk(t, field.Type, owner+"."+field.Name)
 		}
@@ -839,6 +869,275 @@ func TestContractHashAndHandleFormats(t *testing.T) {
 		if err := ValidateHandle(invalid, HandleWorkCase); err == nil {
 			t.Fatalf("handle %q must be rejected for prefix %q", invalid, HandleWorkCase)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GA Task 0A amendment (plan dc81e80): separate action and outcome authority.
+// PostconditionSpec, VerificationNeed and ObservationReceipt are contract
+// v1.3.0 additions. ActionReceipt attests technical execution only;
+// ObservationReceipt proves what an authorized source reported at a bounded
+// time; neither type contains a business Outcome assertion, and only the
+// calling Agent's deterministic domain runtime turns facts into an Outcome.
+// ---------------------------------------------------------------------------
+
+func validPostconditionSpec() PostconditionSpec {
+	return PostconditionSpec{
+		PostconditionID: "post-po-1009-approved",
+		Kind:            "state",
+		Reference:       "po:PO-1009:status",
+		Expected:        "approved",
+	}
+}
+
+func validVerificationNeed() VerificationNeed {
+	return VerificationNeed{
+		NeedID:          "verify-po-1009-approved",
+		PostconditionID: "post-po-1009-approved",
+		DataClass:       "erp.purchase_order_status",
+	}
+}
+
+func validObservationReceipt() ObservationReceipt {
+	return ObservationReceipt{
+		ObservationRef:     "obs_0123456789abcdef",
+		ActionRef:          "act_0123456789abcdef",
+		ParameterHash:      HashParameters([]byte(`{"po_number":"PO-1009"}`)),
+		PostconditionID:    "post-po-1009-approved",
+		VerificationNeedID: "verify-po-1009-approved",
+		Source:             "erp.purchase_order_registry",
+		SourceVersion:      7,
+		Authority:          "source-authority.example",
+		ObservedAt:         contractNow,
+		FreshUntil:         contractNow.Add(15 * time.Minute),
+		ObservationHash:    HashParameters([]byte(`{"po_status":"approved"}`)),
+		EvidenceRef:        "evd_0123456789abcdef",
+		AuditRefID:         "audit-01HZX4Y7Q9",
+		Signature: Signature{
+			Algorithm: SignatureAlgorithmEd25519,
+			KeyID:     "agentnexus-observation-signing-1",
+			Value:     "b2JzZXJ2YXRpb24tc2lnbmF0dXJl",
+		},
+	}
+}
+
+func TestContractPostconditionAndVerificationNeedSpecs(t *testing.T) {
+	if err := validPostconditionSpec().Validate(); err != nil {
+		t.Fatalf("canonical postcondition spec must validate, got %v", err)
+	}
+	if err := validVerificationNeed().Validate(); err != nil {
+		t.Fatalf("canonical verification need must validate, got %v", err)
+	}
+
+	t.Run("empty postcondition spec is rejected", func(t *testing.T) {
+		mustContainError(t, PostconditionSpec{}.Validate(), "postcondition_id")
+	})
+	postconditionCases := []struct {
+		name    string
+		mutate  func(*PostconditionSpec)
+		wantErr string
+	}{
+		{"missing postcondition id", func(p *PostconditionSpec) { p.PostconditionID = "" }, "postcondition_id"},
+		{"missing kind", func(p *PostconditionSpec) { p.Kind = "" }, "kind"},
+		{"missing reference", func(p *PostconditionSpec) { p.Reference = "" }, "reference"},
+	}
+	for _, tc := range postconditionCases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := validPostconditionSpec()
+			tc.mutate(&spec)
+			mustContainError(t, spec.Validate(), tc.wantErr)
+		})
+	}
+
+	t.Run("empty verification need is rejected", func(t *testing.T) {
+		mustContainError(t, VerificationNeed{}.Validate(), "need_id")
+	})
+	needCases := []struct {
+		name    string
+		mutate  func(*VerificationNeed)
+		wantErr string
+	}{
+		{"missing need id", func(n *VerificationNeed) { n.NeedID = "" }, "need_id"},
+		{"unbound: missing postcondition binding", func(n *VerificationNeed) { n.PostconditionID = "" }, "postcondition_id"},
+		{"missing data class", func(n *VerificationNeed) { n.DataClass = "" }, "data_class"},
+	}
+	for _, tc := range needCases {
+		t.Run(tc.name, func(t *testing.T) {
+			need := validVerificationNeed()
+			tc.mutate(&need)
+			mustContainError(t, need.Validate(), tc.wantErr)
+		})
+	}
+}
+
+func TestContractActionRequestBindsPostconditionsAndVerificationNeeds(t *testing.T) {
+	withVerification := func() ActionRequest {
+		request := validActionRequest()
+		request.Postconditions = []PostconditionSpec{validPostconditionSpec()}
+		request.VerificationNeeds = []VerificationNeed{validVerificationNeed()}
+		return request
+	}
+
+	if err := withVerification().Validate(); err != nil {
+		t.Fatalf("action request with bound postconditions and verification needs must validate, got %v", err)
+	}
+	t.Run("postconditions without verification needs stay legal", func(t *testing.T) {
+		request := validActionRequest()
+		request.Postconditions = []PostconditionSpec{validPostconditionSpec()}
+		if err := request.Validate(); err != nil {
+			t.Fatalf("audit-only postconditions must validate, got %v", err)
+		}
+	})
+	t.Run("canonical JSON round trip decodes", func(t *testing.T) {
+		raw, err := json.Marshal(withVerification())
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := DecodeActionRequest(raw)
+		if err != nil {
+			t.Fatalf("action request with postconditions/verification_needs must decode, got %v", err)
+		}
+		if len(decoded.Postconditions) != 1 || len(decoded.VerificationNeeds) != 1 {
+			t.Fatalf("round trip lost verification bindings: %+v", decoded)
+		}
+	})
+
+	cases := []struct {
+		name    string
+		mutate  func(*ActionRequest)
+		wantErr string
+	}{
+		{"invalid postcondition entry", func(r *ActionRequest) {
+			r.Postconditions = []PostconditionSpec{{PostconditionID: "post-1", Kind: "state"}}
+		}, "postconditions"},
+		{"invalid verification need entry", func(r *ActionRequest) {
+			r.VerificationNeeds = []VerificationNeed{{NeedID: "verify-1", PostconditionID: "post-po-1009-approved"}}
+		}, "verification_needs"},
+		{"verification need bound to an undeclared postcondition", func(r *ActionRequest) {
+			need := validVerificationNeed()
+			need.PostconditionID = "post-undeclared"
+			r.VerificationNeeds = []VerificationNeed{need}
+		}, "does not reference a declared postcondition"},
+		{"verification need without any declared postconditions", func(r *ActionRequest) {
+			r.Postconditions = nil
+		}, "does not reference a declared postcondition"},
+		{"duplicate postcondition ids", func(r *ActionRequest) {
+			r.Postconditions = []PostconditionSpec{validPostconditionSpec(), validPostconditionSpec()}
+		}, "duplicate postcondition_id"},
+		{"duplicate verification need ids", func(r *ActionRequest) {
+			r.VerificationNeeds = []VerificationNeed{validVerificationNeed(), validVerificationNeed()}
+		}, "duplicate need_id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := withVerification()
+			tc.mutate(&request)
+			mustContainError(t, request.Validate(), tc.wantErr)
+		})
+	}
+}
+
+func TestContractObservationReceiptBindsBoundedAuthoritativeObservation(t *testing.T) {
+	if err := validObservationReceipt().Validate(); err != nil {
+		t.Fatalf("canonical observation receipt must validate, got %v", err)
+	}
+	t.Run("canonical JSON round trip validates", func(t *testing.T) {
+		raw, err := json.Marshal(validObservationReceipt())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded ObservationReceipt
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if err := decoded.Validate(); err != nil {
+			t.Fatalf("round-tripped observation receipt must validate, got %v", err)
+		}
+	})
+
+	cases := []struct {
+		name    string
+		mutate  func(*ObservationReceipt)
+		wantErr string
+	}{
+		{"missing observation ref", func(r *ObservationReceipt) { r.ObservationRef = "" }, "observation_ref"},
+		{"non-opaque observation ref", func(r *ObservationReceipt) { r.ObservationRef = "observation-1" }, "observation_ref"},
+		{"foreign-prefix observation ref", func(r *ObservationReceipt) { r.ObservationRef = "rcp_0123456789abcdef" }, "observation_ref"},
+		{"missing action binding", func(r *ObservationReceipt) { r.ActionRef = "" }, "action_ref"},
+		{"non-opaque action binding", func(r *ObservationReceipt) { r.ActionRef = "action-9" }, "action_ref"},
+		{"missing parameter hash binding", func(r *ObservationReceipt) { r.ParameterHash = "" }, "parameter_hash"},
+		{"malformed parameter hash binding", func(r *ObservationReceipt) { r.ParameterHash = "sha256:nothex" }, "parameter_hash"},
+		{"missing postcondition binding", func(r *ObservationReceipt) { r.PostconditionID = "" }, "postcondition_id"},
+		{"missing verification need binding", func(r *ObservationReceipt) { r.VerificationNeedID = "" }, "verification_need_id"},
+		{"missing source", func(r *ObservationReceipt) { r.Source = "" }, "source"},
+		{"missing source version", func(r *ObservationReceipt) { r.SourceVersion = 0 }, "source_version"},
+		{"negative source version", func(r *ObservationReceipt) { r.SourceVersion = -1 }, "source_version"},
+		{"missing authority", func(r *ObservationReceipt) { r.Authority = "" }, "authority"},
+		{"missing observed at", func(r *ObservationReceipt) { r.ObservedAt = time.Time{} }, "observed_at"},
+		{"missing freshness bound", func(r *ObservationReceipt) { r.FreshUntil = time.Time{} }, "fresh_until"},
+		{"freshness bound not after observation", func(r *ObservationReceipt) { r.FreshUntil = r.ObservedAt }, "fresh_until"},
+		{"missing normalized observation hash", func(r *ObservationReceipt) { r.ObservationHash = "" }, "observation_hash"},
+		{"malformed normalized observation hash", func(r *ObservationReceipt) { r.ObservationHash = "md5:abc" }, "observation_hash"},
+		{"missing evidence handle ref", func(r *ObservationReceipt) { r.EvidenceRef = "" }, "evidence_ref"},
+		{"connector-flavored evidence handle ref", func(r *ObservationReceipt) { r.EvidenceRef = "postgres://erp/purchase_orders" }, "evidence_ref"},
+		{"missing audit reference", func(r *ObservationReceipt) { r.AuditRefID = "" }, "audit_ref_id"},
+		{"unsigned observation receipt", func(r *ObservationReceipt) { r.Signature = Signature{} }, "signature"},
+		{"signature missing key id", func(r *ObservationReceipt) { r.Signature.KeyID = "" }, "key_id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			receipt := validObservationReceipt()
+			tc.mutate(&receipt)
+			mustContainError(t, receipt.Validate(), tc.wantErr)
+		})
+	}
+}
+
+// TestContractReceiptsCarryNoBusinessOutcomeAuthority proves at the type
+// level that neither receipt can even represent a business Outcome verdict:
+// no JSON tag of ActionReceipt or ObservationReceipt is or contains
+// `outcome`/`goal_achieved`, none is a graph-provider name, and the
+// ObservationReceipt field set is frozen to the bounded-observation binding
+// (the observation content itself stays behind the opaque evidence handle).
+func TestContractReceiptsCarryNoBusinessOutcomeAuthority(t *testing.T) {
+	forbiddenOutcomeTag := func(tag string) bool {
+		if strings.Contains(tag, "outcome") || strings.Contains(tag, "goal_achieved") {
+			return true
+		}
+		return tag == "graph" || strings.HasPrefix(tag, "graph_") || strings.HasSuffix(tag, "_graph")
+	}
+	collectTags := func(t *testing.T, value any) []string {
+		t.Helper()
+		typ := reflect.TypeOf(value)
+		tags := make([]string, 0, typ.NumField())
+		for i := 0; i < typ.NumField(); i++ {
+			tag := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
+			if tag == "" || tag == "-" {
+				t.Fatalf("%s.%s must declare an explicit json tag", typ.Name(), typ.Field(i).Name)
+			}
+			tags = append(tags, tag)
+		}
+		sort.Strings(tags)
+		return tags
+	}
+
+	for _, value := range []any{ActionReceipt{}, ObservationReceipt{}} {
+		typ := reflect.TypeOf(value)
+		for _, tag := range collectTags(t, value) {
+			if forbiddenOutcomeTag(tag) {
+				t.Errorf("%s json tag %q asserts business-outcome or graph-provider authority; receipts attest execution/observation facts only", typ.Name(), tag)
+			}
+		}
+	}
+
+	wantObservationTags := []string{
+		"action_ref", "audit_ref_id", "authority", "evidence_ref", "fresh_until",
+		"observation_hash", "observation_ref", "observed_at", "parameter_hash",
+		"postcondition_id", "signature", "source", "source_version",
+		"verification_need_id",
+	}
+	if got := collectTags(t, ObservationReceipt{}); !reflect.DeepEqual(got, wantObservationTags) {
+		t.Fatalf("ObservationReceipt json tags = %v, want frozen bounded-observation binding %v", got, wantObservationTags)
 	}
 }
 

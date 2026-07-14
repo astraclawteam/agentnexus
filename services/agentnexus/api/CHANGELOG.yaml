@@ -5,6 +5,34 @@
 #  `make contracts-verify` together with the contract parity tests).
 protocol: agentnexus-public-contract
 entries:
+  - version: "1.3.0"
+    date: "2026-07-14"
+    breaking: false
+    title: "Separate action and outcome authority: postconditions, verification needs and signed observation receipts (GA Task 0A amendment, plan dc81e80)"
+    summary: >-
+      Additive, backward-compatible evolution of the frozen contract: three
+      new public types (PostconditionSpec, VerificationNeed,
+      ObservationReceipt) and two OPTIONAL ActionRequest arrays bind
+      post-action verification to declared postconditions. No existing
+      schema, field, operation or enum changes and no new operations (the
+      verification-purpose read wiring that produces ObservationReceipts
+      arrives with the Task 0D amendment; an unreferenced component schema is
+      legal). Identity-out-of-request, opaque-handle and connector-topology
+      boundaries are preserved.
+    changes:
+      - "New PostconditionSpec (postcondition_id + kind + reference + optional expected): a declared business-state condition expected to hold AFTER the action executed. Declared by the calling Agent, recorded and transmitted — never evaluated for business success — by AgentNexus."
+      - "New VerificationNeed (need_id + postcondition_id + data_class): a declared post-action verification data need binding exactly one declared postcondition to a business-semantic data class; never a connector table, API path or instance selector. Only declared verification needs may ever be verified."
+      - "ActionRequest gains OPTIONAL postconditions and verification_needs arrays, completing its binding to '... idempotency key, preconditions, postconditions, verification needs, expiry, expected execution-receipt schema and optional compensation reference'. Canonical validation: every entry validates, postcondition_id/need_id values are unique, and every verification need must reference a declared postcondition (dangling bindings are rejected)."
+      - "New ObservationReceipt with the new obs_ opaque handle prefix (ObservationRef; SDK HandleObservation): binds the original Action and parameter hash (action_ref + parameter_hash), the declared PostconditionSpec/VerificationNeed pair (postcondition_id + verification_need_id), source and sealed source_version, the reporting authority, the observed_at/fresh_until freshness bounds (fresh_until must be after observed_at), the sha256 hash of the normalized observation, the evidence handle (evd_*) carrying the observation content and the audit reference (audit_ref_id), under a REQUIRED AgentNexus signature — unlike ActionReceipt's Task-0G-activated optional signing slot, an unsigned observation is not an ObservationReceipt. Every field is required and the observation payload stays handle-addressed (opaque-handle discipline, like receipt_ref): it is never embedded in the receipt."
+      - "Authority boundary frozen: ActionReceipt attests technical execution only; ObservationReceipt proves what an authorized source reported at a bounded time; NEITHER type contains a business Outcome assertion. AgentNexus never decides whether a business Outcome or WorkCase goal was achieved, never authors Outcomes and never owns or queries the calling Agent platform's result graph; only the calling Agent's deterministic domain runtime turns observed facts into an Outcome."
+      - "New public-surface prohibition enforced by the parity gate: no public schema/field/property name may be or contain outcome or goal_achieved, and no graph-provider name (graph, graph_*, *_graph) may appear in the public OpenAPI/proto surface; the SDK type walker enforces the same boundary on Go JSON tags. The ban targets names, never prose descriptions."
+      - "Proto parity: agentnexus.actions.v1 gains PostconditionSpec, VerificationNeed and ObservationReceipt messages plus append-only ActionRequest fields 15 (postconditions) and 16 (verification_needs)."
+    artifacts:
+      - "api/openapi/gateway-runtime.yaml"
+      - "api/proto/agentnexus/actions/v1/actions.proto"
+    sdk:
+      module: "github.com/astraclawteam/agentnexus/sdk/go/runtime"
+      note: "adds PostconditionSpec, VerificationNeed, ObservationReceipt (receipt.go) and ActionRequest postconditions/verification_needs with canonical validation"
   - version: "1.2.0"
     date: "2026-07-14"
     breaking: false

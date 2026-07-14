@@ -33,7 +33,15 @@ import (
 //     (connectors/v1), never in Agent-facing messages;
 //   - request bodies never supply trusted organization facts (org_version /
 //     org_unit_id); responses may expose the server-authored sealed snapshot
-//     version.
+//     version;
+//   - (GA Task 0A amendment, plan dc81e80) the public surface REQUIRES
+//     PostconditionSpec, VerificationNeed and a signed ObservationReceipt
+//     bound to source/version, authority, observed-at/freshness and the
+//     original Action/Postcondition, and REJECTS any `outcome`,
+//     `goal_achieved` or graph-provider field name: ActionReceipt attests
+//     technical execution only, ObservationReceipt proves a bounded
+//     authoritative observation, and neither carries a business Outcome
+//     assertion.
 //
 // Scope note: tasks/v1/tasks.proto (internal orchestration state) and
 // api/openapi/console-overview.yaml (console-internal surface) retain legacy
@@ -86,6 +94,15 @@ func loadPublicOpenAPI(t *testing.T, name string) (map[string]any, string) {
 // sealed snapshot version is a legitimate RESPONSE field (BrowserSession,
 // PermissionDecision). Its request-side ban is enforced by
 // NoCallerSuppliedOrgFactsInRequestBodies.
+//
+// The business-outcome and graph-provider bans (GA Task 0A amendment, plan
+// dc81e80) freeze the authority boundary: ActionReceipt attests technical
+// execution only, ObservationReceipt proves a bounded authoritative
+// observation, AgentNexus never decides whether a business Outcome/goal was
+// achieved and never owns or queries the calling Agent platform's result
+// graph. Like every check in this function, the ban targets schema/field/
+// property NAMES (OpenAPI properties and required entries, proto field
+// names), never prose descriptions.
 func forbiddenPublicFieldName(name string) string {
 	switch name {
 	case "enterprise_id", "actor_user_id":
@@ -102,6 +119,12 @@ func forbiddenPublicFieldName(name string) string {
 	}
 	if strings.HasPrefix(name, "connector_") {
 		return "connector topology"
+	}
+	if strings.Contains(name, "outcome") || strings.Contains(name, "goal_achieved") {
+		return "business-outcome authority leak (AgentNexus never authors Outcomes)"
+	}
+	if name == "graph" || strings.HasPrefix(name, "graph_") || strings.HasSuffix(name, "_graph") {
+		return "graph-provider leak (the result graph belongs to the calling Agent platform)"
 	}
 	return ""
 }
@@ -425,6 +448,133 @@ func TestPublicContractParity(t *testing.T) {
 		}
 	})
 
+	// The forbidden-name scan itself must reject the business-outcome and
+	// graph-provider surface (GA Task 0A amendment, plan dc81e80) while
+	// leaving the frozen observation vocabulary legal. This is the positive
+	// control proving the NoTrustedIdentity... scans above would catch such
+	// a field the moment one appeared in any public schema or proto.
+	t.Run("ForbiddenNameScanRejectsOutcomeAndGraphProviderNames", func(t *testing.T) {
+		for _, banned := range []string{
+			"outcome", "business_outcome", "outcome_status", "goal_achieved",
+			"graph", "graph_provider", "graph_ref", "result_graph", "age_graph",
+		} {
+			if forbiddenPublicFieldName(banned) == "" {
+				t.Errorf("forbiddenPublicFieldName(%q) must reject the business-outcome/graph-provider surface", banned)
+			}
+		}
+		for _, legal := range []string{
+			"observation_ref", "observation_hash", "observed_at", "fresh_until",
+			"source", "source_version", "authority", "decision", "goal_unrelated",
+		} {
+			if reason := forbiddenPublicFieldName(legal); reason != "" {
+				t.Errorf("forbiddenPublicFieldName(%q) = %q; the frozen observation vocabulary must stay legal", legal, reason)
+			}
+		}
+	})
+
+	// PostconditionSpec and VerificationNeed are the declared post-action
+	// verification bindings of ActionRequest (contract v1.3.0): a
+	// postcondition declares a post-state condition, a verification need
+	// binds exactly one declared postcondition to a business-semantic data
+	// class (never a connector location).
+	t.Run("PostconditionAndVerificationNeedSchemasExist", func(t *testing.T) {
+		schemas := nestedMap(t, runtimeDoc, "components", "schemas")
+
+		post, ok := schemas["PostconditionSpec"].(map[string]any)
+		if !ok {
+			t.Fatal("PostconditionSpec schema missing from gateway-runtime.yaml")
+		}
+		postProperties, postRequired := composedSchema(t, runtimeDoc, post)
+		for _, want := range []string{"postcondition_id", "kind", "reference"} {
+			if !postRequired[want] {
+				t.Errorf("PostconditionSpec must require %q, required = %v", want, sortedNames(postRequired))
+			}
+		}
+		if _, ok := postProperties["expected"]; !ok {
+			t.Error("PostconditionSpec must declare optional property \"expected\"")
+		}
+
+		need, ok := schemas["VerificationNeed"].(map[string]any)
+		if !ok {
+			t.Fatal("VerificationNeed schema missing from gateway-runtime.yaml")
+		}
+		needProperties, needRequired := composedSchema(t, runtimeDoc, need)
+		for _, want := range []string{"need_id", "postcondition_id", "data_class"} {
+			if !needRequired[want] {
+				t.Errorf("VerificationNeed must require %q (an unbound verification need is rejected), required = %v", want, sortedNames(needRequired))
+			}
+		}
+		if len(needProperties) == 0 {
+			t.Error("VerificationNeed must declare properties")
+		}
+	})
+
+	// ObservationReceipt is frozen with the same rigor as ActionReceipt: the
+	// exact property and required sets of the bounded-observation binding.
+	// Every field is REQUIRED — an observation receipt without source/
+	// version/authority/freshness or Action/Postcondition binding is not an
+	// observation receipt — and the observation content itself stays behind
+	// the opaque evidence handle (handle-addressed, like receipt_ref).
+	t.Run("ObservationReceiptBindsBoundedAuthoritativeObservation", func(t *testing.T) {
+		schemas := nestedMap(t, runtimeDoc, "components", "schemas")
+		schema, ok := schemas["ObservationReceipt"].(map[string]any)
+		if !ok {
+			t.Fatal("ObservationReceipt schema missing from gateway-runtime.yaml")
+		}
+		frozen := []string{
+			"observation_ref", "action_ref", "parameter_hash", "postcondition_id",
+			"verification_need_id", "source", "source_version", "authority",
+			"observed_at", "fresh_until", "observation_hash", "evidence_ref",
+			"audit_ref_id", "signature",
+		}
+		properties, required := composedSchema(t, runtimeDoc, schema)
+		var gotProperties []string
+		for name := range properties {
+			gotProperties = append(gotProperties, name)
+		}
+		sort.Strings(gotProperties)
+		wantFrozen := append([]string(nil), frozen...)
+		sort.Strings(wantFrozen)
+		if !equalStrings(gotProperties, wantFrozen) {
+			t.Errorf("ObservationReceipt properties = %v, want frozen set %v", gotProperties, wantFrozen)
+		}
+		if gotRequired := sortedNames(required); !equalStrings(gotRequired, wantFrozen) {
+			t.Errorf("ObservationReceipt required = %v, want every binding required %v", gotRequired, wantFrozen)
+		}
+
+		observationRef := requireProperty(t, runtimeDoc, properties, "observation_ref")
+		if pattern, _ := observationRef["pattern"].(string); !strings.HasPrefix(pattern, "^obs_") {
+			t.Errorf("observation_ref pattern = %q, want an opaque obs_ handle", pattern)
+		}
+		for _, hashProperty := range []string{"parameter_hash", "observation_hash"} {
+			hash := requireProperty(t, runtimeDoc, properties, hashProperty)
+			if hash["pattern"] != sha256RefPattern {
+				t.Errorf("%s pattern = %v, want %q", hashProperty, hash["pattern"], sha256RefPattern)
+			}
+		}
+		evidenceRef := requireProperty(t, runtimeDoc, properties, "evidence_ref")
+		if pattern, _ := evidenceRef["pattern"].(string); !strings.HasPrefix(pattern, "^evd_") {
+			t.Errorf("evidence_ref pattern = %q, want an opaque evd_ handle", pattern)
+		}
+		for _, timeProperty := range []string{"observed_at", "fresh_until"} {
+			bound := requireProperty(t, runtimeDoc, properties, timeProperty)
+			if bound["format"] != "date-time" {
+				t.Errorf("%s format = %v, want date-time (the observation is bounded in time)", timeProperty, bound["format"])
+			}
+		}
+		sourceVersion := requireProperty(t, runtimeDoc, properties, "source_version")
+		if sourceVersion["type"] != "integer" {
+			t.Errorf("source_version type = %v, want integer", sourceVersion["type"])
+		}
+		signature := requireProperty(t, runtimeDoc, properties, "signature")
+		_, signatureRequired := composedSchema(t, runtimeDoc, signature)
+		for _, want := range []string{"algorithm", "key_id", "value"} {
+			if !signatureRequired[want] {
+				t.Errorf("ObservationReceipt signature must require %q (an unsigned observation receipt is rejected)", want)
+			}
+		}
+	})
+
 	t.Run("NoVendorSpecificNames", func(t *testing.T) {
 		for name, text := range texts {
 			lower := strings.ToLower(text)
@@ -477,9 +627,19 @@ func TestPublicContractParity(t *testing.T) {
 				t.Errorf("ActionRequest must require %q, required = %v", want, sortedNames(required))
 			}
 		}
-		for _, want := range []string{"trace_id", "constraints", "approval_plan_ref", "preconditions", "compensation_ref"} {
+		for _, want := range []string{"trace_id", "constraints", "approval_plan_ref", "preconditions", "postconditions", "verification_needs", "compensation_ref"} {
 			if _, ok := properties[want]; !ok {
 				t.Errorf("ActionRequest must declare property %q", want)
+			}
+		}
+		for propertyName, wantItemsRef := range map[string]string{
+			"postconditions":     "#/components/schemas/PostconditionSpec",
+			"verification_needs": "#/components/schemas/VerificationNeed",
+		} {
+			array := requireProperty(t, runtimeDoc, properties, propertyName)
+			items, _ := array["items"].(map[string]any)
+			if items["$ref"] != wantItemsRef {
+				t.Errorf("ActionRequest %s items = %v, want %q", propertyName, items["$ref"], wantItemsRef)
 			}
 		}
 		for _, legacy := range []string{"action", "input", "resource"} {
@@ -707,6 +867,16 @@ func TestPublicContractParity(t *testing.T) {
 				"string expected_receipt_schema", "string compensation_ref",
 				"agentnexus.trust.v1.RiskDecision risk_decision",
 				"agentnexus.trust.v1.ApprovalPlanRef approval_plan_ref",
+				// GA Task 0A amendment (plan dc81e80): declared postconditions,
+				// verification needs and the signed bounded-observation receipt.
+				"message PostconditionSpec", "message VerificationNeed",
+				"message ObservationReceipt",
+				"repeated PostconditionSpec postconditions",
+				"repeated VerificationNeed verification_needs",
+				"string observation_ref", "string postcondition_id",
+				"string verification_need_id", "int64 source_version",
+				"string observed_at", "string fresh_until",
+				"string observation_hash", "string audit_ref_id",
 			},
 			filepath.Join("trust", "v1", "trust.proto"): {
 				"package agentnexus.trust.v1;",

@@ -48,6 +48,30 @@ message Precondition {
   string expected = 3;
 }
 
+// PostconditionSpec declares one business-state condition expected to hold
+// AFTER the action executed (contract v1.3.0). It is declared by the calling
+// Agent and later checked by a verification observation; the runtime records
+// and transmits it but never evaluates whether the business goal behind it
+// was achieved.
+message PostconditionSpec {
+  string postcondition_id = 1; // request-scoped id bound by VerificationNeed/ObservationReceipt
+  string kind = 2;
+  string reference = 3;
+  string expected = 4;
+}
+
+// VerificationNeed declares one post-action verification data need
+// (contract v1.3.0): it binds exactly one declared postcondition to a
+// business-semantic data class whose authorized source will be observed
+// after execution. The data class is business vocabulary, never a connector
+// table, API path or instance selector. A satisfied verification need
+// produces a signed ObservationReceipt.
+message VerificationNeed {
+  string need_id = 1;          // request-scoped id bound by ObservationReceipt
+  string postcondition_id = 2; // declared postcondition this need verifies
+  string data_class = 3;
+}
+
 // ActionRequest is the only way an Agent asks for a side effect. The Agent
 // client and release are bound through the verified principal context, never
 // through this message.
@@ -66,6 +90,10 @@ message ActionRequest {
   string expires_at = 12; // RFC 3339
   string expected_receipt_schema = 13;
   string compensation_ref = 14; // optional compensating capability reference
+  // Contract v1.3.0 additions (append-only field numbers): declared
+  // postconditions and the exact verification needs bound to them.
+  repeated PostconditionSpec postconditions = 15;
+  repeated VerificationNeed verification_needs = 16;
 }
 
 // Action is the runtime's view of one requested side effect.
@@ -95,4 +123,30 @@ message ActionReceipt {
   string result_hash = 8; // sha256:<64 hex> over result_json
   string issued_at = 9;   // RFC 3339
   agentnexus.trust.v1.Signature signature = 10;
+}
+
+// ObservationReceipt is the signed proof of what an authorized source
+// reported at a bounded time about one declared postcondition of one
+// executed Action (contract v1.3.0). Authority boundary: ActionReceipt
+// attests technical execution only; ObservationReceipt proves a bounded
+// authoritative observation; neither message carries a business Outcome
+// assertion — the runtime never decides whether a business goal or Outcome
+// was achieved and never owns or queries the calling Agent platform's
+// result graph. The observation content stays behind the opaque evidence
+// handle (never embedded) and the signature is required.
+message ObservationReceipt {
+  string observation_ref = 1; // opaque obs_* handle
+  string action_ref = 2;      // original executed Action
+  string parameter_hash = 3;  // sha256:<64 hex> binding of the original parameters
+  string postcondition_id = 4;     // declared PostconditionSpec checked
+  string verification_need_id = 5; // declared VerificationNeed satisfied
+  string source = 6;          // business-semantic authorized source identity
+  int64 source_version = 7;   // sealed source content version, starts at 1
+  string authority = 8;       // authority under which the source reported
+  string observed_at = 9;     // RFC 3339
+  string fresh_until = 10;    // RFC 3339; must be after observed_at
+  string observation_hash = 11; // sha256:<64 hex> over the normalized observation
+  string evidence_ref = 12;   // opaque evd_* handle carrying the content
+  string audit_ref_id = 13;   // audit chain reference
+  agentnexus.trust.v1.Signature signature = 14; // required
 }

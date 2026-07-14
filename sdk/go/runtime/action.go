@@ -107,13 +107,66 @@ func (p Precondition) Validate() error {
 	return nil
 }
 
+// PostconditionSpec declares one business-state condition expected to hold
+// AFTER the action executed (contract v1.3.0, GA Task 0A amendment). It is
+// declared by the calling Agent and later checked by a verification
+// observation; AgentNexus records and transmits it but never evaluates
+// whether the business goal behind it was achieved.
+type PostconditionSpec struct {
+	// PostconditionID is the request-scoped identifier VerificationNeed and
+	// ObservationReceipt bind to.
+	PostconditionID string `json:"postcondition_id"`
+	Kind            string `json:"kind"`
+	Reference       string `json:"reference"`
+	Expected        string `json:"expected,omitempty"`
+}
+
+// Validate applies the canonical PostconditionSpec rules; an empty or
+// unidentified spec is rejected.
+func (p PostconditionSpec) Validate() error {
+	if err := requireNonEmpty("postcondition_id", p.PostconditionID); err != nil {
+		return err
+	}
+	if err := requireNonEmpty("kind", p.Kind); err != nil {
+		return err
+	}
+	return requireNonEmpty("reference", p.Reference)
+}
+
+// VerificationNeed declares one post-action verification data need
+// (contract v1.3.0, GA Task 0A amendment): it binds exactly one declared
+// postcondition to a business-semantic data class whose authorized source
+// will be observed after execution. The data class is business vocabulary,
+// never a connector table, API path or instance selector. A satisfied
+// verification need produces a signed ObservationReceipt.
+type VerificationNeed struct {
+	// NeedID is the request-scoped identifier ObservationReceipt binds to.
+	NeedID string `json:"need_id"`
+	// PostconditionID references the declared PostconditionSpec this need
+	// verifies; an unbound verification need is rejected.
+	PostconditionID string `json:"postcondition_id"`
+	DataClass       string `json:"data_class"`
+}
+
+// Validate applies the canonical VerificationNeed rules; an empty or unbound
+// need is rejected.
+func (n VerificationNeed) Validate() error {
+	if err := requireNonEmpty("need_id", n.NeedID); err != nil {
+		return err
+	}
+	if err := requireNonEmpty("postcondition_id", n.PostconditionID); err != nil {
+		return err
+	}
+	return requireNonEmpty("data_class", n.DataClass)
+}
+
 // ActionRequest is the only way an Agent asks for a side effect. It binds the
 // Agent client and release through the verified PrincipalContext (never
 // through this JSON), the work case, the business-semantic capability, the
 // exact hash-bound parameters, the signed RiskDecision of the calling
 // authority, the transmitted approval plan, an idempotency key,
-// preconditions, an expiry, the expected receipt schema and an optional
-// compensation reference.
+// preconditions, postconditions, verification needs, an expiry, the expected
+// execution-receipt schema and an optional compensation reference.
 type ActionRequest struct {
 	RequestID          string          `json:"request_id"`
 	TraceID            string          `json:"trace_id,omitempty"`
@@ -126,12 +179,19 @@ type ActionRequest struct {
 	RiskDecision       RiskDecision    `json:"risk_decision"`
 	// ApprovalPlanRef references the approval plan authored by the approval
 	// authority. AgentNexus transmits it and never authors it.
-	ApprovalPlanRef       *ApprovalPlanRef `json:"approval_plan_ref,omitempty"`
-	IdempotencyKey        string           `json:"idempotency_key"`
-	Preconditions         []Precondition   `json:"preconditions,omitempty"`
-	ExpiresAt             time.Time        `json:"expires_at"`
-	ExpectedReceiptSchema string           `json:"expected_receipt_schema"`
-	CompensationRef       string           `json:"compensation_ref,omitempty"`
+	ApprovalPlanRef *ApprovalPlanRef `json:"approval_plan_ref,omitempty"`
+	IdempotencyKey  string           `json:"idempotency_key"`
+	Preconditions   []Precondition   `json:"preconditions,omitempty"`
+	// Postconditions declare the post-state conditions verification
+	// observations bind to (contract v1.3.0); optional, validated per entry.
+	Postconditions []PostconditionSpec `json:"postconditions,omitempty"`
+	// VerificationNeeds declare the exact post-action verification reads the
+	// caller requests; each must bind one declared postcondition. Only these
+	// declared needs may ever be verified (contract v1.3.0).
+	VerificationNeeds     []VerificationNeed `json:"verification_needs,omitempty"`
+	ExpiresAt             time.Time          `json:"expires_at"`
+	ExpectedReceiptSchema string             `json:"expected_receipt_schema"`
+	CompensationRef       string             `json:"compensation_ref,omitempty"`
 }
 
 // Validate applies the canonical ActionRequest rules, including the exact
@@ -195,6 +255,29 @@ func (r ActionRequest) Validate() error {
 	for i, precondition := range r.Preconditions {
 		if err := precondition.Validate(); err != nil {
 			return fieldErrorf("preconditions", "[%d]: %v", i, err)
+		}
+	}
+	postconditionIDs := make(map[string]bool, len(r.Postconditions))
+	for i, postcondition := range r.Postconditions {
+		if err := postcondition.Validate(); err != nil {
+			return fieldErrorf("postconditions", "[%d]: %v", i, err)
+		}
+		if postconditionIDs[postcondition.PostconditionID] {
+			return fieldErrorf("postconditions", "[%d]: duplicate postcondition_id %q makes verification bindings ambiguous", i, postcondition.PostconditionID)
+		}
+		postconditionIDs[postcondition.PostconditionID] = true
+	}
+	needIDs := make(map[string]bool, len(r.VerificationNeeds))
+	for i, need := range r.VerificationNeeds {
+		if err := need.Validate(); err != nil {
+			return fieldErrorf("verification_needs", "[%d]: %v", i, err)
+		}
+		if needIDs[need.NeedID] {
+			return fieldErrorf("verification_needs", "[%d]: duplicate need_id %q makes observation bindings ambiguous", i, need.NeedID)
+		}
+		needIDs[need.NeedID] = true
+		if !postconditionIDs[need.PostconditionID] {
+			return fieldErrorf("verification_needs", "[%d]: postcondition_id %q does not reference a declared postcondition", i, need.PostconditionID)
 		}
 	}
 	if r.ExpiresAt.IsZero() {

@@ -34,6 +34,9 @@ const (
 	HandleGrant            = "grant_"
 	HandleAction           = "act_"
 	HandleReceipt          = "rcp_"
+	// HandleObservation addresses one signed ObservationReceipt (contract
+	// v1.3.0, GA Task 0A amendment).
+	HandleObservation = "obs_"
 )
 
 var (
@@ -151,19 +154,33 @@ func validateCapability(capability string) error {
 // isForbiddenRequestKey reports whether a request JSON key tries to carry
 // trusted identity or connector topology.
 //
-// Three related, intentionally different forbidden-name sets exist:
+// Four related, intentionally different forbidden-name sets exist:
 //   - this decoder set: request JSON keys (the exact trio plus any key
 //     containing "enterprise" or prefixed connector_), skipping hash-bound
 //     opaque payloads. org_version/org_unit_id are not listed here because
 //     strict decoding (DisallowUnknownFields) already rejects them — no
-//     request type declares such a field;
+//     request type declares such a field. Business-outcome names are not
+//     listed here either: no request type declares such a field, so strict
+//     decoding rejects them, and the type-level walker below makes them
+//     unrepresentable;
 //   - the service parity test (public_contract_parity_test.go,
 //     forbiddenPublicFieldName): additionally bans resource_name and the
-//     exact org_unit_id anywhere in the public YAML/proto surface, and bans
+//     exact org_unit_id anywhere in the public YAML/proto surface, bans
 //     org_version request-side only (it is a legal server-authored response
-//     field);
+//     field), and — since contract v1.3.0 (GA Task 0A amendment, plan
+//     dc81e80) — bans any schema/field name that is or contains
+//     outcome/goal_achieved or is a graph-provider name (graph, graph_*,
+//     *_graph) anywhere in the public YAML/proto surface;
 //   - the SDK type-walker test (TestContractNoTrustedIdentityFieldsInTypes):
-//     checks the Go json tags of every public type, responses included.
+//     checks the Go json tags of every public type, responses included, for
+//     both the identity/topology bans and the same v1.3.0 outcome/
+//     goal_achieved/graph-provider matcher, keeping tag and contract-file
+//     scans in lockstep;
+//   - the receipt-scoped tag test
+//     (TestContractReceiptsCarryNoBusinessOutcomeAuthority): defense in
+//     depth on ActionReceipt/ObservationReceipt — re-applies the outcome
+//     matcher and freezes the exact ObservationReceipt tag set, because the
+//     receipts are where outcome authority would most plausibly creep in.
 func isForbiddenRequestKey(key string) bool {
 	switch key {
 	case "enterprise_id", "actor_user_id", "connector_instance_id":
