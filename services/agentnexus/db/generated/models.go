@@ -57,64 +57,61 @@ type AgentClient struct {
 	CreatedAt            pgtype.Timestamptz
 }
 
-type ApprovalQueueItem struct {
-	ID                          string
-	EnterpriseID                string
-	RequesterUserID             string
-	ResourceType                string
-	ResourceID                  string
-	Action                      string
-	RiskLevel                   string
-	OrgUnitID                   string
-	ReviewerUserID              pgtype.Text
-	Status                      string
-	CreatedAt                   pgtype.Timestamptz
-	OrgVersion                  int64
-	RiskReasons                 []byte
-	RouteMode                   string
-	OrgPath                     []byte
-	Queue                       pgtype.Text
-	RouteInputHash              string
-	RouteOutputHash             string
-	PolicyVersion               int64
-	PolicyVersionRef            int64
-	IdempotencyKeyHash          string
-	ReviewerOrgUnitID           pgtype.Text
-	ReviewerDisplayName         pgtype.Text
-	ReviewerPermission          pgtype.Text
-	ReviewerPermissionOrgUnitID pgtype.Text
+type ApprovalDeliveryAttempt struct {
+	TenantRef string
+	PlanRef   string
+	Attempt   int64
+	Outcome   string
+	Reason    string
+	CreatedAt pgtype.Timestamptz
 }
 
-type ApprovalResolutionIdempotency struct {
-	EnterpriseID                 string
-	IdempotencyKeyHash           string
-	RequestHash                  string
-	RequesterUserID              string
-	OrgVersion                   int64
-	OrgUnitID                    string
-	PolicyVersion                int64
-	PolicyVersionRef             int64
-	ResourceType                 string
-	ResourceID                   string
-	Action                       string
-	RouteMode                    string
-	RiskLevel                    string
-	RiskReasons                  []byte
-	ReviewerUserID               pgtype.Text
-	ReviewerOrgUnitID            pgtype.Text
-	ReviewerDisplayName          pgtype.Text
-	ReviewerPermission           pgtype.Text
-	ReviewerPermissionOrgUnitID  pgtype.Text
-	RequesterPermission          pgtype.Text
-	RequesterPermissionOrgUnitID pgtype.Text
-	OrgPath                      []byte
-	Queue                        pgtype.Text
-	AutoPublish                  bool
-	QueueItemID                  pgtype.Text
-	AuditEventID                 string
-	ExpectedAuditInputHash       string
-	ExpectedAuditOutputHash      string
-	CreatedAt                    pgtype.Timestamptz
+type ApprovalEvidenceRecord struct {
+	TenantRef         string
+	ApprovalRef       string
+	PlanRef           string
+	PlanHash          string
+	Capability        string
+	ParameterHash     string
+	Decision          string
+	ApproverAuthority string
+	DecidedAt         pgtype.Timestamptz
+	EvidenceHash      string
+	Attestation       []byte
+	AuditRefID        string
+	ConsumedAt        pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+}
+
+type ApprovalTransmission struct {
+	TenantRef           string
+	PlanRef             string
+	PlanHash            string
+	Authority           string
+	BusinessContextRef  string
+	Capability          string
+	ParameterHash       string
+	Purpose             string
+	Status              string
+	ExpiresAt           pgtype.Timestamptz
+	DeliveryAttempts    int32
+	LastDeliveryOutcome string
+	LastDeliveryReason  string
+	Decision            string
+	DecidedAt           pgtype.Timestamptz
+	RevokedAt           pgtype.Timestamptz
+	RevocationReason    string
+	AuditRefID          string
+	CreatedAt           pgtype.Timestamptz
+	UpdatedAt           pgtype.Timestamptz
+}
+
+type ApprovalTransmissionRevocation struct {
+	TenantRef    string
+	RevocationID string
+	PlanRef      string
+	Reason       string
+	CreatedAt    pgtype.Timestamptz
 }
 
 type Artifact struct {
@@ -249,24 +246,6 @@ type Enterprise struct {
 	ID        string
 	Name      string
 	CreatedAt pgtype.Timestamptz
-}
-
-type EnterpriseApprovalPolicy struct {
-	EnterpriseID           string
-	MinimumRisk            string
-	MaxLowImpactedUsers    int32
-	MaxLowImpactedOrgUnits int32
-	PolicyVersion          int64
-	UpdatedAt              pgtype.Timestamptz
-}
-
-type EnterpriseApprovalPolicyVersion struct {
-	EnterpriseID           string
-	PolicyVersion          int64
-	MinimumRisk            string
-	MaxLowImpactedUsers    int32
-	MaxLowImpactedOrgUnits int32
-	CreatedAt              pgtype.Timestamptz
 }
 
 type EnterpriseUser struct {

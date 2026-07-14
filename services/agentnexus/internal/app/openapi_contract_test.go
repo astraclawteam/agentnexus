@@ -26,13 +26,31 @@ func TestOpenAPIGatewayRuntimeContract(t *testing.T) {
 	if description, _ := caseTicket["description"].(string); description != "Use the exact header format: Authorization: CaseTicket <opaque>" {
 		t.Fatalf("CaseTicket security description=%q", description)
 	}
-	approvalPath := nestedMap(t, paths, "/v1/approvals/resolve", "post")
-	if approvalPath["operationId"] != "resolveApprovalRoute" {
-		t.Fatalf("approval operationId=%v", approvalPath["operationId"])
+	// GA Task 0E: the legacy resolution surface is RETIRED — no resolve
+	// operation and no route/facts schemas may reappear.
+	if _, exists := paths["/v1/approvals/resolve"]; exists {
+		t.Fatal("the retired approval resolution operation must not reappear in the public contract")
 	}
-	parameters, ok := approvalPath["parameters"].([]any)
-	if !ok || len(parameters) != 2 {
-		t.Fatalf("approval parameters=%v", approvalPath["parameters"])
+	for _, retired := range []string{"ApprovalRoute", "ApprovalResolveRequest"} {
+		if _, exists := schemas[retired]; exists {
+			t.Fatalf("retired approval resolution schema %s must not reappear", retired)
+		}
+	}
+	transmitPath := nestedMap(t, paths, "/v1/approvals/transmissions", "post")
+	if transmitPath["operationId"] != "transmitApprovalPlan" {
+		t.Fatalf("transmit operationId=%v", transmitPath["operationId"])
+	}
+	statusPath := nestedMap(t, paths, "/v1/approvals/transmissions/{plan_ref}", "get")
+	if statusPath["operationId"] != "getApprovalTransmission" {
+		t.Fatalf("status operationId=%v", statusPath["operationId"])
+	}
+	revokePath := nestedMap(t, paths, "/v1/approvals/transmissions/{plan_ref}/revocations", "post")
+	if revokePath["operationId"] != "revokeApprovalTransmission" {
+		t.Fatalf("revoke operationId=%v", revokePath["operationId"])
+	}
+	evidencePath := nestedMap(t, paths, "/v1/approvals/evidence", "post")
+	if evidencePath["operationId"] != "recordApprovalEvidence" {
+		t.Fatalf("evidence operationId=%v", evidencePath["operationId"])
 	}
 	for path, operationID := range map[string]string{"/v1/step-grants": "createStepGrant", "/v1/tickets/verify": "verifyStepGrant"} {
 		operation := nestedMap(t, paths, path, "post")
@@ -95,40 +113,69 @@ func TestOpenAPIGatewayRuntimeContract(t *testing.T) {
 		assertPropertyType(t, schema, "org_version", "integer")
 	})
 
-	t.Run("ApprovalRoute", func(t *testing.T) {
-		schema := namedSchema(t, schemas, "ApprovalRoute")
+	t.Run("ApprovalTransmissionStatus", func(t *testing.T) {
+		schema := namedSchema(t, schemas, "ApprovalTransmissionStatus")
 		assertObjectProperties(t, schema, []string{
-			"mode", "risk_level", "risk_reasons", "requester_user_id", "org_path", "auto_publish",
-		}, []string{"reviewer_user_id", "reviewer_display_name", "queue"})
-		if _, exists := nestedMap(t, schema, "properties")["policy_version"]; exists {
-			t.Fatal("frozen ApprovalRoute must not expose internal policy_version evidence")
-		}
-		assertEnum(t, property(t, schema, "mode"), []any{
-			"single_confirmation", "upward_review", "enterprise_knowledge_admin_queue",
+			"plan_ref", "plan_hash", "authority", "business_context_ref", "capability", "parameter_hash", "status", "expires_at", "delivery_attempts", "updated_at",
+		}, []string{"last_delivery_state", "decision", "decided_at", "revoked_at"})
+		assertEnum(t, property(t, schema, "status"), []any{
+			"pending", "delivered", "evidence_recorded", "revoked",
 		})
-		assertRiskLevelRef(t, schema, "risk_level")
-		assertStringArray(t, schema, "risk_reasons")
-		assertPropertyType(t, schema, "requester_user_id", "string")
-		assertPropertyType(t, schema, "reviewer_user_id", "string")
-		assertPropertyType(t, schema, "reviewer_display_name", "string")
-		assertStringArray(t, schema, "org_path")
-		assertPropertyType(t, schema, "queue", "string")
-		autoPublish := property(t, schema, "auto_publish")
-		assertType(t, autoPublish, "boolean")
-		assertEnum(t, autoPublish, []any{false})
+		properties := nestedMap(t, schema, "properties")
+		// The transmission plane carries NO approver identity, queue routing
+		// or risk classification: the external authority owns all of it.
+		for _, banned := range []string{"reviewer_user_id", "reviewer_display_name", "queue", "mode", "org_path", "risk_level", "risk_reasons", "requester_user_id", "granted"} {
+			if _, exists := properties[banned]; exists {
+				t.Fatalf("ApprovalTransmissionStatus must not expose %s", banned)
+			}
+		}
+		if property(t, schema, "decision")["$ref"] != "#/components/schemas/ApprovalDecision" {
+			t.Fatal("decision must reference the shared ApprovalDecision schema")
+		}
+		assertDateTime(t, schema, "expires_at")
+		assertDateTime(t, schema, "updated_at")
 	})
 
-	t.Run("ApprovalResolveRequest", func(t *testing.T) {
-		schema := namedSchema(t, schemas, "ApprovalResolveRequest")
-		assertObjectProperties(t, schema, []string{"resource_type", "resource_id", "action", "changed_fields", "impacted_org_unit_ids", "impacted_user_count", "published_behavior_change", "external_side_effect", "requested_risk", "facts_issued_at", "facts_expires_at", "facts_nonce"}, nil)
-		if _, exists := nestedMap(t, schema, "properties")["requester_user_id"]; exists {
-			t.Fatal("request body must not contain requester_user_id")
+	t.Run("ApprovalDecision", func(t *testing.T) {
+		decisionSchema, ok := schemas["ApprovalDecision"].(map[string]any)
+		if !ok {
+			t.Fatal("ApprovalDecision schema missing")
 		}
-		if _, exists := nestedMap(t, schema, "properties")["org_version"]; exists {
-			t.Fatal("request must not supply the trusted organization version")
+		assertEnum(t, decisionSchema, []any{"approved", "denied", "narrowed"})
+	})
+
+	t.Run("ApprovalEvidence", func(t *testing.T) {
+		schema := namedSchema(t, schemas, "ApprovalEvidence")
+		assertObjectProperties(t, schema, []string{
+			"approval_ref", "plan_ref", "plan_hash", "capability", "parameter_hash", "decision", "approver_authority", "decided_at", "attestation",
+		}, nil)
+		if property(t, schema, "attestation")["$ref"] != "#/components/schemas/Signature" {
+			t.Fatal("attestation must reference the shared Signature schema")
 		}
-		if _, exists := nestedMap(t, schema, "properties")["org_unit_id"]; exists {
-			t.Fatal("request must not supply the trusted organization scope")
+		assertDateTime(t, schema, "decided_at")
+	})
+
+	t.Run("ApprovalTransmissionRequest", func(t *testing.T) {
+		schema, ok := schemas["ApprovalTransmissionRequest"].(map[string]any)
+		if !ok {
+			t.Fatal("ApprovalTransmissionRequest schema missing")
+		}
+		composition, ok := schema["allOf"].([]any)
+		if !ok || len(composition) != 2 {
+			t.Fatalf("ApprovalTransmissionRequest must compose RequestEnvelope: %v", schema["allOf"])
+		}
+		body, ok := composition[1].(map[string]any)
+		if !ok {
+			t.Fatal("ApprovalTransmissionRequest body schema missing")
+		}
+		properties := nestedMap(t, body, "properties")
+		if plan, ok := properties["plan"].(map[string]any); !ok || plan["$ref"] != "#/components/schemas/ApprovalPlanRef" {
+			t.Fatalf("plan must reference the frozen ApprovalPlanRef: %v", properties["plan"])
+		}
+		for _, banned := range []string{"org_version", "org_unit_id", "requested_risk", "changed_fields", "reviewer_user_id"} {
+			if _, exists := properties[banned]; exists {
+				t.Fatalf("ApprovalTransmissionRequest must not carry %s", banned)
+			}
 		}
 	})
 	t.Run("StepGrantRequest", func(t *testing.T) {

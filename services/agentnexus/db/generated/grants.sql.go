@@ -11,6 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const acquireEnterpriseOrgPublicationLock = `-- name: AcquireEnterpriseOrgPublicationLock :one
+SELECT pg_advisory_xact_lock(hashtextextended($1, 0))
+`
+
+func (q *Queries) AcquireEnterpriseOrgPublicationLock(ctx context.Context, hashtextextended string) (interface{}, error) {
+	row := q.db.QueryRow(ctx, acquireEnterpriseOrgPublicationLock, hashtextextended)
+	var pg_advisory_xact_lock interface{}
+	err := row.Scan(&pg_advisory_xact_lock)
+	return pg_advisory_xact_lock, err
+}
+
 const getActiveCaseTicketForGrant = `-- name: GetActiveCaseTicketForGrant :one
 SELECT id, enterprise_id, actor_user_id, request_id, trace_id, status, expires_at, created_at, token_hash
 FROM case_tickets

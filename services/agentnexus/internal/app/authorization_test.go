@@ -267,7 +267,8 @@ func TestTrustProtectedPathsAreAllRegistered(t *testing.T) {
 	h := newBrowserHarness(t)
 	for _, path := range []string{
 		"/v1/authorization/decisions",
-		"/v1/approvals/resolve",
+		"/v1/approvals/transmissions",
+		"/v1/approvals/evidence",
 		"/v1/step-grants",
 		"/v1/tickets/verify",
 		"/v1/audit/evidence",

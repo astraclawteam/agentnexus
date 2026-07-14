@@ -33,10 +33,6 @@ func TestTrustedContextCutover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier, err := app.NewHMACChangeFactsVerifier([]byte("agentnexus-e2e-approval-facts-secret-v1"), time.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
 	gateway := httptest.NewUnstartedServer(nil)
 	gatewayURL := "https://" + gateway.Listener.Addr().String()
 	consoleRedirect := "http://127.0.0.1:43123/auth/callback"
@@ -56,7 +52,7 @@ func TestTrustedContextCutover(t *testing.T) {
 			SigningKeyID:       "gateway-e2e", SigningPrivateKey: key, HTTPTimeout: 5 * time.Second,
 		},
 		LoginAttemptLimits: browserauth.DefaultLoginAttemptLimits(), AuthorizeRateLimitPerMinute: browserauth.DefaultAuthorizeRateLimitPerMinute,
-		ApprovalFactsVerifier: verifier, RequestTimeout: 10 * time.Second,
+		RequestTimeout: 10 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approvaltransport"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
@@ -227,6 +228,56 @@ func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, inpu
 	}
 	event := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: input.EnterpriseID, CaseTicketID: input.CaseTicketID, ActorUserID: input.ActorUserID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: string(input.Action), Decision: decision, InputHash: "sha256:" + hex.EncodeToString(sum[:]), EvidencePointer: input.TraceID}, previous)
 	if _, err := tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, CaseTicketID: textValue(event.CaseTicketID), ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, InputHash: textValue(event.InputHash), EvidencePointer: textValue(event.EvidencePointer), PrevHash: textValue(event.PrevHash), EventHash: event.EventHash}); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// AppendApprovalTransmissionAudit appends one hash-chained approval
+// TRANSMISSION lineage event (internal vocabulary: approval.plan.transmit,
+// approval.evidence.record, approval.transmission.revoke) and returns the
+// audit event id. This is the internal audit ledger like the browser-session
+// lineage — deliberately NOT the public /v1/audit/evidence surface, whose
+// AuditEvidenceAction enum stays frozen (GA Task 0E; Task 0G chains the
+// events further). The event carries the plan_ref binding and the bounded
+// details hash; it never carries approver identity, because none exists on
+// the transmission plane.
+func (s *PostgresBrowserAuditSink) AppendApprovalTransmissionAudit(ctx context.Context, event approvaltransport.AuditEvent) (id string, resultErr error) {
+	if s == nil || s.evidenceDB == nil || s.random == nil || event.TenantRef == "" || event.PrincipalRef == "" || event.Action == "" || event.PlanRef == "" || event.Decision == "" {
+		return "", errors.New("invalid approval transmission audit event")
+	}
+	tx, err := s.evidenceDB.BeginAuditEvidenceTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
+		defer cancel()
+		if rollbackErr := tx.Rollback(cleanupCtx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			resultErr = errors.Join(resultErr, rollbackErr)
+		}
+	}()
+	if _, err := tx.AcquireEnterpriseAuditLock(ctx, event.TenantRef); err != nil {
+		return "", err
+	}
+	previous, err := tx.GetLatestEnterpriseAuditHash(ctx, event.TenantRef)
+	if err != nil {
+		return "", err
+	}
+	id, err = randomAuditID(s.random)
+	if err != nil {
+		return "", err
+	}
+	details, err := json.Marshal(event.Details)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(details)
+	chained := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: event.TenantRef, ActorUserID: event.PrincipalRef, ResourceType: "approval_transmission", ResourceID: event.PlanRef, Action: event.Action, Decision: event.Decision, InputHash: "sha256:" + hex.EncodeToString(sum[:])}, previous)
+	if _, err := tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: chained.ID, EnterpriseID: chained.EnterpriseID, ActorUserID: textValue(chained.ActorUserID), ResourceType: textValue(chained.ResourceType), ResourceID: textValue(chained.ResourceID), Action: chained.Action, Decision: chained.Decision, InputHash: textValue(chained.InputHash), PrevHash: textValue(chained.PrevHash), EventHash: chained.EventHash}); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(ctx); err != nil {

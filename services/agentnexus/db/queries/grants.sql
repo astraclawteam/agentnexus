@@ -35,3 +35,6 @@ SELECT g.id, g.enterprise_id, g.case_ticket_id, g.resource_type, g.resource_id,
 FROM step_grants g
 JOIN step_grant_issuances i ON i.enterprise_id=g.enterprise_id AND i.step_grant_id=g.id
 WHERE i.enterprise_id = $1 AND i.token_hash = $2;
+
+-- name: AcquireEnterpriseOrgPublicationLock :one
+SELECT pg_advisory_xact_lock(hashtextextended($1, 0));

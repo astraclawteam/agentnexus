@@ -7,7 +7,6 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,7 +26,7 @@ import (
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
-	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approvaltransport"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/tickets"
 	jose "github.com/go-jose/go-jose/v4"
@@ -56,11 +55,7 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secret := []byte("agentnexus-e2e-approval-facts-secret-v1")
-	verifier, err := app.NewHMACChangeFactsVerifier(secret, time.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
+	approvalChannel := approvaltransport.NewMemoryChannel()
 
 	gateway := httptest.NewUnstartedServer(nil)
 	gatewayURL := "https://" + gateway.Listener.Addr().String()
@@ -81,7 +76,7 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 			SigningKeyID:       "gateway-e2e", SigningPrivateKey: key, HTTPTimeout: 5 * time.Second,
 		},
 		LoginAttemptLimits: browserauth.DefaultLoginAttemptLimits(), AuthorizeRateLimitPerMinute: browserauth.DefaultAuthorizeRateLimitPerMinute,
-		ApprovalFactsVerifier: verifier, RequestTimeout: 10 * time.Second,
+		ApprovalChannel: approvalChannel, RequestTimeout: 10 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -184,13 +179,74 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 		t.Fatalf("low authorization decision=%+v", decision)
 	}
 
-	low := resolveApproval(t, client, gatewayURL, secret, "idem-low-1234567890", approvalFacts{ResourceID: "knowledge-low", RequestedRisk: approval.RiskLow})
-	if low.Mode != approval.ModeSingleConfirmation || low.RiskLevel != approval.RiskLow || low.AutoPublish || low.RequesterUserID != e2eUser {
-		t.Fatalf("low route=%+v", low)
+	// GA Task 0E approval TRANSMISSION: the verified session transmits the
+	// caller's signed plan UNCHANGED, records the authority's evidence and
+	// revokes — AgentNexus never chooses an approver anywhere below.
+	transmitted := transmitApprovalPlan(t, client, gatewayURL)
+	if transmitted.Status != "delivered" || transmitted.PlanRef != e2ePlanRef || transmitted.DeliveryAttempts != 1 || transmitted.Decision != "" {
+		t.Fatalf("transmitted=%+v", transmitted)
 	}
-	high := resolveApproval(t, client, gatewayURL, secret, "idem-high-123456789", approvalFacts{ResourceID: "knowledge-high", RequestedRisk: approval.RiskHigh, ExternalSideEffect: true})
-	if high.Mode != approval.ModeUpwardReview || high.RiskLevel != approval.RiskHigh || high.ReviewerUserID != e2eReviewer || high.AutoPublish {
-		t.Fatalf("high route=%+v", high)
+	deliveries := approvalChannel.Deliveries()
+	if len(deliveries) != 1 || deliveries[0].PlanRef != e2ePlanRef || deliveries[0].PlanHash != e2ePlanHash || deliveries[0].Authority != "agentatlas" || deliveries[0].Capability != "knowledge.article.publish" || deliveries[0].ParameterHash != e2eParamHash {
+		t.Fatalf("channel deliveries=%+v", deliveries)
+	}
+	statusResp := mustRequest(t, client, http.MethodGet, gatewayURL+"/v1/approvals/transmissions/"+e2ePlanRef, "", nil)
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", statusResp.StatusCode, readBody(t, statusResp))
+	}
+	assertNoStore(t, statusResp)
+	var transmissionStatus approvalTransmissionView
+	decodeJSON(t, statusResp, &transmissionStatus)
+	if transmissionStatus.Status != "delivered" {
+		t.Fatalf("transmission status=%+v", transmissionStatus)
+	}
+
+	wrongHash := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/approvals/evidence", e2eEvidenceBody(t, "sha256:"+strings.Repeat("9", 64)), map[string]string{"Content-Type": "application/json"})
+	if wrongHash.StatusCode != http.StatusForbidden {
+		t.Fatalf("wrong-hash evidence status=%d body=%s", wrongHash.StatusCode, readBody(t, wrongHash))
+	}
+	wrongHash.Body.Close()
+
+	recorded := recordApprovalEvidence(t, client, gatewayURL)
+	if recorded.Status != "evidence_recorded" || recorded.Decision != "approved" {
+		t.Fatalf("recorded=%+v", recorded)
+	}
+	duplicate := recordApprovalEvidence(t, client, gatewayURL)
+	if duplicate.Status != "evidence_recorded" {
+		t.Fatalf("duplicate evidence=%+v", duplicate)
+	}
+
+	revokeResp := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/approvals/transmissions/"+e2ePlanRef+"/revocations", `{"request_id":"revoke-e2e-1","reason":"requester withdrew the change"}`, map[string]string{"Content-Type": "application/json"})
+	if revokeResp.StatusCode != http.StatusOK {
+		t.Fatalf("revoke status=%d body=%s", revokeResp.StatusCode, readBody(t, revokeResp))
+	}
+	var revoked approvalTransmissionView
+	decodeJSON(t, revokeResp, &revoked)
+	if revoked.Status != "revoked" {
+		t.Fatalf("revoked=%+v", revoked)
+	}
+
+	var transmissionRows, attemptRows, evidenceRows, revocationRows int
+	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM approval_transmissions WHERE tenant_ref=$1 AND plan_ref=$2 AND status='revoked' AND decision='approved'`, e2eEnterprise, e2ePlanRef).Scan(&transmissionRows); err != nil || transmissionRows != 1 {
+		t.Fatalf("transmission rows=%d err=%v", transmissionRows, err)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM approval_delivery_attempts WHERE tenant_ref=$1 AND plan_ref=$2 AND outcome='delivered'`, e2eEnterprise, e2ePlanRef).Scan(&attemptRows); err != nil || attemptRows != 1 {
+		t.Fatalf("attempt rows=%d err=%v", attemptRows, err)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM approval_evidence_records WHERE tenant_ref=$1 AND plan_ref=$2 AND decision='approved' AND consumed_at IS NULL`, e2eEnterprise, e2ePlanRef).Scan(&evidenceRows); err != nil || evidenceRows != 1 {
+		t.Fatalf("evidence rows=%d err=%v", evidenceRows, err)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM approval_transmission_revocations WHERE tenant_ref=$1 AND plan_ref=$2`, e2eEnterprise, e2ePlanRef).Scan(&revocationRows); err != nil || revocationRows != 1 {
+		t.Fatalf("revocation rows=%d err=%v", revocationRows, err)
+	}
+	// Two submission acts were audited (the accepted record and its idempotent
+	// duplicate) but exactly ONE acceptance marker exists: the lineage
+	// distinguishes accepted evidence from resubmissions.
+	for action, want := range map[string]int{"approval.plan.transmit": 1, "approval.evidence.submitted": 2, "approval.evidence.recorded": 1, "approval.transmission.revoke": 1} {
+		var count int
+		if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM audit_events WHERE enterprise_id=$1 AND action=$2`, e2eEnterprise, action).Scan(&count); err != nil || count != want {
+			t.Fatalf("audit action=%s count=%d want=%d err=%v", action, count, want, err)
+		}
 	}
 
 	grantBody := `{"case_ticket_id":"ticket-e2e","resource_type":"dream_evidence","resource_id":"dream-evidence-1","action":"read","ttl_seconds":300}`
@@ -270,9 +326,12 @@ func TestPostgresContractSerializationAndRollback(t *testing.T) {
 	t.Run("task3 org publication trigger", func(t *testing.T) {
 		assertStatementSerialized(t, pool, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", []any{e2eEnterprise}, `INSERT INTO org_versions(id,enterprise_id,version_number,source_event_id) VALUES ('lock-version-2',$1,2,'lock-event-2')`, []any{e2eEnterprise})
 	})
-	t.Run("task4 policy publication trigger", func(t *testing.T) {
-		assertStatementSerialized(t, pool, "SELECT pg_advisory_xact_lock(hashtextextended($1, 2))", []any{e2eEnterprise}, `UPDATE enterprise_approval_policies SET policy_version=2,updated_at=clock_timestamp()+interval '1 second' WHERE enterprise_id=$1`, []any{e2eEnterprise})
-	})
+	// The former "task4 policy publication trigger" subtest is retired with
+	// GA Task 0E: enterprise_approval_policies (and its advisory-lock domain
+	// 2 serialization) existed only to feed the approval resolver, which
+	// migration 000009 removes. Transmission-side serialization (per-plan
+	// advisory lock domain 4) is exercised by the approvaltransport postgres
+	// integration suite.
 	t.Run("task5 ownership trigger", func(t *testing.T) {
 		assertStatementSerialized(t, pool, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", []any{e2eEnterprise}, `INSERT INTO sensitive_resource_ownerships(enterprise_id,resource_type,resource_id,org_version,org_unit_id) VALUES ($1,'dream_evidence','lock-evidence',1,'company_root')`, []any{e2eEnterprise})
 	})
@@ -317,30 +376,80 @@ func TestPostgresContractSerializationAndRollback(t *testing.T) {
 	}
 }
 
-type approvalFacts struct {
-	ResourceID         string
-	RequestedRisk      approval.RiskLevel
-	ExternalSideEffect bool
+const (
+	e2ePlanRef     = "apl_e2e0123456789abcdef"
+	e2eApprovalRef = "apv_e2e0123456789abcdef"
+)
+
+var (
+	e2ePlanHash  = "sha256:" + strings.Repeat("1", 64)
+	e2eParamHash = "sha256:" + strings.Repeat("2", 64)
+	// e2eDecidedAt is frozen at package init so the duplicate evidence
+	// submission is byte-identical (idempotent), not a mutated replay.
+	e2eDecidedAt = time.Now().UTC().Format(time.RFC3339)
+)
+
+// approvalTransmissionView is the transmission diagnostics response shape.
+type approvalTransmissionView struct {
+	PlanRef          string `json:"plan_ref"`
+	Status           string `json:"status"`
+	Decision         string `json:"decision"`
+	DeliveryAttempts int    `json:"delivery_attempts"`
 }
 
-func resolveApproval(t *testing.T, client *http.Client, gatewayURL string, secret []byte, idempotency string, facts approvalFacts) approval.Route {
+func transmitApprovalPlan(t *testing.T, client *http.Client, gatewayURL string) approvalTransmissionView {
 	t.Helper()
-	now := time.Now().UTC().Truncate(time.Second)
-	idemSum := sha256.Sum256([]byte(idempotency))
-	input := app.ChangeFactsVerificationInput{EnterpriseID: e2eEnterprise, ActorUserID: e2eUser, OrgVersion: e2eOrgVersion, OrgUnitID: e2eTeam, ResourceType: "knowledge", ResourceID: facts.ResourceID, Action: "knowledge.publish_low_risk", ChangedFields: []string{"title"}, ImpactedOrgUnitIDs: []string{e2eTeam}, ImpactedUserCount: 1, ExternalSideEffect: facts.ExternalSideEffect, FactsIssuedAt: now, FactsExpiresAt: now.Add(4 * time.Minute), FactsNonce: "nonce-approval-123456789", IdempotencyKeyHash: hex.EncodeToString(idemSum[:])}
-	signature, err := app.ComputeChangeFactsAttestation(secret, input)
+	body, _ := json.Marshal(map[string]any{
+		"request_id":           "transmit-e2e-1",
+		"business_context_ref": "wc_e2e0123456789abcdef",
+		"capability":           "knowledge.article.publish",
+		"parameter_hash":       e2eParamHash,
+		"purpose":              "publish knowledge article 42",
+		"plan":                 map[string]any{"plan_ref": e2ePlanRef, "plan_hash": e2ePlanHash, "authority": "agentatlas"},
+		"expires_at":           time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
+	})
+	resp := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/approvals/transmissions", string(body), map[string]string{"Content-Type": "application/json"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("transmit status=%d body=%s", resp.StatusCode, readBody(t, resp))
+	}
+	assertNoStore(t, resp)
+	var view approvalTransmissionView
+	decodeJSON(t, resp, &view)
+	return view
+}
+
+func e2eEvidenceBody(t *testing.T, parameterHash string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"request_id": "evidence-e2e-1",
+		"evidence": map[string]any{
+			"approval_ref":       e2eApprovalRef,
+			"plan_ref":           e2ePlanRef,
+			"plan_hash":          e2ePlanHash,
+			"capability":         "knowledge.article.publish",
+			"parameter_hash":     parameterHash,
+			"decision":           "approved",
+			"approver_authority": "agentatlas",
+			"decided_at":         e2eDecidedAt,
+			"attestation":        map[string]any{"algorithm": "ed25519", "key_id": "atlas-key-e2e", "value": "c2lnbmF0dXJl"},
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := json.Marshal(map[string]any{"org_version": input.OrgVersion, "org_unit_id": input.OrgUnitID, "resource_type": input.ResourceType, "resource_id": input.ResourceID, "action": input.Action, "changed_fields": input.ChangedFields, "impacted_org_unit_ids": input.ImpactedOrgUnitIDs, "impacted_user_count": input.ImpactedUserCount, "published_behavior_change": false, "external_side_effect": input.ExternalSideEffect, "requested_risk": facts.RequestedRisk, "facts_issued_at": input.FactsIssuedAt, "facts_expires_at": input.FactsExpiresAt, "facts_nonce": input.FactsNonce})
-	resp := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/approvals/resolve", string(body), map[string]string{"Content-Type": "application/json", "Idempotency-Key": idempotency, "X-Approval-Facts-Attestation": signature})
+	return string(body)
+}
+
+func recordApprovalEvidence(t *testing.T, client *http.Client, gatewayURL string) approvalTransmissionView {
+	t.Helper()
+	resp := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/approvals/evidence", e2eEvidenceBody(t, e2eParamHash), map[string]string{"Content-Type": "application/json"})
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("approval status=%d body=%s", resp.StatusCode, readBody(t, resp))
+		t.Fatalf("evidence status=%d body=%s", resp.StatusCode, readBody(t, resp))
 	}
 	assertNoStore(t, resp)
-	var route approval.Route
-	decodeJSON(t, resp, &route)
-	return route
+	var view approvalTransmissionView
+	decodeJSON(t, resp, &view)
+	return view
 }
 
 func openMigratedPostgres(t *testing.T) *pgxpool.Pool {
@@ -490,7 +599,6 @@ func seedLockFixture(t *testing.T, pool *pgxpool.Pool) {
 		`INSERT INTO org_policy_snapshot_units(enterprise_id,version_number,org_unit_id,parent_id) VALUES ('ent_e2e',1,'company_root',NULL)`,
 		`INSERT INTO org_policy_snapshot_memberships(enterprise_id,version_number,enterprise_user_id,org_unit_id,role) VALUES ('ent_e2e',1,'user_manager','company_root','approve_high_risk')`,
 		`UPDATE org_versions SET policy_snapshot_sealed=true WHERE enterprise_id='ent_e2e' AND version_number=1`,
-		`INSERT INTO enterprise_approval_policies(enterprise_id,minimum_risk,max_low_impacted_users,max_low_impacted_org_units,policy_version) VALUES ('ent_e2e','low',25,1,1)`,
 	}
 	for _, statement := range statements {
 		if _, err := pool.Exec(ctx, statement); err != nil {
@@ -517,7 +625,6 @@ func seedGatewayFixture(t *testing.T, pool *pgxpool.Pool, issuer string) {
 		{`INSERT INTO org_policy_snapshot_units(enterprise_id,version_number,org_unit_id,parent_id) VALUES ($1,1,$2,NULL),($1,1,$3,$2)`, []any{e2eEnterprise, e2eRoot, e2eTeam}},
 		{`INSERT INTO org_policy_snapshot_memberships(enterprise_id,version_number,enterprise_user_id,org_unit_id,role) VALUES ($1,1,$2,$3,'member'),($1,1,$2,$3,'publish_low_risk'),($1,1,$2,$3,'approve_high_risk'),($1,1,$2,$3,'service_mode'),($1,1,$4,$5,'manager'),($1,1,$4,$5,'approve_high_risk')`, []any{e2eEnterprise, e2eUser, e2eTeam, e2eReviewer, e2eRoot}},
 		{`UPDATE org_versions SET policy_snapshot_sealed=true WHERE enterprise_id=$1 AND version_number=1`, []any{e2eEnterprise}},
-		{`INSERT INTO enterprise_approval_policies(enterprise_id,minimum_risk,max_low_impacted_users,max_low_impacted_org_units,policy_version) VALUES ($1,'low',25,1,1)`, []any{e2eEnterprise}},
 		{`INSERT INTO case_tickets(id,enterprise_id,actor_user_id,request_id,status,expires_at,token_hash) VALUES ('ticket-e2e',$1,$2,'request-e2e','active',now()+interval '30 minutes',$3)`, []any{e2eEnterprise, e2eUser, ticketHash}},
 		{`INSERT INTO sensitive_resource_ownerships(enterprise_id,resource_type,resource_id,org_version,org_unit_id) VALUES ($1,'dream_evidence','dream-evidence-1',1,$2)`, []any{e2eEnterprise, e2eTeam}},
 	}

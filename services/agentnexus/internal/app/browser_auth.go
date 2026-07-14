@@ -182,13 +182,16 @@ type BrowserAuthDependencies struct {
 	// OrgVersions resolves the sealed org snapshot version at ingress with a
 	// single query. When nil, the resolver falls back to reading the version
 	// off the full AuthorizationPolicy snapshot (used by in-memory tests).
-	OrgVersions           trust.OrgSnapshotResolver
-	TicketActors          trust.AccessTicketVerifier
-	StepGrants            trust.StepGrantVerifier
-	ApprovalSource        ApprovalSnapshotSource
-	ApprovalStore         ApprovalRouteStore
-	ApprovalFactsVerifier ChangeFactsVerifier
-	Grants                grantService
+	OrgVersions  trust.OrgSnapshotResolver
+	TicketActors trust.AccessTicketVerifier
+	StepGrants   trust.StepGrantVerifier
+	// ApprovalTransmission is the GA Task 0E approval transmission plane
+	// (optional; the endpoints register when provided). AgentNexus transmits
+	// the caller's signed plan unchanged and validates returned evidence —
+	// without a configured transmission service there is NO approval surface
+	// at all (fail closed; the legacy resolution surface is retired).
+	ApprovalTransmission ApprovalTransmissionService
+	Grants               grantService
 	// Evidence is the semantic evidence runtime behind /v1/runtime/locate and
 	// /v1/runtime/read (optional; the endpoints register when provided).
 	Evidence EvidenceService
@@ -206,7 +209,7 @@ type browserAuthHandler struct {
 	authorizeSourceResolver AuthorizeSourceResolver
 	trustResolver           *trust.Resolver
 	authorization           *authorizationHandler
-	approval                *approvalHandler
+	approval                *approvalTransportHandler
 	grants                  *grantHandler
 	auditEvidence           *auditEvidenceHandler
 	evidence                *evidenceHandler
@@ -239,12 +242,12 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 	if err != nil {
 		return nil, err
 	}
-	var approvalRoutes *approvalHandler
-	if deps.ApprovalSource != nil || deps.ApprovalStore != nil {
-		if deps.ApprovalSource == nil || deps.ApprovalStore == nil {
-			return nil, errors.New("approval dependencies incomplete")
-		}
-		approvalRoutes, err = newApprovalHandler(approvalDependencies{EnterpriseID: deps.Config.EnterpriseID, Source: deps.ApprovalSource, Store: deps.ApprovalStore, FactsVerifier: deps.ApprovalFactsVerifier, Audit: deps.Audit})
+	var approvalRoutes *approvalTransportHandler
+	if deps.ApprovalTransmission != nil {
+		// No logger is injected through BrowserAuthDependencies yet; nil selects
+		// the constructor's explicit slog.Default() fallback through the single
+		// handler-logger seam (0D evidence-handler precedent).
+		approvalRoutes, err = newApprovalTransportHandler(deps.Config.EnterpriseID, deps.ApprovalTransmission, deps.Audit, nil)
 		if err != nil {
 			return nil, err
 		}

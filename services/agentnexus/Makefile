@@ -5,7 +5,7 @@ generate:
 
 test-auth:
 	$(if $(strip $(AGENTNEXUS_E2E_POSTGRES_DSN)),,$(error AGENTNEXUS_E2E_POSTGRES_DSN is required for live PostgreSQL acceptance))
-	go test ./internal/browserauth ./internal/deploypreflight ./internal/policy ./internal/approval ./internal/tickets ./internal/app ./cmd/release-preflight ./tests/e2e -count=1
+	go test ./internal/browserauth ./internal/deploypreflight ./internal/policy ./internal/approvaltransport ./internal/tickets ./internal/app ./cmd/release-preflight ./tests/e2e -count=1
 
 release-auth:
 	sh deploy/release-auth.sh

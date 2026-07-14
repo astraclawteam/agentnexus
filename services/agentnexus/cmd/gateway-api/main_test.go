@@ -11,8 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
-	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approvaltransport"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
@@ -92,21 +91,31 @@ func TestBuildRouterWiresAuthorizationPolicyAndPostgresTicketActor(t *testing.T)
 	}
 }
 
-func TestBuildRouterWiresPostgresApprovalSourceAndAtomicStore(t *testing.T) {
-	source, store := productionApprovalDependencies(nil)
-	if _, ok := source.(*app.PostgresApprovalSource); !ok {
-		t.Fatalf("source=%T", source)
+func TestApprovalTransmissionProductionWiringFailsClosed(t *testing.T) {
+	// The production transmission store fails closed without a pool, and the
+	// command wires NO approval channel yet: the retired resolver secret is
+	// gone and the transmission endpoints stay unregistered until a channel
+	// is configured (AgentNexus never resolves approvals itself).
+	store := productionApprovalTransmissionStore(nil)
+	if _, err := store.GetTransmission(context.Background(), "enterprise-1", "apl_0123456789abcdef"); !errors.Is(err, approvaltransport.ErrUnavailable) {
+		t.Fatalf("nil Postgres transmission store err=%v want ErrUnavailable", err)
 	}
-	if _, ok := store.(*app.PostgresApprovalStore); !ok {
-		t.Fatalf("store=%T", store)
+	if _, _, err := store.CreateTransmission(context.Background(), approvaltransport.Transmission{TenantRef: "enterprise-1", PlanRef: "apl_0123456789abcdef"}); !errors.Is(err, approvaltransport.ErrUnavailable) {
+		t.Fatalf("nil Postgres transmission store create err=%v want ErrUnavailable", err)
 	}
-	if _, err := source.LoadApprovalSnapshot(context.Background(), "enterprise-1", 1, "user-1"); !errors.Is(err, approval.ErrApprovalUnavailable) {
-		t.Fatalf("nil Postgres approval source err=%v", err)
+	_, file, _, _ := runtime.Caller(0)
+	raw, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
+	if err != nil {
+		t.Fatal(err)
 	}
-	req := approval.Request{EnterpriseID: "enterprise-1", RequesterUserID: "user-1", OrgVersion: 1, OrgUnitID: "unit-1", ResourceType: "workflow", ResourceID: "workflow-1", Action: "workflow.update"}
-	route := approval.Route{Mode: approval.ModeSingleConfirmation, RiskLevel: approval.RiskLow, RiskReasons: []approval.RiskReason{approval.RiskReasonExplicitConfirmation}, RequesterUserID: "user-1", OrgPath: []string{"unit-1"}}
-	if _, err := store.RecordResolution(context.Background(), req, route); err == nil {
-		t.Fatal("nil Postgres approval store did not fail closed")
+	source := string(raw)
+	for _, retired := range []string{"AGENTNEXUS_APPROVAL_FACTS_SECRET_FILE", "LoadChangeFactsVerifierFromFile"} {
+		if strings.Contains(source, retired) {
+			t.Errorf("retired approval resolution wiring %q still present in main.go", retired)
+		}
+	}
+	if !strings.Contains(source, "approvaltransport.NewPostgresStore(pool)") {
+		t.Error("production approval transmission store seam missing")
 	}
 }
 

@@ -112,7 +112,6 @@ Browser authentication is disabled unless `AGENTNEXUS_BROWSER_AUTH_ENABLED=true`
 | `AGENTNEXUS_OIDC_SIGNING_KEY_ID` | Unique current ID-token signing key id. |
 | `AGENTNEXUS_OIDC_SIGNING_KEY_PATH` | Absolute 0600 current private signing-key file. |
 | `AGENTNEXUS_OIDC_PREVIOUS_SIGNING_KEYS_JSON` | Optional previous key-id to absolute public-key-file map retained during verifier rollover. |
-| `AGENTNEXUS_APPROVAL_FACTS_SECRET_FILE` | Absolute 0600 HMAC secret shared only with the AgentAtlas BFF that attests change facts. If absent, approvals fail safely at high risk; an invalid configured file stops startup. |
 
 Rate and proxy settings are `AGENTNEXUS_OIDC_AUTHORIZE_RATE_LIMIT_PER_MINUTE`, `AGENTNEXUS_OIDC_LOGIN_ATTEMPT_PER_BROWSER_LIMIT`, `AGENTNEXUS_OIDC_LOGIN_ATTEMPT_GLOBAL_LIMIT`, and `AGENTNEXUS_TRUSTED_PROXY_CIDRS` as described above. Never log `Authorization`, cookies, codes, PKCE verifiers, secret-file contents, private keys, approval attestations, Case Tickets, or Step Grants.
 

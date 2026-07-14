@@ -2,273 +2,354 @@ package app
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approval"
+	"github.com/astraclawteam/agentnexus/sdk/go/runtime"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approvaltransport"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 )
 
-const maxApprovalRequestBytes = 16 << 10
+const maxApprovalTransportRequestBytes = 16 << 10
 
-type approvalDependencies struct {
-	EnterpriseID  string
-	Source        ApprovalSnapshotSource
-	Store         ApprovalRouteStore
-	FactsVerifier ChangeFactsVerifier
-	Audit         BrowserAuditSink
+// ApprovalTransmissionService is the approval TRANSMISSION plane consumed by
+// the gateway (implemented by *approvaltransport.Service). AgentNexus
+// transmits the caller's signed plan unchanged, validates returned evidence
+// and exposes status — it never classifies risk, walks hierarchy or chooses
+// approvers (GA Task 0E locked boundary). Identity derives from the
+// ingress-resolved trusted context only.
+type ApprovalTransmissionService interface {
+	Transmit(ctx context.Context, principal runtime.PrincipalContext, req runtime.ApprovalRequest) (approvaltransport.Transmission, error)
+	RecordEvidence(ctx context.Context, principal runtime.PrincipalContext, evidence runtime.ApprovalEvidence) (approvaltransport.EvidenceRecord, error)
+	GetStatus(ctx context.Context, principal runtime.PrincipalContext, planRef string) (approvaltransport.Transmission, error)
+	Revoke(ctx context.Context, principal runtime.PrincipalContext, planRef, reason string) (approvaltransport.Transmission, error)
 }
 
-type approvalHandler struct {
+// approvalTransportHandler serves the transmission surface:
+//
+//	POST /v1/approvals/transmissions
+//	GET  /v1/approvals/transmissions/{plan_ref}
+//	POST /v1/approvals/transmissions/{plan_ref}/revocations
+//	POST /v1/approvals/evidence
+//
+// Request bodies are strictly decoded (unknown members and trusted-identity
+// fields are rejected); every failure envelope is fixed and opaque.
+type approvalTransportHandler struct {
 	enterpriseID string
-	source       ApprovalSnapshotSource
-	store        ApprovalRouteStore
-	verifier     ChangeFactsVerifier
+	service      ApprovalTransmissionService
 	audit        BrowserAuditSink
+	logger       *slog.Logger
 }
 
-type approvalResolveRequest struct {
-	OrgVersion              int64
-	OrgUnitID               string
-	ResourceType            string
-	ResourceID              string
-	Action                  string
-	ChangedFields           []string
-	ImpactedOrgUnitIDs      []string
-	ImpactedUserCount       int
-	PublishedBehaviorChange bool
-	ExternalSideEffect      bool
-	RequestedRisk           approval.RiskLevel
-	FactsIssuedAt           time.Time
-	FactsExpiresAt          time.Time
-	FactsNonce              string
-}
-
-func newApprovalHandler(deps approvalDependencies) (*approvalHandler, error) {
-	if !canonicalAuthorizationValue(deps.EnterpriseID) || deps.Source == nil || deps.Store == nil || deps.FactsVerifier == nil {
-		return nil, errors.New("approval dependencies incomplete")
+// newApprovalTransportHandler builds the handler. The logger is the single
+// handler-side observability seam (0D evidence-handler precedent); nil falls
+// back to slog.Default() explicitly.
+func newApprovalTransportHandler(enterpriseID string, service ApprovalTransmissionService, audit BrowserAuditSink, logger *slog.Logger) (*approvalTransportHandler, error) {
+	if enterpriseID == "" || service == nil {
+		return nil, errors.New("approval transmission dependencies incomplete")
 	}
-	return &approvalHandler{enterpriseID: deps.EnterpriseID, source: deps.Source, store: deps.Store, verifier: deps.FactsVerifier, audit: deps.Audit}, nil
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &approvalTransportHandler{enterpriseID: enterpriseID, service: service, audit: audit, logger: logger}, nil
 }
 
-func (h *approvalHandler) register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/approvals/resolve", h.resolve)
+func (h *approvalTransportHandler) register(mux *http.ServeMux) {
+	mux.HandleFunc("POST /v1/approvals/transmissions", h.transmit)
+	mux.HandleFunc("GET /v1/approvals/transmissions/{plan_ref}", h.status)
+	mux.HandleFunc("POST /v1/approvals/transmissions/{plan_ref}/revocations", h.revoke)
+	mux.HandleFunc("POST /v1/approvals/evidence", h.recordEvidence)
 }
 
-func (h *approvalHandler) resolve(w http.ResponseWriter, r *http.Request) {
+// approvalTransmissionResponse is the diagnostics status view. It carries the
+// exact operation binding and the transport lifecycle — and, by boundary,
+// not a single approver identity, queue or risk field.
+type approvalTransmissionResponse struct {
+	PlanRef             string     `json:"plan_ref"`
+	PlanHash            string     `json:"plan_hash"`
+	Authority           string     `json:"authority"`
+	BusinessContextRef  string     `json:"business_context_ref"`
+	Capability          string     `json:"capability"`
+	ParameterHash       string     `json:"parameter_hash"`
+	Status              string     `json:"status"`
+	ExpiresAt           time.Time  `json:"expires_at"`
+	DeliveryAttempts    int        `json:"delivery_attempts"`
+	LastDeliveryOutcome string     `json:"last_delivery_state,omitempty"`
+	Decision            string     `json:"decision,omitempty"`
+	DecidedAt           *time.Time `json:"decided_at,omitempty"`
+	RevokedAt           *time.Time `json:"revoked_at,omitempty"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+func transmissionResponse(transmission approvaltransport.Transmission) approvalTransmissionResponse {
+	response := approvalTransmissionResponse{
+		PlanRef:             transmission.PlanRef,
+		PlanHash:            transmission.PlanHash,
+		Authority:           transmission.Authority,
+		BusinessContextRef:  transmission.BusinessContextRef,
+		Capability:          transmission.Capability,
+		ParameterHash:       transmission.ParameterHash,
+		Status:              string(transmission.Status),
+		ExpiresAt:           transmission.ExpiresAt.UTC(),
+		DeliveryAttempts:    transmission.DeliveryAttempts,
+		LastDeliveryOutcome: string(transmission.LastDeliveryOutcome),
+		Decision:            string(transmission.Decision),
+		UpdatedAt:           transmission.UpdatedAt.UTC(),
+	}
+	if !transmission.DecidedAt.IsZero() {
+		decidedAt := transmission.DecidedAt.UTC()
+		response.DecidedAt = &decidedAt
+	}
+	if !transmission.RevokedAt.IsZero() {
+		revokedAt := transmission.RevokedAt.UTC()
+		response.RevokedAt = &revokedAt
+	}
+	return response
+}
+
+func (h *approvalTransportHandler) transmit(w http.ResponseWriter, r *http.Request) {
+	trustedCtx, ok := h.begin(w, r)
+	if !ok {
+		return
+	}
+	body, ok := h.readBody(w, r)
+	if !ok {
+		return
+	}
+	request, err := runtime.DecodeApprovalRequest(body)
+	if err != nil {
+		h.rejectDecode(w, r, trustedCtx.Principal.TenantRef, trustedCtx.Principal.PrincipalRef, err)
+		return
+	}
+	if _, err := NewRequestContext(trustedCtx, request.RequestID, request.TraceID); err != nil {
+		writeApprovalTransportError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	transmission, err := h.service.Transmit(r.Context(), trustedCtx.Principal, request)
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, transmissionResponse(transmission))
+}
+
+func (h *approvalTransportHandler) status(w http.ResponseWriter, r *http.Request) {
+	trustedCtx, ok := h.begin(w, r)
+	if !ok {
+		return
+	}
+	transmission, err := h.service.GetStatus(r.Context(), trustedCtx.Principal, r.PathValue("plan_ref"))
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, transmissionResponse(transmission))
+}
+
+func (h *approvalTransportHandler) recordEvidence(w http.ResponseWriter, r *http.Request) {
+	trustedCtx, ok := h.begin(w, r)
+	if !ok {
+		return
+	}
+	body, ok := h.readBody(w, r)
+	if !ok {
+		return
+	}
+	var envelope struct {
+		RequestID string                   `json:"request_id"`
+		TraceID   string                   `json:"trace_id"`
+		Evidence  runtime.ApprovalEvidence `json:"evidence"`
+	}
+	if !h.decodeStrictEnvelope(w, r, trustedCtx, body, &envelope, "evidence") {
+		return
+	}
+	if _, err := NewRequestContext(trustedCtx, envelope.RequestID, envelope.TraceID); err != nil {
+		writeApprovalTransportError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if _, err := h.service.RecordEvidence(r.Context(), trustedCtx.Principal, envelope.Evidence); err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	transmission, err := h.service.GetStatus(r.Context(), trustedCtx.Principal, envelope.Evidence.PlanRef)
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, transmissionResponse(transmission))
+}
+
+func (h *approvalTransportHandler) revoke(w http.ResponseWriter, r *http.Request) {
+	trustedCtx, ok := h.begin(w, r)
+	if !ok {
+		return
+	}
+	body, ok := h.readBody(w, r)
+	if !ok {
+		return
+	}
+	var envelope struct {
+		RequestID string `json:"request_id"`
+		TraceID   string `json:"trace_id"`
+		Reason    string `json:"reason"`
+	}
+	if !h.decodeStrictEnvelope(w, r, trustedCtx, body, &envelope, "reason") {
+		return
+	}
+	if _, err := NewRequestContext(trustedCtx, envelope.RequestID, envelope.TraceID); err != nil {
+		writeApprovalTransportError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	transmission, err := h.service.Revoke(r.Context(), trustedCtx.Principal, r.PathValue("plan_ref"), envelope.Reason)
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, transmissionResponse(transmission))
+}
+
+// begin resolves the ingress trusted context. Handlers never authenticate on
+// their own.
+func (h *approvalTransportHandler) begin(w http.ResponseWriter, r *http.Request) (trust.Context, bool) {
 	setNoStore(w)
 	trustedCtx, status := trustedRequestContext(r)
 	if status != 0 {
-		writeAuthorizationError(w, status)
-		return
+		writeApprovalTransportError(w, status, "request_failed")
+		return trust.Context{}, false
 	}
 	if trustedCtx.Principal.TenantRef != h.enterpriseID {
-		writeAuthorizationError(w, http.StatusUnauthorized)
-		return
+		writeApprovalTransportError(w, http.StatusUnauthorized, "request_failed")
+		return trust.Context{}, false
 	}
-	// Identity comes ONLY from the ingress-resolved trusted context. The
-	// governed-change facts (including their org_version / org_unit_id) are
-	// the console BFF's attested payload; Task 0E replaces this resolver
-	// with approval transmission and retires those body facts.
-	actor := struct{ EnterpriseID, UserID string }{EnterpriseID: trustedCtx.Principal.TenantRef, UserID: trustedCtx.Principal.PrincipalRef}
-	idempotencyHash, signature, ok := decodeApprovalHeaders(w, r)
-	if !ok {
-		return
-	}
-	input, ok := decodeApprovalRequest(w, r)
-	if !ok {
-		return
-	}
-	verificationInput := ChangeFactsVerificationInput{EnterpriseID: actor.EnterpriseID, ActorUserID: actor.UserID, OrgVersion: input.OrgVersion, OrgUnitID: input.OrgUnitID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, ChangedFields: input.ChangedFields, ImpactedOrgUnitIDs: input.ImpactedOrgUnitIDs, ImpactedUserCount: input.ImpactedUserCount, PublishedBehaviorChange: input.PublishedBehaviorChange, ExternalSideEffect: input.ExternalSideEffect, FactsIssuedAt: input.FactsIssuedAt, FactsExpiresAt: input.FactsExpiresAt, FactsNonce: input.FactsNonce, IdempotencyKeyHash: idempotencyHash, Signature: signature}
-	replayHash, err := computeApprovalReplayHash(verificationInput, input.RequestedRisk)
-	if err != nil {
-		writeAuthorizationError(w, http.StatusBadRequest)
-		return
-	}
-	replayed, found, err := h.store.LookupResolution(r.Context(), actor.EnterpriseID, idempotencyHash, replayHash)
-	if err != nil {
-		status := http.StatusServiceUnavailable
-		if errors.Is(err, ErrApprovalIdempotencyConflict) {
-			status = http.StatusConflict
-		}
-		writeAuthorizationError(w, status)
-		return
-	}
-	if found {
-		writeJSON(w, http.StatusOK, replayed)
-		return
-	}
-	facts, err := h.verifier.VerifyChangeFacts(r.Context(), verificationInput)
-	if err != nil {
-		writeAuthorizationError(w, http.StatusServiceUnavailable)
-		return
-	}
-	request := approval.Request{EnterpriseID: actor.EnterpriseID, RequesterUserID: actor.UserID, OrgVersion: input.OrgVersion, OrgUnitID: input.OrgUnitID, ResourceType: input.ResourceType, ResourceID: input.ResourceID, Action: input.Action, Facts: facts, RequestedRisk: input.RequestedRisk, IdempotencyHash: idempotencyHash, ReplayHash: replayHash}
-	loaded, err := h.source.LoadApprovalSnapshot(r.Context(), actor.EnterpriseID, input.OrgVersion, actor.UserID)
-	if err != nil {
-		writeAuthorizationError(w, http.StatusServiceUnavailable)
-		return
-	}
-	request.PolicyVersion = loaded.PolicyVersion
-	route, err := approval.NewIndexedResolver(loaded.Policy).Resolve(r.Context(), request, loaded.Snapshot)
-	if err != nil {
-		writeAuthorizationError(w, http.StatusServiceUnavailable)
-		return
-	}
-	storedRoute, err := h.store.RecordResolution(r.Context(), request, route)
-	if err != nil {
-		status := http.StatusServiceUnavailable
-		if errors.Is(err, ErrApprovalIdempotencyConflict) {
-			status = http.StatusConflict
-		}
-		writeAuthorizationError(w, status)
-		return
-	}
-	writeJSON(w, http.StatusOK, storedRoute)
+	return trustedCtx, true
 }
 
-func decodeApprovalHeaders(w http.ResponseWriter, r *http.Request) (string, string, bool) {
-	keys := r.Header.Values("Idempotency-Key")
-	signatures := r.Header.Values("X-Approval-Facts-Attestation")
-	if len(keys) != 1 || len(signatures) != 1 || len(keys[0]) < 16 || len(keys[0]) > 128 || strings.TrimSpace(keys[0]) != keys[0] || strings.ContainsAny(keys[0], "\r\n\t") || signatures[0] == "" || len(signatures[0]) > 256 || strings.TrimSpace(signatures[0]) != signatures[0] {
-		writeAuthorizationError(w, http.StatusBadRequest)
-		return "", "", false
-	}
-	sum := sha256.Sum256([]byte(keys[0]))
-	return hex.EncodeToString(sum[:]), signatures[0], true
-}
-
-func decodeApprovalRequest(w http.ResponseWriter, r *http.Request) (approvalResolveRequest, bool) {
-	var target approvalResolveRequest
+// readBody enforces the single JSON media type and the request size bound.
+func (h *approvalTransportHandler) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	contentTypes := r.Header.Values("Content-Type")
 	if len(contentTypes) != 1 {
-		writeAuthorizationError(w, http.StatusUnsupportedMediaType)
-		return target, false
+		writeApprovalTransportError(w, http.StatusUnsupportedMediaType, "unsupported_media_type")
+		return nil, false
 	}
 	mediaType, _, err := mime.ParseMediaType(contentTypes[0])
 	if err != nil || mediaType != "application/json" {
-		writeAuthorizationError(w, http.StatusUnsupportedMediaType)
-		return target, false
+		writeApprovalTransportError(w, http.StatusUnsupportedMediaType, "unsupported_media_type")
+		return nil, false
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxApprovalRequestBytes+1))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxApprovalTransportRequestBytes))
 	if err != nil {
-		writeAuthorizationError(w, http.StatusBadRequest)
-		return target, false
+		writeApprovalTransportError(w, http.StatusBadRequest, "invalid_request")
+		return nil, false
 	}
-	if len(body) > maxApprovalRequestBytes {
-		writeAuthorizationError(w, http.StatusRequestEntityTooLarge)
-		return target, false
+	return body, true
+}
+
+// decodeStrictEnvelope decodes a correlation envelope strictly: the body must
+// be a JSON object, trusted-identity keys are rejected (and audited
+// distinctly), the required member must be present and unknown members fail.
+func (h *approvalTransportHandler) decodeStrictEnvelope(w http.ResponseWriter, r *http.Request, trustedCtx trust.Context, body []byte, out any, requiredMember string) bool {
+	var probe any
+	if err := json.Unmarshal(body, &probe); err != nil {
+		writeApprovalTransportError(w, http.StatusBadRequest, "invalid_request")
+		return false
+	}
+	root, isObject := probe.(map[string]any)
+	if !isObject {
+		writeApprovalTransportError(w, http.StatusBadRequest, "invalid_request")
+		return false
+	}
+	if key, forged := findForbiddenIdentityKey(root); forged {
+		_ = key
+		auditTrustViolation(r.Context(), h.audit, trustedCtx.Principal.TenantRef, trustedCtx.Principal.PrincipalRef, "trusted_context.forged_body_field")
+		writeApprovalTransportError(w, http.StatusBadRequest, "invalid_request")
+		return false
+	}
+	if _, present := root[requiredMember]; !present {
+		writeApprovalTransportError(w, http.StatusBadRequest, "invalid_request")
+		return false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
-	opening, err := decoder.Token()
-	if err != nil || opening != json.Delim('{') {
-		writeAuthorizationError(w, http.StatusBadRequest)
-		return target, false
-	}
-	seen := make(map[string]struct{}, 11)
-	for decoder.More() {
-		keyToken, err := decoder.Token()
-		key, valid := keyToken.(string)
-		if err != nil || !valid {
-			writeAuthorizationError(w, http.StatusBadRequest)
-			return target, false
-		}
-		if _, duplicate := seen[key]; duplicate {
-			writeAuthorizationError(w, http.StatusBadRequest)
-			return target, false
-		}
-		seen[key] = struct{}{}
-		var raw json.RawMessage
-		if err := decoder.Decode(&raw); err != nil || string(raw) == "null" {
-			writeAuthorizationError(w, http.StatusBadRequest)
-			return target, false
-		}
-		switch key {
-		case "org_version":
-			err = json.Unmarshal(raw, &target.OrgVersion)
-		case "org_unit_id":
-			err = json.Unmarshal(raw, &target.OrgUnitID)
-		case "resource_type":
-			err = json.Unmarshal(raw, &target.ResourceType)
-		case "resource_id":
-			err = json.Unmarshal(raw, &target.ResourceID)
-		case "action":
-			err = json.Unmarshal(raw, &target.Action)
-		case "changed_fields":
-			err = json.Unmarshal(raw, &target.ChangedFields)
-		case "impacted_org_unit_ids":
-			err = json.Unmarshal(raw, &target.ImpactedOrgUnitIDs)
-		case "impacted_user_count":
-			err = json.Unmarshal(raw, &target.ImpactedUserCount)
-		case "published_behavior_change":
-			err = json.Unmarshal(raw, &target.PublishedBehaviorChange)
-		case "external_side_effect":
-			err = json.Unmarshal(raw, &target.ExternalSideEffect)
-		case "requested_risk":
-			err = json.Unmarshal(raw, &target.RequestedRisk)
-		case "facts_issued_at":
-			err = json.Unmarshal(raw, &target.FactsIssuedAt)
-		case "facts_expires_at":
-			err = json.Unmarshal(raw, &target.FactsExpiresAt)
-		case "facts_nonce":
-			err = json.Unmarshal(raw, &target.FactsNonce)
-		default:
-			writeAuthorizationError(w, http.StatusBadRequest)
-			return target, false
-		}
-		if err != nil {
-			writeAuthorizationError(w, http.StatusBadRequest)
-			return target, false
-		}
-	}
-	closing, err := decoder.Token()
-	if err != nil || closing != json.Delim('}') {
-		writeAuthorizationError(w, http.StatusBadRequest)
-		return target, false
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeAuthorizationError(w, http.StatusBadRequest)
-		return target, false
-	}
-	for _, required := range []string{"org_version", "org_unit_id", "resource_type", "resource_id", "action", "changed_fields", "impacted_org_unit_ids", "impacted_user_count", "published_behavior_change", "external_side_effect", "requested_risk", "facts_issued_at", "facts_expires_at", "facts_nonce"} {
-		if _, exists := seen[required]; !exists {
-			writeAuthorizationError(w, http.StatusBadRequest)
-			return target, false
-		}
-	}
-	if !validApprovalInput(target) {
-		writeAuthorizationError(w, http.StatusBadRequest)
-		return target, false
-	}
-	return target, true
-}
-
-func validApprovalInput(input approvalResolveRequest) bool {
-	if input.OrgVersion < 1 || input.ImpactedUserCount < 0 || input.ChangedFields == nil || input.ImpactedOrgUnitIDs == nil || input.FactsIssuedAt.IsZero() || input.FactsExpiresAt.IsZero() || len(input.FactsNonce) < 16 || !canonicalAuthorizationValue(input.FactsNonce) || !canonicalAuthorizationValue(input.OrgUnitID) || !canonicalAuthorizationValue(input.ResourceType) || !canonicalAuthorizationValue(input.ResourceID) || !canonicalAuthorizationValue(input.Action) {
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		writeApprovalTransportError(w, http.StatusBadRequest, "invalid_request")
 		return false
-	}
-	if input.RequestedRisk != approval.RiskLow && input.RequestedRisk != approval.RiskMedium && input.RequestedRisk != approval.RiskHigh {
-		return false
-	}
-	return canonicalUniqueStrings(input.ChangedFields) && canonicalUniqueStrings(input.ImpactedOrgUnitIDs)
-}
-
-func canonicalUniqueStrings(values []string) bool {
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if value == "" || strings.TrimSpace(value) != value {
-			return false
-		}
-		if _, exists := seen[value]; exists {
-			return false
-		}
-		seen[value] = struct{}{}
 	}
 	return true
+}
+
+// findForbiddenIdentityKey mirrors the SDK strict-decoder identity ban for
+// the handler-local envelopes: request JSON never carries trusted identity
+// or connector topology.
+func findForbiddenIdentityKey(value any) (string, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			switch key {
+			case "enterprise_id", "actor_user_id", "connector_instance_id":
+				return key, true
+			}
+			if strings.Contains(key, "enterprise") || strings.HasPrefix(key, "connector_") {
+				return key, true
+			}
+			if found, forged := findForbiddenIdentityKey(child); forged {
+				return found, true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if found, forged := findForbiddenIdentityKey(child); forged {
+				return found, true
+			}
+		}
+	}
+	return "", false
+}
+
+// rejectDecode maps SDK strict-decoder failures; forged identity is audited
+// distinctly and every rejection uses the same fixed envelope.
+func (h *approvalTransportHandler) rejectDecode(w http.ResponseWriter, r *http.Request, tenantRef, principalRef string, err error) {
+	if errors.Is(err, runtime.ErrTrustedIdentityInRequest) {
+		auditTrustViolation(r.Context(), h.audit, tenantRef, principalRef, "trusted_context.forged_body_field")
+	}
+	writeApprovalTransportError(w, http.StatusBadRequest, "invalid_request")
+}
+
+// writeServiceError maps transmission service errors onto fixed opaque
+// envelopes. A transport failure is NOT an error here: Transmit returns the
+// pending transmission and this mapper never sees it. The joined internal
+// cause is LOGGED (0D evidence-handler precedent) before it is discarded -
+// it carries only sentinels, refs and coded reasons, never plan content or
+// attestation values.
+func (h *approvalTransportHandler) writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
+	status, reason := http.StatusServiceUnavailable, "approval_unavailable"
+	switch {
+	case errors.Is(err, approvaltransport.ErrInvalidInput):
+		status, reason = http.StatusBadRequest, "invalid_request"
+	case errors.Is(err, approvaltransport.ErrNotFound):
+		status, reason = http.StatusNotFound, "approval_not_found"
+	case errors.Is(err, approvaltransport.ErrPlanConflict), errors.Is(err, approvaltransport.ErrEvidenceReplay):
+		status, reason = http.StatusConflict, "approval_conflict"
+	case errors.Is(err, approvaltransport.ErrTransmissionRevoked):
+		status, reason = http.StatusConflict, "approval_conflict"
+	case errors.Is(err, approvaltransport.ErrCallerUntrusted), errors.Is(err, approvaltransport.ErrEvidenceRejected), errors.Is(err, approvaltransport.ErrEvidenceExpired):
+		status, reason = http.StatusForbidden, "approval_rejected"
+	}
+	h.logger.WarnContext(r.Context(), "approval.request_failed",
+		slog.String("path", r.URL.Path),
+		slog.Int("status", status),
+		slog.String("reason", reason),
+		slog.String("error", err.Error()),
+	)
+	writeApprovalTransportError(w, status, reason)
+}
+
+func writeApprovalTransportError(w http.ResponseWriter, status int, reason string) {
+	writeJSON(w, status, map[string]string{"error": reason})
 }

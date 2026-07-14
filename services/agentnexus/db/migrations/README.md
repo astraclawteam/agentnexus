@@ -27,3 +27,25 @@ Historical snapshot rows retain foreign keys to their organization version and e
 Deploy only in stop-write maintenance mode: run the compiled strong-TLS DSN preflight, close traffic and stop every old gateway/writer, take and record a durable backup, apply all migrations with the migrator role, start the new binaries isolated from the load balancer, run real-PostgreSQL verification, and only then reopen traffic. Verification failure must stop the isolated new binary and keep maintenance closed. `deploy/release-auth.sh` encodes this compensating order with required deployment-owned hooks.
 
 The Down section always raises `migration 000006 is irreversible`; it never drops `token_hash`, issuance evidence, ownership, or audit constraints. Rollback means stopping the new release and restoring the pre-migration backup while still in maintenance. Legacy ticket revocation cannot be safely undone in place.
+
+## Migration 000009: approval resolution retirement
+
+`000009_approval_transmission.sql` (GA Task 0E) removes the legacy governed
+approval-route machinery (`approval_resolution_idempotency`,
+`approval_queue_items`, `enterprise_approval_policies`,
+`enterprise_approval_policy_versions` and their resolver-only trigger
+functions) and creates the approval transmission plane
+(`approval_transmissions`, `approval_delivery_attempts`,
+`approval_evidence_records`, `approval_transmission_revocations`). The
+boundary is product-locked: the external approval authority decides risk and
+approvers; AgentNexus transmits the signed plan unchanged and validates
+returned evidence.
+
+The Up migration refuses to run while `approval_resolution_idempotency` or
+`approval_queue_items` contain rows (pre-release decision evidence is never
+dropped silently; both tables must be empty, mirroring the 000005 guard).
+The `audit_events` append-only triggers and the
+`uq_audit_events_enterprise_id_id` constraint introduced by 000005 guard the
+live audit ledger and are deliberately untouched. The Down migration
+recreates the complete post-000005 legacy state (tables, triggers, functions
+and the default-policy seed) and drops the transmission tables.

@@ -47,14 +47,16 @@ func isBrowserAuthPath(path string) bool {
 }
 
 // trustProtectedPath lists the runtime endpoints that require ONE immutable
-// credential-derived trusted context resolved at ingress.
+// credential-derived trusted context resolved at ingress. The whole
+// /v1/approvals/ transmission subtree (transmissions, per-plan status,
+// revocations, evidence) is protected by prefix.
 func trustProtectedPath(path string) bool {
 	switch path {
-	case "/v1/authorization/decisions", "/v1/approvals/resolve", "/v1/step-grants", "/v1/tickets/verify", "/v1/audit/evidence",
+	case "/v1/authorization/decisions", "/v1/step-grants", "/v1/tickets/verify", "/v1/audit/evidence",
 		"/v1/runtime/locate", "/v1/runtime/read":
 		return true
 	}
-	return false
+	return strings.HasPrefix(path, "/v1/approvals/")
 }
 
 func browserResponseHeaders(next http.Handler) http.Handler {

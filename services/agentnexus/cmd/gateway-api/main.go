@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approvaltransport"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/transportsecurity"
@@ -83,15 +83,14 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		cleanup()
 		return nil, func() {}, fmt.Errorf("connect browser auth database: %w", err)
 	}
-	approvalFactsVerifier, err := app.LoadChangeFactsVerifierFromFile(os.Getenv("AGENTNEXUS_APPROVAL_FACTS_SECRET_FILE"), time.Now)
-	if err != nil {
-		cleanup()
-		return nil, func() {}, err
-	}
+	// GA Task 0E: no approval channel is configured in this command yet, so
+	// the approval transmission endpoints stay unregistered (fail closed).
+	// AgentNexus never resolves approvals itself; the deployment-specific
+	// AgentAtlas/OA/BPM channel wiring arrives with Task 0F.
 	router, err := app.NewPostgresGatewayRouter(ctx, pool, app.PostgresGatewayConfig{
 		ServiceName: cfg.ServiceName, Version: cfg.Version, OIDC: browserConfig.OIDC,
 		LoginAttemptLimits: browserConfig.LoginAttemptLimits, AuthorizeRateLimitPerMinute: browserConfig.AuthorizeRateLimitPerMinute,
-		TrustedProxyCIDRs: browserConfig.TrustedProxyCIDRs, ApprovalFactsVerifier: approvalFactsVerifier,
+		TrustedProxyCIDRs: browserConfig.TrustedProxyCIDRs,
 	})
 	if err != nil {
 		cleanup()
@@ -105,8 +104,8 @@ func productionAuthorizationDependencies(enterpriseID string, pool *pgxpool.Pool
 	return app.NewPostgresSnapshotSource(pool), app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)
 }
 
-func productionApprovalDependencies(pool *pgxpool.Pool) (app.ApprovalSnapshotSource, app.ApprovalRouteStore) {
-	return app.NewPostgresApprovalSource(pool), app.NewPostgresApprovalStore(pool)
+func productionApprovalTransmissionStore(pool *pgxpool.Pool) *approvaltransport.PostgresStore {
+	return approvaltransport.NewPostgresStore(pool)
 }
 
 func newHTTPServer(cfg config.Config, handler http.Handler) *http.Server {

@@ -5,6 +5,37 @@
 #  `make contracts-verify` together with the contract parity tests).
 protocol: agentnexus-public-contract
 entries:
+  - version: "1.5.0"
+    date: "2026-07-14"
+    breaking: true
+    title: "Replace approval-route resolution with approval transmission (GA Task 0E)"
+    summary: >-
+      Boundary-enforcing retirement plus its replacement surface. The locked
+      product boundary states that the approval authority (the calling
+      first-party Agent platform or the customer's OA/BPM system) decides
+      business intent, risk and the approval plan - who approves, in what
+      order, under which policy - while AgentNexus transmits the caller's
+      signed plan unchanged, validates returned evidence and enforces
+      execution constraints. The legacy resolution operation violated that
+      boundary by classifying domain risk, walking the organization
+      hierarchy and choosing reviewers/queues inside AgentNexus, so it is
+      REMOVED, not renamed. Breaking is the honest classification (an
+      operation and two schemas disappear; precedent: the 1.0.0 cutover);
+      the ELC-NEXUS-1 candidate remains UNSIGNED until Task 0G conformance,
+      so the freeze window permits this mandated retirement. No SDK or proto
+      change: the transmission surface binds the frozen v1.0.0 types
+      (runtime.ApprovalRequest/ApprovalPlanRef/ApprovalEvidence/
+      ApprovalDecision; trust/v1 mirrors) whose HTTP operations were
+      documented to arrive additively in a later task.
+    changes:
+      - "REMOVED (breaking): POST /v1/approvals/resolve (operationId resolveApprovalRoute) with its Idempotency-Key and facts-attestation headers, plus the ApprovalRoute and ApprovalResolveRequest schemas. AgentNexus no longer resolves approval routes: no route modes, no reviewer selection, no admin queue routing, no AgentNexus-authored domain risk. There is no legacy fallback."
+      - "New POST /v1/approvals/transmissions (transmitApprovalPlan): transmits ONE signed approval plan unchanged, bound to one exact operation (ApprovalTransmissionRequest = RequestEnvelope + business_context_ref, capability, parameter_hash, purpose, plan (frozen ApprovalPlanRef), expires_at). Idempotent per plan_ref; a still-pending plan is re-delivered (provider retry); rebinding a plan_ref to a different operation is a conflict. Transport failure keeps the transmission pending and can never create approval progress or a grant."
+      - "New GET /v1/approvals/transmissions/{plan_ref} (getApprovalTransmission): diagnostics status view (ApprovalTransmissionStatus) with the monotonic transport lifecycle pending -> delivered -> evidence_recorded (revoked terminal), the exact operation binding, delivery attempt count and the validated decision once recorded. Deliberately no grant state and not a single approver identity, queue or risk field."
+      - "New POST /v1/approvals/evidence (recordApprovalEvidence): records the authority's attested decision (ApprovalEvidenceRecordRequest wrapping the frozen ApprovalEvidence type). AgentNexus VALIDATES evidence - exact Action/parameter binding (capability + parameter_hash + plan digest), authority provenance, expiry, revocation and replay (identical resubmission idempotent; mutated approval_ref content, a second decision for one plan or cross-plan reuse rejected) - and stores it for the Task 0F Action lifecycle to consume. Recording evidence never issues a grant."
+      - "New POST /v1/approvals/transmissions/{plan_ref}/revocations (revokeApprovalTransmission): terminal, idempotent, append-only revocation; recorded evidence of a revoked transmission is unusable for grant issuance."
+      - "New component schemas: ApprovalTransmissionRequest, ApprovalEvidence, ApprovalEvidenceRecordRequest, ApprovalTransmissionStatus, ApprovalTransmissionRevocationRequest and the shared ApprovalDecision enum (approved/denied/narrowed, mirroring trust/v1). All reuse the frozen opaque handles (apl_/apv_/wc_) and Sha256Ref/Capability/Signature primitives; identity-out-of-request and opaque-handle boundaries are preserved."
+    artifacts:
+      - "api/openapi/gateway-runtime.yaml"
   - version: "1.4.0"
     date: "2026-07-14"
     breaking: false

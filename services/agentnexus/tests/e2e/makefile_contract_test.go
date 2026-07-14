@@ -20,7 +20,7 @@ func TestMakeTestAuthRequiresLivePostgresDSNBeforeGoTest(t *testing.T) {
 	}
 	target = target[start : start+end]
 	gate := strings.Index(target, `$(error AGENTNEXUS_E2E_POSTGRES_DSN is required for live PostgreSQL acceptance)`)
-	testCommand := strings.Index(target, "go test ./internal/browserauth ./internal/deploypreflight ./internal/policy ./internal/approval ./internal/tickets ./internal/app ./cmd/release-preflight ./tests/e2e -count=1")
+	testCommand := strings.Index(target, "go test ./internal/browserauth ./internal/deploypreflight ./internal/policy ./internal/approvaltransport ./internal/tickets ./internal/app ./cmd/release-preflight ./tests/e2e -count=1")
 	if gate < 0 || testCommand < 0 || gate > testCommand || strings.Contains(target, "test -n") || strings.Contains(target, "{ echo") {
 		t.Fatalf("test-auth must fail before go test when live PostgreSQL DSN is absent:\n%s", target)
 	}
