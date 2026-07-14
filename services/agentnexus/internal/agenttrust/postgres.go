@@ -106,9 +106,19 @@ func (s *PostgresStore) CreateCertification(ctx context.Context, cert Certificat
 	q := db.New(tx)
 
 	// Serialize concurrent certifications of the same product so revision
-	// assignment and supersede stay linearizable.
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-		cert.TenantRef+"\x00"+cert.Binding.Publisher+"\x00"+cert.Binding.Product); err != nil {
+	// assignment and supersede stay linearizable. The two-int advisory lock
+	// form takes the tenant and the publisher/product coordinates as two
+	// SEPARATE text parameters (approvaltransport / LockOIDCLoginAttemptScope
+	// precedent): PostgreSQL rejects NUL bytes in text parameters ("invalid
+	// byte sequence for encoding UTF8", SQLSTATE 22021), so the in-process
+	// NUL-joined map key (model.go clientKey) must never reach SQL. The
+	// 'agt:' salt domain-separates this lock space from the 'apt:'
+	// (approvaltransport) and OIDC lock spaces. A hashtext or '/'-join
+	// collision on either key only WIDENS the lock (two products briefly
+	// serialize behind one another) - extra serialization, never data
+	// corruption - so the non-reversible join is safe here.
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext('agt:' || $1::text), hashtext($2::text))",
+		cert.TenantRef, cert.Binding.Publisher+"/"+cert.Binding.Product); err != nil {
 		return Certification{}, err
 	}
 	maxRevision, err := q.GetMaxCertificationRevision(ctx, db.GetMaxCertificationRevisionParams{TenantRef: cert.TenantRef, Publisher: cert.Binding.Publisher, Product: cert.Binding.Product})

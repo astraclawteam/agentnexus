@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/astraclawteam/agentnexus/sdk/go/runtime"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -31,14 +30,15 @@ func integrationPool(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("set AGENTNEXUS_E2E_POSTGRES_DSN (or AGENTNEXUS_POSTGRES_DSN) to run the agenttrust postgres integration tests")
 	}
-	config, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse dsn: %v", err)
-	}
-	// Simple protocol lets the fixture exec the multi-statement goose block
-	// (including the plpgsql $$ trigger bodies) in one call.
-	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
-	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	// Default query exec mode on purpose (approvaltransport fixture pattern):
+	// pgx executes a zero-argument Exec through the simple protocol anyway, so
+	// the multi-statement goose block (including the plpgsql $$ trigger bodies)
+	// applies in one call, while parameterized data-path queries keep the
+	// extended protocol so parameters are typed by the statement description
+	// (forcing QueryExecModeSimpleProtocol pool-wide encodes []byte jsonb
+	// parameters as bytea hex and corrupts NUL-bearing text parameters at the
+	// wire level, which PostgreSQL rejects).
+	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
