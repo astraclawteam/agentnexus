@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentnexus.example/schemas/connectors/product-pack.schema.json",
   "title": "Connector Product Pack v1",
-  "description": "A reusable, resellable, customer-agnostic connector product. It declares semantic capabilities, IO schemas, field policy, side-effect and reconciliation declarations, network/runtime requirements, compatibility, migration, limits and SBOM/provenance/signature references. It carries NO customer-identifying data: customer name, endpoints, credentials, raw table/API paths and field mappings live only in a Customer Binding. `additionalProperties:false` at every level makes that structural, not advisory. Capability names use the same frozen business-semantic vocabulary as the public Agent runtime contract (sdk/go/runtime).",
+  "description": "A reusable, resellable, customer-agnostic connector product. It declares semantic capabilities, IO schemas, field policy, the technical-safety floor, side-effect/idempotency declarations, available precondition and authoritative postcondition probes, reconciliation/compensation declarations, execution/observation receipt schemas, network/runtime requirements, compatibility, migration, limits and SBOM/provenance/signature references (GA Task 2 as amended by plan revision dc81e80, consuming public contract v1.3.0 vocabulary). It carries NO customer-identifying data: customer name, endpoints, credentials, raw table/API paths and field mappings live only in a Customer Binding. It also carries NO business-outcome authority: `additionalProperties:false` at every level structurally bans outcome/goal_achieved/graph-provider KEYS, and the connector SDK validator additionally bans those forms in every declared machine-name VALUE (capability names, probe ids, schema refs, kinds, strategies, key schemes/scopes, field names, egress classes, product keys) — RE2 patterns cannot express a negative contains, so the value-level ban is enforced in the SDK, proven by the service parity test. Capability names use the same frozen business-semantic vocabulary as the public Agent runtime contract (sdk/go/runtime); a postcondition probe declares the observation metadata (source authority tier, source-version semantics, freshness bound, canonical observation schema) that lets the platform mint signed ObservationReceipts.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -11,6 +11,7 @@
     "version",
     "capabilities",
     "field_policy",
+    "technical_safety_floor",
     "network",
     "runtime",
     "compatibility",
@@ -36,6 +37,7 @@
       "items": { "$ref": "#/$defs/capability" }
     },
     "field_policy": { "$ref": "#/$defs/fieldPolicy" },
+    "technical_safety_floor": { "$ref": "#/$defs/technicalSafetyFloor" },
     "network": {
       "type": "object",
       "additionalProperties": false,
@@ -182,6 +184,81 @@
         "irreversible": { "type": "boolean" }
       }
     },
+    "probeId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "machineName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "One lowercase machine-name segment (the frozen probe-id form). Used for idempotency key_scheme/scope so a camel-cased value cannot evade the SDK's case-sensitive outcome-name ban."
+    },
+    "sourceAuthority": {
+      "enum": ["system_of_record", "authoritative_replica", "derived"],
+      "description": "Frozen source-authority tier of a postcondition probe; only system_of_record and authoritative_replica are authoritative tiers."
+    },
+    "sourceVersionSemantics": {
+      "enum": ["monotonic_counter", "content_digest", "last_modified_timestamp"],
+      "description": "Frozen vocabulary for how the probed source expresses the sealed content version an observation reflects."
+    },
+    "duplicateSemantics": {
+      "enum": ["return_prior_result", "reject", "no_op"],
+      "description": "Frozen vocabulary for what a duplicate write (same idempotency key) does at the external system."
+    },
+    "technicalSafetyFloor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effect_ceiling"],
+      "description": "The stricter blast-radius ceiling applied to third-party/uncertified decision contexts. It layers on top of (never duplicates) the pack envelope: when both max_writes_per_minute and limits.max_requests_per_minute are declared, the SDK validator additionally enforces floor <= envelope (not expressible here).",
+      "properties": {
+        "effect_ceiling": { "enum": ["read", "write"] },
+        "max_writes_per_minute": { "type": "integer", "minimum": 0 },
+        "max_payload_bytes": { "type": "integer", "minimum": 0 },
+        "require_approval_for_writes": { "type": "boolean" }
+      }
+    },
+    "idempotency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_scheme", "scope", "on_duplicate"],
+      "properties": {
+        "key_scheme": { "$ref": "#/$defs/machineName" },
+        "scope": { "$ref": "#/$defs/machineName" },
+        "on_duplicate": { "$ref": "#/$defs/duplicateSemantics" }
+      }
+    },
+    "preconditionProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["probe_id", "capability"],
+      "properties": {
+        "probe_id": { "$ref": "#/$defs/probeId" },
+        "capability": { "$ref": "#/$defs/capabilityName" },
+        "description": { "type": "string" }
+      }
+    },
+    "postconditionProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probe_id",
+        "capability",
+        "source_authority",
+        "source_version_semantics",
+        "freshness_bound_seconds",
+        "observation_schema"
+      ],
+      "description": "An available authoritative post-execution observation. A probe without source authority, source-version semantics, freshness bound or canonical observation schema is invalid: this is exactly the metadata the platform needs to mint a signed ObservationReceipt (contract v1.3.0). The probing capability must resolve to a declared READ capability of this pack (SDK-enforced).",
+      "properties": {
+        "probe_id": { "$ref": "#/$defs/probeId" },
+        "capability": { "$ref": "#/$defs/capabilityName" },
+        "source_authority": { "$ref": "#/$defs/sourceAuthority" },
+        "source_version_semantics": { "$ref": "#/$defs/sourceVersionSemantics" },
+        "freshness_bound_seconds": { "type": "integer", "minimum": 1 },
+        "observation_schema": { "$ref": "#/$defs/ioSchema" },
+        "description": { "type": "string" }
+      }
+    },
     "capability": {
       "type": "object",
       "additionalProperties": false,
@@ -195,7 +272,12 @@
         "output": { "$ref": "#/$defs/ioSchema" },
         "field_policy": { "$ref": "#/$defs/fieldPolicy" },
         "side_effects": { "type": "array", "items": { "$ref": "#/$defs/sideEffect" } },
-        "reconciliation": { "$ref": "#/$defs/reconciliation" }
+        "reconciliation": { "$ref": "#/$defs/reconciliation" },
+        "idempotency": { "$ref": "#/$defs/idempotency" },
+        "precondition_probes": { "type": "array", "items": { "$ref": "#/$defs/preconditionProbe" } },
+        "postcondition_probes": { "type": "array", "items": { "$ref": "#/$defs/postconditionProbe" } },
+        "execution_receipt_schema": { "$ref": "#/$defs/ioSchema" },
+        "observation_receipt_schema": { "$ref": "#/$defs/ioSchema" }
       },
       "allOf": [
         {
@@ -204,8 +286,26 @@
             "properties": { "effect": { "const": "write" } }
           },
           "then": {
-            "required": ["side_effects", "reconciliation"],
-            "properties": { "side_effects": { "minItems": 1 } }
+            "required": [
+              "side_effects",
+              "reconciliation",
+              "idempotency",
+              "postcondition_probes",
+              "execution_receipt_schema",
+              "observation_receipt_schema"
+            ],
+            "properties": {
+              "side_effects": { "minItems": 1 },
+              "postcondition_probes": { "minItems": 1 }
+            }
+          },
+          "else": {
+            "properties": {
+              "postcondition_probes": { "maxItems": 0 },
+              "idempotency": false,
+              "execution_receipt_schema": false,
+              "observation_receipt_schema": false
+            }
           }
         }
       ]

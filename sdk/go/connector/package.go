@@ -30,6 +30,14 @@ var (
 	// ErrInlineSecretInBinding rejects a Customer Binding that inlines secret
 	// material. Bindings reference secrets; they never contain them.
 	ErrInlineSecretInBinding = errors.New("customer binding must reference secrets by reference, never inline secret material")
+	// ErrOutcomeAuthorityInProductPack rejects a connector-authored business
+	// Outcome (GA Task 2 amendment, plan dc81e80): no pack-declared machine
+	// name or JSON key may contain outcome/goal_achieved or be a
+	// graph-provider form (graph, graph_*, *_graph). A connector declares HOW
+	// execution and bounded observation are made and schema'd; only the
+	// calling Agent's deterministic domain runtime decides Outcomes, and the
+	// calling Agent platform owns its result graph.
+	ErrOutcomeAuthorityInProductPack = errors.New("product pack must never declare, compute or carry a business Outcome, goal_achieved or graph-provider name")
 )
 
 // secretRefRe matches an opaque secret reference (a URI-shaped pointer into a
@@ -73,27 +81,34 @@ type Limits struct {
 }
 
 // ProductPack is the reusable, resellable, customer-agnostic connector product.
-// It declares semantic capabilities, IO schemas, field policy, side-effect and
-// reconciliation declarations, network/runtime requirements, compatibility,
-// migration, limits and SBOM/provenance/signature references. It never carries
-// customer identity, endpoints, credentials, raw table/API paths or field
-// mappings — those belong to a CustomerBinding.
+// It declares semantic capabilities, IO schemas, field policy, the
+// technical-safety floor, side-effect/idempotency declarations, available
+// precondition and authoritative postcondition probes,
+// reconciliation/compensation declarations, execution/observation receipt
+// schemas, network/runtime requirements, compatibility, migration, limits and
+// SBOM/provenance/signature references (GA Task 2 as amended by plan dc81e80).
+// It never carries customer identity, endpoints, credentials, raw table/API
+// paths or field mappings — those belong to a CustomerBinding — and it never
+// declares, computes or carries a business Outcome.
 type ProductPack struct {
-	SchemaVersion string              `json:"schema_version"`
-	ProductKey    string              `json:"product_key"`
-	Version       string              `json:"version"`
-	Title         string              `json:"title,omitempty"`
-	Capabilities  []Capability        `json:"capabilities"`
-	FieldPolicy   FieldPolicy         `json:"field_policy"`
-	Network       NetworkRequirements `json:"network"`
-	Runtime       RuntimeRequirements `json:"runtime"`
-	Compatibility Compatibility       `json:"compatibility"`
-	Migration     MigrationInfo       `json:"migration"`
-	Limits        Limits              `json:"limits"`
-	SBOM          ArtifactRef         `json:"sbom"`
-	Provenance    ArtifactRef         `json:"provenance"`
-	Signature     Signature           `json:"signature"`
-	Digest        string              `json:"digest"`
+	SchemaVersion string       `json:"schema_version"`
+	ProductKey    string       `json:"product_key"`
+	Version       string       `json:"version"`
+	Title         string       `json:"title,omitempty"`
+	Capabilities  []Capability `json:"capabilities"`
+	FieldPolicy   FieldPolicy  `json:"field_policy"`
+	// TechnicalSafetyFloor is the required blast-radius ceiling applied to
+	// third-party/uncertified decision contexts (amendment).
+	TechnicalSafetyFloor TechnicalSafetyFloor `json:"technical_safety_floor"`
+	Network              NetworkRequirements  `json:"network"`
+	Runtime              RuntimeRequirements  `json:"runtime"`
+	Compatibility        Compatibility        `json:"compatibility"`
+	Migration            MigrationInfo        `json:"migration"`
+	Limits               Limits               `json:"limits"`
+	SBOM                 ArtifactRef          `json:"sbom"`
+	Provenance           ArtifactRef          `json:"provenance"`
+	Signature            Signature            `json:"signature"`
+	Digest               string               `json:"digest"`
 	// Development marks an unsigned pack produced by migrating a generic
 	// manifest. A development pack can never be imported as a production pack.
 	Development bool `json:"development,omitempty"`
@@ -175,9 +190,11 @@ func PackContentDigest(p ProductPack) string {
 }
 
 // ParseProductPack decodes and structurally validates Product Pack JSON. It
-// rejects any customer-identifying data (ErrCustomerDataInProductPack) and any
-// unknown field, then applies the customer-agnostic structural rules. It does
-// NOT require a signature: callers choose production or development validation.
+// rejects any customer-identifying data (ErrCustomerDataInProductPack), any
+// business-outcome/graph-provider key (ErrOutcomeAuthorityInProductPack) and
+// any unknown field, then applies the customer-agnostic structural rules
+// (which also ban outcome-flavored declared NAME VALUES). It does NOT require
+// a signature: callers choose production or development validation.
 func ParseProductPack(data []byte) (ProductPack, error) {
 	if err := scanForbiddenPackKeys(data); err != nil {
 		return ProductPack{}, err
@@ -269,10 +286,32 @@ func DevelopmentPackFromManifest(m Manifest) ProductPack {
 				Input:  IOSchema{Ref: name + ".input", Digest: syntheticDigest(name + ":input")},
 				Output: IOSchema{Ref: name + ".output", Digest: syntheticDigest(name + ":output")},
 			}
-			if write {
+			// An operation that sanitizes to the resource's canonical read
+			// name migrates as the GENUINE read capability even on a writable
+			// resource: write-flavoring it would leave the resource without a
+			// readable probe target, so every other migrated write's
+			// postcondition probes and reconciliation would point at a WRITE
+			// (a probe is an observation, never a write) -- and a lone
+			// write-flavored read would have to probe itself.
+			if write && name != readName {
 				c.Effect = EffectWrite
 				c.SideEffects = []SideEffect{{Kind: "external_write", Description: "migrated write capability (development only)", Reversible: false}}
 				c.Reconciliation = &Reconciliation{Strategy: "manual_review", VerifyCapability: readName}
+				// Amendment: a migrated write carries the full write
+				// declaration set. The probe re-reads the external resource
+				// the write mutated -- the system of record for it.
+				c.Idempotency = &IdempotencyDeclaration{KeyScheme: "request_digest", Scope: "per_binding", OnDuplicate: DuplicateReject}
+				c.PostconditionProbes = []PostconditionProbe{{
+					ProbeID:                "post_write_state",
+					Capability:             readName,
+					SourceAuthority:        SourceAuthoritySystemOfRecord,
+					SourceVersionSemantics: SourceVersionContentDigest,
+					FreshnessBoundSeconds:  300,
+					ObservationSchema:      IOSchema{Ref: name + ".observation", Digest: syntheticDigest(name + ":observation")},
+					Description:            "re-reads the migrated resource after the write (development only)",
+				}}
+				c.ExecutionReceiptSchema = &IOSchema{Ref: name + ".execution_receipt", Digest: syntheticDigest(name + ":execution_receipt")}
+				c.ObservationReceiptSchema = &IOSchema{Ref: name + ".observation_receipt", Digest: syntheticDigest(name + ":observation_receipt")}
 			}
 			caps = append(caps, c)
 		}
@@ -306,12 +345,16 @@ func DevelopmentPackFromManifest(m Manifest) ProductPack {
 		Title:         m.Name + " (development migration)",
 		Capabilities:  caps,
 		FieldPolicy:   FieldPolicy{},
-		Network:       NetworkRequirements{Egress: []string{"connector.api"}, Isolation: "outbound_only"},
-		Runtime:       RuntimeRequirements{Runtime: "development"},
-		Compatibility: Compatibility{RuntimeContract: VersionRange{Min: "1.0.0"}, ConnectorRuntime: VersionRange{Min: "0.0.0"}},
-		Migration:     MigrationInfo{FromVersions: []string{defaultString(m.Version, "0.0.0")}, Notes: "migrated from generic connector manifest (development only)"},
-		Limits:        Limits{},
-		Development:   true,
+		// A development migration declares the MOST conservative floor:
+		// third-party/uncertified decisions can only read, and any write
+		// requires an approval plan to be present.
+		TechnicalSafetyFloor: TechnicalSafetyFloor{EffectCeiling: EffectRead, RequireApprovalForWrites: true},
+		Network:              NetworkRequirements{Egress: []string{"connector.api"}, Isolation: "outbound_only"},
+		Runtime:              RuntimeRequirements{Runtime: "development"},
+		Compatibility:        Compatibility{RuntimeContract: VersionRange{Min: "1.0.0"}, ConnectorRuntime: VersionRange{Min: "0.0.0"}},
+		Migration:            MigrationInfo{FromVersions: []string{defaultString(m.Version, "0.0.0")}, Notes: "migrated from generic connector manifest (development only)"},
+		Limits:               Limits{},
+		Development:          true,
 	}
 	p.Digest = PackContentDigest(p)
 	return p
@@ -417,7 +460,16 @@ func scanForbiddenPackKeys(data []byte) error {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return fmt.Errorf("parse product pack JSON: %w", err)
 	}
-	return walkForbiddenKeys(doc, isForbiddenPackKey, ErrCustomerDataInProductPack)
+	if err := walkForbiddenKeys(doc, isForbiddenPackKey, ErrCustomerDataInProductPack); err != nil {
+		return err
+	}
+	// Amendment (plan dc81e80): outcome/goal_achieved/graph-provider KEYS are
+	// banned at any depth with the dedicated sentinel, mirroring how customer
+	// topology keys are rejected. The strict decoder would reject them as
+	// unknown fields anyway; this scan names the boundary they violate.
+	// Declared NAME VALUES (capability names, probe ids, schema refs, ...) are
+	// banned by ValidateProductPack via rejectOutcomeAuthorityName.
+	return walkForbiddenKeys(doc, assertsBusinessOutcomeName, ErrOutcomeAuthorityInProductPack)
 }
 
 var forbiddenSecretKeyExact = map[string]bool{

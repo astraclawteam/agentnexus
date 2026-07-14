@@ -24,6 +24,24 @@ import (
 //     never be imported as a production Product Pack;
 //   - the SAME Product Pack bytes are byte-identical across two different
 //     customer bindings, and carry none of either customer's data.
+//
+// GA Task 2 AMENDMENT (plan revision dc81e80, consuming public contract
+// v1.3.0 vocabulary) extends the RED list:
+//
+//   - a Product Pack must declare the technical-safety floor (the stricter
+//     blast-radius ceiling applied to third-party/uncertified decision
+//     contexts);
+//   - every write capability must declare an idempotency declaration
+//     (key scheme/scope + duplicate-replay semantics);
+//   - every write capability must declare at least one authoritative
+//     postcondition probe plus execution/observation receipt schemas;
+//   - a postcondition probe without source authority tier, source-version
+//     semantics, freshness bound or canonical observation schema is rejected;
+//   - a connector-authored business Outcome is rejected: no pack-declared
+//     machine name may contain outcome/goal_achieved or be a graph-provider
+//     form (graph, graph_*, *_graph). A connector declares HOW execution and
+//     bounded observation are made and schema'd; only the calling Agent's
+//     deterministic domain runtime turns observed facts into an Outcome.
 
 func digestOf(s string) string {
 	sum := sha256.Sum256([]byte(s))
@@ -57,6 +75,27 @@ func writeCapability() Capability {
 			VerifyCapability:       "erp.purchase_order.read",
 			CompensationCapability: "erp.purchase_order.reject",
 		},
+		Idempotency: &IdempotencyDeclaration{
+			KeyScheme:   "business_document",
+			Scope:       "per_tenant",
+			OnDuplicate: DuplicateReturnPriorResult,
+		},
+		PreconditionProbes: []PreconditionProbe{{
+			ProbeID:     "pre_approve_state",
+			Capability:  "erp.purchase_order.read",
+			Description: "confirms the purchase order is still pending approval",
+		}},
+		PostconditionProbes: []PostconditionProbe{{
+			ProbeID:                "post_approve_state",
+			Capability:             "erp.purchase_order.read",
+			SourceAuthority:        SourceAuthoritySystemOfRecord,
+			SourceVersionSemantics: SourceVersionMonotonicCounter,
+			FreshnessBoundSeconds:  300,
+			ObservationSchema:      IOSchema{Ref: "schema.erp.purchase_order.approve.observation", Digest: digestOf("obs-write")},
+			Description:            "re-reads the purchase order from the system of record after the approval posts",
+		}},
+		ExecutionReceiptSchema:   &IOSchema{Ref: "schema.erp.purchase_order.approve.execution_receipt", Digest: digestOf("exec-write")},
+		ObservationReceiptSchema: &IOSchema{Ref: "schema.erp.purchase_order.approve.observation_receipt", Digest: digestOf("obsr-write")},
 	}
 }
 
@@ -78,6 +117,21 @@ func rejectCapability() Capability {
 			Strategy:         "verify_then_compensate",
 			VerifyCapability: "erp.purchase_order.read",
 		},
+		Idempotency: &IdempotencyDeclaration{
+			KeyScheme:   "business_document",
+			Scope:       "per_tenant",
+			OnDuplicate: DuplicateNoOp,
+		},
+		PostconditionProbes: []PostconditionProbe{{
+			ProbeID:                "post_reject_state",
+			Capability:             "erp.purchase_order.read",
+			SourceAuthority:        SourceAuthoritySystemOfRecord,
+			SourceVersionSemantics: SourceVersionMonotonicCounter,
+			FreshnessBoundSeconds:  300,
+			ObservationSchema:      IOSchema{Ref: "schema.erp.purchase_order.reject.observation", Digest: digestOf("obs-reject")},
+		}},
+		ExecutionReceiptSchema:   &IOSchema{Ref: "schema.erp.purchase_order.reject.execution_receipt", Digest: digestOf("exec-reject")},
+		ObservationReceiptSchema: &IOSchema{Ref: "schema.erp.purchase_order.reject.observation_receipt", Digest: digestOf("obsr-reject")},
 	}
 }
 
@@ -91,6 +145,12 @@ func validProductPack() ProductPack {
 		Capabilities:  []Capability{readCapability(), writeCapability(), rejectCapability()},
 		FieldPolicy: FieldPolicy{
 			Classifications: []FieldClassification{{Field: "amount", Classification: "confidential", Redacted: true}},
+		},
+		TechnicalSafetyFloor: TechnicalSafetyFloor{
+			EffectCeiling:            EffectWrite,
+			MaxWritesPerMinute:       60,
+			MaxPayloadBytes:          1 << 20,
+			RequireApprovalForWrites: true,
 		},
 		Network:       NetworkRequirements{Egress: []string{"erp.api"}, Isolation: "outbound_only"},
 		Runtime:       RuntimeRequirements{Runtime: "wasm", MinMemoryMB: 64},
@@ -158,6 +218,75 @@ func TestProductPackProductionValidation(t *testing.T) {
 		{"compatibility non-semver min", func(p *ProductPack) { p.Compatibility.ConnectorRuntime = VersionRange{Min: "1.x"} }, "semver"},
 		{"development pack is not production importable", func(p *ProductPack) { p.Development = true }, "development"},
 		{"wrong schema version", func(p *ProductPack) { p.SchemaVersion = "connector.product/v2" }, "schema_version"},
+		// --- GA Task 2 amendment (plan dc81e80) rejections ---
+		{"missing technical safety floor", func(p *ProductPack) { p.TechnicalSafetyFloor = TechnicalSafetyFloor{} }, "technical_safety_floor"},
+		{"floor unknown effect ceiling", func(p *ProductPack) { p.TechnicalSafetyFloor.EffectCeiling = "unbounded" }, "effect_ceiling"},
+		{"floor negative write rate", func(p *ProductPack) { p.TechnicalSafetyFloor.MaxWritesPerMinute = -1 }, "max_writes_per_minute"},
+		{"floor negative payload bound", func(p *ProductPack) { p.TechnicalSafetyFloor.MaxPayloadBytes = -1 }, "max_payload_bytes"},
+		{"floor write rate looser than pack envelope", func(p *ProductPack) { p.TechnicalSafetyFloor.MaxWritesPerMinute = 601 }, "max_writes_per_minute"},
+		{"write capability missing idempotency", func(p *ProductPack) { p.Capabilities[1].Idempotency = nil }, "idempotency"},
+		{"idempotency missing key scheme", func(p *ProductPack) { p.Capabilities[1].Idempotency.KeyScheme = "" }, "key_scheme"},
+		{"idempotency missing scope", func(p *ProductPack) { p.Capabilities[1].Idempotency.Scope = "" }, "scope"},
+		{"idempotency unknown duplicate semantics", func(p *ProductPack) { p.Capabilities[1].Idempotency.OnDuplicate = "overwrite" }, "on_duplicate"},
+		{"write capability without postcondition probes", func(p *ProductPack) { p.Capabilities[1].PostconditionProbes = nil }, "postcondition_probe"},
+		{"read capability declaring a postcondition probe", func(p *ProductPack) {
+			p.Capabilities[0].PostconditionProbes = []PostconditionProbe{p.Capabilities[1].PostconditionProbes[0]}
+		}, "postcondition_probe"},
+		{"postcondition probe missing id", func(p *ProductPack) { p.Capabilities[1].PostconditionProbes[0].ProbeID = "" }, "probe_id"},
+		{"postcondition probe malformed id", func(p *ProductPack) { p.Capabilities[1].PostconditionProbes[0].ProbeID = "Check PO!" }, "probe_id"},
+		{"duplicate probe ids within one capability", func(p *ProductPack) {
+			p.Capabilities[1].PreconditionProbes[0].ProbeID = p.Capabilities[1].PostconditionProbes[0].ProbeID
+		}, "probe_id"},
+		{"postcondition probe missing source authority", func(p *ProductPack) { p.Capabilities[1].PostconditionProbes[0].SourceAuthority = "" }, "source_authority"},
+		{"postcondition probe unknown source authority", func(p *ProductPack) {
+			p.Capabilities[1].PostconditionProbes[0].SourceAuthority = "vendor_claim"
+		}, "source_authority"},
+		{"postcondition probe missing version semantics", func(p *ProductPack) {
+			p.Capabilities[1].PostconditionProbes[0].SourceVersionSemantics = ""
+		}, "source_version_semantics"},
+		{"postcondition probe unknown version semantics", func(p *ProductPack) {
+			p.Capabilities[1].PostconditionProbes[0].SourceVersionSemantics = "vibes"
+		}, "source_version_semantics"},
+		{"postcondition probe missing freshness bound", func(p *ProductPack) {
+			p.Capabilities[1].PostconditionProbes[0].FreshnessBoundSeconds = 0
+		}, "freshness_bound_seconds"},
+		{"postcondition probe negative freshness bound", func(p *ProductPack) {
+			p.Capabilities[1].PostconditionProbes[0].FreshnessBoundSeconds = -60
+		}, "freshness_bound_seconds"},
+		{"postcondition probe missing observation schema", func(p *ProductPack) {
+			p.Capabilities[1].PostconditionProbes[0].ObservationSchema = IOSchema{}
+		}, "observation"},
+		{"postcondition probe observation schema is a raw path", func(p *ProductPack) {
+			p.Capabilities[1].PostconditionProbes[0].ObservationSchema.Ref = "postgres://mes/workorders"
+		}, "observation"},
+		{"postcondition probe probes an undeclared capability", func(p *ProductPack) {
+			p.Capabilities[1].PostconditionProbes[0].Capability = "erp.goods_receipt.read"
+		}, "not a declared"},
+		{"postcondition probe probes a write capability", func(p *ProductPack) {
+			p.Capabilities[1].PostconditionProbes[0].Capability = "erp.purchase_order.reject"
+		}, "read"},
+		{"precondition probe probes an undeclared capability", func(p *ProductPack) {
+			p.Capabilities[1].PreconditionProbes[0].Capability = "erp.goods_receipt.read"
+		}, "not a declared"},
+		{"write capability missing execution receipt schema", func(p *ProductPack) { p.Capabilities[1].ExecutionReceiptSchema = nil }, "execution_receipt_schema"},
+		{"write capability missing observation receipt schema", func(p *ProductPack) { p.Capabilities[1].ObservationReceiptSchema = nil }, "observation_receipt_schema"},
+		{"execution receipt schema malformed reference", func(p *ProductPack) {
+			p.Capabilities[1].ExecutionReceiptSchema.Ref = "https://erp/receipts"
+		}, "execution_receipt"},
+		// --- fix-round tightenings: key_scheme/scope are lowercase machine
+		// names (closes the camel-case evasion of the outcome ban on the
+		// amendment's own fields), and reads reject write-only declarations.
+		{"idempotency key scheme not a machine name", func(p *ProductPack) { p.Capabilities[1].Idempotency.KeyScheme = "expectedOutcome" }, "key_scheme"},
+		{"idempotency scope not a machine name", func(p *ProductPack) { p.Capabilities[1].Idempotency.Scope = "Per Tenant" }, "scope"},
+		{"read capability declaring idempotency", func(p *ProductPack) {
+			p.Capabilities[0].Idempotency = &IdempotencyDeclaration{KeyScheme: "business_document", Scope: "per_tenant", OnDuplicate: DuplicateNoOp}
+		}, "idempotency"},
+		{"read capability declaring execution receipt schema", func(p *ProductPack) {
+			p.Capabilities[0].ExecutionReceiptSchema = &IOSchema{Ref: "schema.erp.purchase_order.read.execution_receipt", Digest: digestOf("exec-read")}
+		}, "execution_receipt_schema"},
+		{"read capability declaring observation receipt schema", func(p *ProductPack) {
+			p.Capabilities[0].ObservationReceiptSchema = &IOSchema{Ref: "schema.erp.purchase_order.read.observation_receipt", Digest: digestOf("obsr-read")}
+		}, "observation_receipt_schema"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -228,6 +357,183 @@ func TestProductPackRejectsCustomerIdentifyingData(t *testing.T) {
 				t.Fatalf("want ErrCustomerDataInProductPack for %s, got %v", tc.name, err)
 			}
 		})
+	}
+}
+
+// TestProductPackNeverCarriesBusinessOutcomeAuthority proves the amendment's
+// authority boundary (plan dc81e80): a connector pack declares HOW its
+// technical execution and bounded observations are made and schema'd; it NEVER
+// declares, computes or carries a business Outcome, goal_achieved or
+// graph-provider semantics. The matcher mirrors the frozen runtime-contract
+// semantics: any declared machine name containing "outcome" or "goal_achieved",
+// or whose dotted segment is a graph-provider form (exact "graph", prefix
+// "graph_", suffix "_graph"), is rejected with ErrOutcomeAuthorityInProductPack.
+// Human prose (titles, descriptions, notes) stays free.
+func TestProductPackNeverCarriesBusinessOutcomeAuthority(t *testing.T) {
+	reject := []struct {
+		name   string
+		mutate func(*ProductPack)
+	}{
+		{"capability name carries outcome", func(p *ProductPack) { p.Capabilities[0].Name = "erp.purchase_order.outcome" }},
+		{"capability name carries goal_achieved", func(p *ProductPack) { p.Capabilities[0].Name = "erp.goal_achieved.report" }},
+		{"capability name has an exact graph segment", func(p *ProductPack) { p.Capabilities[0].Name = "erp.graph.write" }},
+		{"capability name has a graph_ prefixed segment", func(p *ProductPack) { p.Capabilities[0].Name = "erp.graph_projection.read" }},
+		{"capability name has a _graph suffixed segment", func(p *ProductPack) { p.Capabilities[0].Name = "erp.result_graph.update" }},
+		{"product key carries outcome", func(p *ProductPack) { p.ProductKey = "acme.outcome_engine" }},
+		{"probe id carries outcome", func(p *ProductPack) { p.Capabilities[1].PostconditionProbes[0].ProbeID = "outcome_check" }},
+		{"precondition probe id carries goal_achieved", func(p *ProductPack) {
+			p.Capabilities[1].PreconditionProbes[0].ProbeID = "goal_achieved_gate"
+		}},
+		{"io schema ref carries outcome", func(p *ProductPack) { p.Capabilities[0].Input.Ref = "schema.erp.outcome.read.input" }},
+		{"observation schema ref is a graph provider", func(p *ProductPack) {
+			p.Capabilities[1].PostconditionProbes[0].ObservationSchema.Ref = "schema.erp.result_graph.observation"
+		}},
+		{"side effect kind carries outcome", func(p *ProductPack) { p.Capabilities[1].SideEffects[0].Kind = "business_outcome" }},
+		{"reconciliation strategy carries outcome", func(p *ProductPack) { p.Capabilities[1].Reconciliation.Strategy = "declare_outcome" }},
+		{"idempotency key scheme carries outcome", func(p *ProductPack) { p.Capabilities[1].Idempotency.KeyScheme = "outcome_key" }},
+		{"idempotency scope is a graph provider", func(p *ProductPack) { p.Capabilities[1].Idempotency.Scope = "graph_partition" }},
+		{"field classification names goal_achieved", func(p *ProductPack) {
+			p.FieldPolicy.Classifications[0].Field = "goal_achieved"
+		}},
+		{"egress class is a graph provider", func(p *ProductPack) { p.Network.Egress = []string{"graph_api"} }},
+	}
+	for _, tc := range reject {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validProductPack()
+			tc.mutate(&p)
+			p.Digest = PackContentDigest(p)
+			err := ValidateProductPack(p)
+			if err == nil {
+				t.Fatalf("pack with %s must be rejected: a connector never authors a business Outcome", tc.name)
+			}
+			if !errors.Is(err, ErrOutcomeAuthorityInProductPack) {
+				t.Fatalf("want ErrOutcomeAuthorityInProductPack for %s, got %v", tc.name, err)
+			}
+		})
+	}
+
+	// Positive controls pin the matcher to the frozen runtime semantics: only
+	// contains-outcome/contains-goal_achieved and the three graph-provider forms
+	// are banned. "photograph" and "flowgraph" are NOT graph-provider names
+	// (no underscore boundary), exactly as in the runtime contract.
+	accept := []struct {
+		name       string
+		capability string
+	}{
+		{"photograph is not a graph provider name", "dms.photograph.read"},
+		{"flowgraph is not a graph provider name", "mes.flowgraph.read"},
+	}
+	for _, tc := range accept {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validProductPack()
+			p.Capabilities = append(p.Capabilities, Capability{
+				Name:   tc.capability,
+				Title:  "edge-case read",
+				Effect: EffectRead,
+				Input:  IOSchema{Ref: tc.capability + ".input", Digest: digestOf(tc.capability + ":in")},
+				Output: IOSchema{Ref: tc.capability + ".output", Digest: digestOf(tc.capability + ":out")},
+			})
+			p.Digest = PackContentDigest(p)
+			if err := ValidateProductPack(p); err != nil {
+				t.Fatalf("capability %q must be accepted (not a graph-provider form), got %v", tc.capability, err)
+			}
+		})
+	}
+
+	// JSON-level: an outcome-flavored KEY anywhere in the pack document is
+	// rejected by the byte scan with the same sentinel, mirroring how customer
+	// topology keys are rejected.
+	base, err := json.Marshal(validProductPack())
+	if err != nil {
+		t.Fatal(err)
+	}
+	injectKey := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"top-level expected_outcome key", func(d map[string]any) { d["expected_outcome"] = "approved" }},
+		{"goal_achieved key on a capability", func(d map[string]any) {
+			d["capabilities"].([]any)[0].(map[string]any)["goal_achieved"] = true
+		}},
+		{"graph_ref key nested in reconciliation", func(d map[string]any) {
+			d["capabilities"].([]any)[1].(map[string]any)["reconciliation"].(map[string]any)["graph_ref"] = "x"
+		}},
+	}
+	for _, tc := range injectKey {
+		t.Run(tc.name, func(t *testing.T) {
+			var doc map[string]any
+			if err := json.Unmarshal(base, &doc); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(doc)
+			raw, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ParseProductPack(raw); err == nil {
+				t.Fatalf("pack JSON with %s must be rejected", tc.name)
+			} else if !errors.Is(err, ErrOutcomeAuthorityInProductPack) {
+				t.Fatalf("want ErrOutcomeAuthorityInProductPack for %s, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestVerificationVocabularyFrozen pins the amendment's declaration vocabulary
+// by value, the same way CapabilityPattern pins the runtime capability regex:
+// the service parity test mirrors these exact literals against the JSON schema,
+// keeping SDK and schema in lockstep without a module dependency.
+func TestVerificationVocabularyFrozen(t *testing.T) {
+	if ProbeIDPattern != `^[a-z][a-z0-9_]*$` {
+		t.Fatalf("ProbeIDPattern %q diverged from the frozen probe id form", ProbeIDPattern)
+	}
+
+	tiers := []SourceAuthority{SourceAuthoritySystemOfRecord, SourceAuthorityAuthoritativeReplica, SourceAuthorityDerived}
+	wantTiers := []string{"system_of_record", "authoritative_replica", "derived"}
+	for i, tier := range tiers {
+		if string(tier) != wantTiers[i] {
+			t.Fatalf("source authority tier %d = %q, want frozen %q", i, tier, wantTiers[i])
+		}
+		if !tier.Valid() {
+			t.Fatalf("frozen source authority tier %q must be valid", tier)
+		}
+	}
+	if !SourceAuthoritySystemOfRecord.Authoritative() || !SourceAuthorityAuthoritativeReplica.Authoritative() {
+		t.Fatal("system_of_record and authoritative_replica are the authoritative tiers")
+	}
+	if SourceAuthorityDerived.Authoritative() {
+		t.Fatal("a derived source must never count as authoritative")
+	}
+	if SourceAuthority("vendor_claim").Valid() {
+		t.Fatal("an unknown source authority tier must be invalid")
+	}
+
+	semantics := []SourceVersionSemantics{SourceVersionMonotonicCounter, SourceVersionContentDigest, SourceVersionLastModified}
+	wantSemantics := []string{"monotonic_counter", "content_digest", "last_modified_timestamp"}
+	for i, s := range semantics {
+		if string(s) != wantSemantics[i] {
+			t.Fatalf("source version semantics %d = %q, want frozen %q", i, s, wantSemantics[i])
+		}
+		if !s.Valid() {
+			t.Fatalf("frozen source version semantics %q must be valid", s)
+		}
+	}
+	if SourceVersionSemantics("vibes").Valid() {
+		t.Fatal("unknown source version semantics must be invalid")
+	}
+
+	duplicates := []DuplicateSemantics{DuplicateReturnPriorResult, DuplicateReject, DuplicateNoOp}
+	wantDuplicates := []string{"return_prior_result", "reject", "no_op"}
+	for i, d := range duplicates {
+		if string(d) != wantDuplicates[i] {
+			t.Fatalf("duplicate semantics %d = %q, want frozen %q", i, d, wantDuplicates[i])
+		}
+		if !d.Valid() {
+			t.Fatalf("frozen duplicate semantics %q must be valid", d)
+		}
+	}
+	if DuplicateSemantics("overwrite").Valid() {
+		t.Fatal("unknown duplicate semantics must be invalid")
 	}
 }
 
@@ -380,6 +686,125 @@ func TestDevelopmentPackFromManifestNeverProductionImportable(t *testing.T) {
 		if err := ValidateCapabilityName(c.Name); err != nil {
 			t.Fatalf("migrated capability %q is not a semantic capability: %v", c.Name, err)
 		}
+	}
+
+	// Amendment: a development migration must satisfy the amended contract with
+	// the MOST conservative technical-safety floor (read ceiling, approval
+	// required), and every migrated write must carry the full write declaration
+	// set (idempotency, postcondition probe, receipt schemas).
+	if dev.TechnicalSafetyFloor.EffectCeiling != EffectRead {
+		t.Fatalf("development migration floor effect ceiling = %q, want the conservative read ceiling", dev.TechnicalSafetyFloor.EffectCeiling)
+	}
+	if !dev.TechnicalSafetyFloor.RequireApprovalForWrites {
+		t.Fatal("development migration floor must require approval for writes")
+	}
+	sawWrite := false
+	for _, c := range dev.Capabilities {
+		if !c.Effect.IsWrite() {
+			continue
+		}
+		sawWrite = true
+		if c.Idempotency == nil {
+			t.Fatalf("migrated write capability %q must declare idempotency", c.Name)
+		}
+		if len(c.PostconditionProbes) == 0 {
+			t.Fatalf("migrated write capability %q must declare a postcondition probe", c.Name)
+		}
+		if c.ExecutionReceiptSchema == nil || c.ObservationReceiptSchema == nil {
+			t.Fatalf("migrated write capability %q must declare execution and observation receipt schemas", c.Name)
+		}
+	}
+	if !sawWrite {
+		t.Fatal("fixture must migrate at least one write capability")
+	}
+}
+
+// TestDevelopmentMigrationWritableResourceWithReadOperation is the fix-round
+// regression test: a writable resource that itself declares an operation
+// named "read" must migrate that operation as the GENUINE read capability
+// (no write decoration). Write-flavoring it made every other migrated
+// write's postcondition probes and reconciliation target a WRITE capability,
+// which the amended probe rule rejects -- so DevelopmentPackFromManifest
+// broke on input the pre-amendment SDK (base bbe25556) accepted.
+func TestDevelopmentMigrationWritableResourceWithReadOperation(t *testing.T) {
+	m := Manifest{
+		SchemaVersion: "2026-07-06",
+		Name:          "legacy_erp",
+		Version:       "0.3.0",
+		Resources: []Resource{{
+			Name:     "approvals",
+			Type:     ResourceTypeHTTP,
+			ReadOnly: boolPtr(false),
+			Operations: []Operation{
+				{Name: "read", Method: "GET", Path: "/api/v2/approvals"},
+				{Name: "approve", Method: "POST", Path: "/api/v2/approvals/approve"},
+			},
+		}},
+	}
+	dev := DevelopmentPackFromManifest(m)
+	if err := ValidateDevelopmentPack(dev); err != nil {
+		t.Fatalf("a writable resource with a read operation must still migrate to a valid development pack, got %v", err)
+	}
+
+	byName := map[string]Capability{}
+	for _, c := range dev.Capabilities {
+		byName[c.Name] = c
+	}
+	const readName = "http.approvals.read"
+	readCap, ok := byName[readName]
+	if !ok {
+		t.Fatalf("migration must declare the genuine read capability %q, got %+v", readName, dev.Capabilities)
+	}
+	if readCap.Effect != EffectRead {
+		t.Fatalf("the read operation on a writable resource must migrate as a READ capability, got effect %q", readCap.Effect)
+	}
+	if len(readCap.SideEffects) != 0 || readCap.Reconciliation != nil || readCap.Idempotency != nil ||
+		len(readCap.PostconditionProbes) != 0 || readCap.ExecutionReceiptSchema != nil || readCap.ObservationReceiptSchema != nil {
+		t.Fatalf("the migrated read capability must carry no write decoration, got %+v", readCap)
+	}
+
+	approve, ok := byName["http.approvals.approve"]
+	if !ok || !approve.Effect.IsWrite() {
+		t.Fatalf("approve must migrate as a write capability, got %+v", approve)
+	}
+	if approve.Reconciliation == nil || approve.Reconciliation.VerifyCapability != readName {
+		t.Fatalf("approve reconciliation must verify through the genuine read capability %q, got %+v", readName, approve.Reconciliation)
+	}
+	if len(approve.PostconditionProbes) == 0 || approve.PostconditionProbes[0].Capability != readName {
+		t.Fatalf("approve postcondition probe must target the genuine read capability %q, got %+v", readName, approve.PostconditionProbes)
+	}
+}
+
+// TestDevelopmentMigrationWritableResourceWithLoneReadOperation encodes the
+// self-probing edge shape: a writable resource whose ONLY operation is
+// "read" migrates as a plain read capability with no write decoration
+// (a write-flavored lone read would have to probe itself).
+func TestDevelopmentMigrationWritableResourceWithLoneReadOperation(t *testing.T) {
+	m := Manifest{
+		SchemaVersion: "2026-07-06",
+		Name:          "legacy_erp",
+		Version:       "0.3.0",
+		Resources: []Resource{{
+			Name:       "approvals",
+			Type:       ResourceTypeHTTP,
+			ReadOnly:   boolPtr(false),
+			Operations: []Operation{{Name: "read", Method: "GET", Path: "/api/v2/approvals"}},
+		}},
+	}
+	dev := DevelopmentPackFromManifest(m)
+	if err := ValidateDevelopmentPack(dev); err != nil {
+		t.Fatalf("a writable resource with a lone read operation must migrate to a valid development pack, got %v", err)
+	}
+	if len(dev.Capabilities) != 1 {
+		t.Fatalf("lone read operation must migrate to exactly one capability, got %+v", dev.Capabilities)
+	}
+	c := dev.Capabilities[0]
+	if c.Name != "http.approvals.read" || c.Effect != EffectRead {
+		t.Fatalf("lone read operation must migrate as the plain read capability, got %+v", c)
+	}
+	if len(c.SideEffects) != 0 || c.Reconciliation != nil || c.Idempotency != nil ||
+		len(c.PostconditionProbes) != 0 || c.ExecutionReceiptSchema != nil || c.ObservationReceiptSchema != nil {
+		t.Fatalf("lone read capability must carry no write decoration, got %+v", c)
 	}
 }
 

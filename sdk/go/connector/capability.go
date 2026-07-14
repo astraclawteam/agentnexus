@@ -87,7 +87,11 @@ type Reconciliation struct {
 
 // Capability is a semantic, resellable operation the connector exposes. Its
 // name is drawn from the frozen Agent capability vocabulary; its IO is
-// referenced by digest; a write declares side effects and reconciliation.
+// referenced by digest. A write declares side effects, reconciliation and (GA
+// Task 2 amendment, plan dc81e80) an idempotency declaration, at least one
+// authoritative postcondition probe and execution/observation receipt
+// schemas; precondition probes are available on any capability. Postcondition
+// probes belong to writes only -- a postcondition follows a write.
 type Capability struct {
 	Name           string          `json:"name"`
 	Title          string          `json:"title"`
@@ -98,6 +102,18 @@ type Capability struct {
 	FieldPolicy    *FieldPolicy    `json:"field_policy,omitempty"`
 	SideEffects    []SideEffect    `json:"side_effects,omitempty"`
 	Reconciliation *Reconciliation `json:"reconciliation,omitempty"`
+	// Idempotency is required for every write capability (amendment).
+	Idempotency *IdempotencyDeclaration `json:"idempotency,omitempty"`
+	// PreconditionProbes declare available pre-execution observations.
+	PreconditionProbes []PreconditionProbe `json:"precondition_probes,omitempty"`
+	// PostconditionProbes declare available authoritative post-execution
+	// observations; every write capability must declare at least one.
+	PostconditionProbes []PostconditionProbe `json:"postcondition_probes,omitempty"`
+	// ExecutionReceiptSchema and ObservationReceiptSchema are the
+	// digest-referenced canonical shapes the execution plane (Tasks 5/6/7)
+	// validates connector outputs against; both are required for writes.
+	ExecutionReceiptSchema   *IOSchema `json:"execution_receipt_schema,omitempty"`
+	ObservationReceiptSchema *IOSchema `json:"observation_receipt_schema,omitempty"`
 }
 
 // ValidateCapabilityName reports whether name is a frozen business-semantic

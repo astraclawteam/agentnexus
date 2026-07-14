@@ -44,7 +44,31 @@ func fixtureReadCapability() connector.Capability {
 	}
 }
 
+// fixtureAmendedWriteMembers returns the amended per-write declaration set
+// (plan dc81e80) for the named action, with the exact values
+// amendedFixturePackDoc injects as raw JSON, keeping the typed fixture and the
+// spec-shape fixture in lockstep.
+func fixtureAmendedWriteMembers(action string) (idem *connector.IdempotencyDeclaration, probes []connector.PostconditionProbe, execSchema, obsSchema *connector.IOSchema) {
+	idem = &connector.IdempotencyDeclaration{
+		KeyScheme:   "business_document",
+		Scope:       "per_tenant",
+		OnDuplicate: connector.DuplicateReturnPriorResult,
+	}
+	probes = []connector.PostconditionProbe{{
+		ProbeID:                "post_" + action + "_state",
+		Capability:             "erp.purchase_order.read",
+		SourceAuthority:        connector.SourceAuthoritySystemOfRecord,
+		SourceVersionSemantics: connector.SourceVersionMonotonicCounter,
+		FreshnessBoundSeconds:  300,
+		ObservationSchema:      connector.IOSchema{Ref: "schema.erp.purchase_order." + action + ".observation", Digest: packDigestOf("obs-" + action)},
+	}}
+	execSchema = &connector.IOSchema{Ref: "schema.erp.purchase_order." + action + ".execution_receipt", Digest: packDigestOf("exec-" + action)}
+	obsSchema = &connector.IOSchema{Ref: "schema.erp.purchase_order." + action + ".observation_receipt", Digest: packDigestOf("obsr-" + action)}
+	return idem, probes, execSchema, obsSchema
+}
+
 func fixtureWriteCapability() connector.Capability {
+	idem, probes, execSchema, obsSchema := fixtureAmendedWriteMembers("approve")
 	return connector.Capability{
 		Name:        "erp.purchase_order.approve",
 		Title:       "Approve purchase order",
@@ -57,10 +81,19 @@ func fixtureWriteCapability() connector.Capability {
 			VerifyCapability:       "erp.purchase_order.read",
 			CompensationCapability: "erp.purchase_order.reject",
 		},
+		Idempotency: idem,
+		PreconditionProbes: []connector.PreconditionProbe{{
+			ProbeID:    "pre_approve_state",
+			Capability: "erp.purchase_order.read",
+		}},
+		PostconditionProbes:      probes,
+		ExecutionReceiptSchema:   execSchema,
+		ObservationReceiptSchema: obsSchema,
 	}
 }
 
 func fixtureRejectCapability() connector.Capability {
+	idem, probes, execSchema, obsSchema := fixtureAmendedWriteMembers("reject")
 	return connector.Capability{
 		Name:        "erp.purchase_order.reject",
 		Title:       "Reject purchase order",
@@ -72,6 +105,10 @@ func fixtureRejectCapability() connector.Capability {
 			Strategy:         "verify_then_compensate",
 			VerifyCapability: "erp.purchase_order.read",
 		},
+		Idempotency:              idem,
+		PostconditionProbes:      probes,
+		ExecutionReceiptSchema:   execSchema,
+		ObservationReceiptSchema: obsSchema,
 	}
 }
 
@@ -84,6 +121,12 @@ func fixtureProductPack() connector.ProductPack {
 		Capabilities:  []connector.Capability{fixtureReadCapability(), fixtureWriteCapability(), fixtureRejectCapability()},
 		FieldPolicy: connector.FieldPolicy{
 			Classifications: []connector.FieldClassification{{Field: "amount", Classification: "confidential", Redacted: true}},
+		},
+		TechnicalSafetyFloor: connector.TechnicalSafetyFloor{
+			EffectCeiling:            connector.EffectWrite,
+			MaxWritesPerMinute:       60,
+			MaxPayloadBytes:          1 << 20,
+			RequireApprovalForWrites: true,
 		},
 		Network:       connector.NetworkRequirements{Egress: []string{"erp.api"}, Isolation: "outbound_only"},
 		Runtime:       connector.RuntimeRequirements{Runtime: "wasm", MinMemoryMB: 64},
@@ -152,7 +195,7 @@ var implementedSchemaKeywords = map[string]bool{
 	"$schema": true, "$id": true, "$ref": true, "$defs": true, "$comment": true, "$anchor": true,
 	"title": true, "description": true,
 	"type": true, "const": true, "enum": true, "pattern": true,
-	"minLength": true, "minItems": true, "minimum": true,
+	"minLength": true, "minItems": true, "maxItems": true, "minimum": true,
 	"required": true, "properties": true, "additionalProperties": true,
 	"items": true, "allOf": true, "if": true, "then": true, "else": true,
 }
@@ -197,8 +240,9 @@ func assertImplementedKeywordsOnly(t *testing.T, schema any, path string) {
 }
 
 // --- self-contained JSON Schema 2020-12 evaluator (subset used by the pack and
-// binding schemas: type/const/enum/pattern/minLength/minItems/minimum/required/
-// properties/additionalProperties:false/items/allOf/if-then-else/$ref). Any
+// binding schemas: type/const/enum/pattern/minLength/minItems/maxItems/minimum/
+// required/properties (incl. boolean property schemas: false rejects a present
+// member)/additionalProperties:false/items/allOf/if-then-else/$ref). Any
 // schema keyword outside this subset is rejected by assertImplementedKeywordsOnly
 // so the evaluator can never silently under-check a future schema edit. ---
 
@@ -280,6 +324,11 @@ func validateNode(root, schema map[string]any, instance any, path string) error 
 			return fmt.Errorf("%s: fewer than minItems", path)
 		}
 	}
+	if mx, ok := schema["maxItems"]; ok {
+		if arr, ok := instance.([]any); ok && float64(len(arr)) > toFloat(mx) {
+			return fmt.Errorf("%s: more than maxItems", path)
+		}
+	}
 	if mn, ok := schema["minimum"]; ok {
 		if n, ok := instance.(float64); ok && n < toFloat(mn) {
 			return fmt.Errorf("%s: less than minimum", path)
@@ -303,6 +352,14 @@ func validateNode(root, schema map[string]any, instance any, path string) error 
 			for name, sub := range props {
 				val, present := obj[name]
 				if !present {
+					continue
+				}
+				// Boolean property schemas (2020-12): false rejects a present
+				// member outright, true accepts anything.
+				if b, isBool := sub.(bool); isBool {
+					if !b {
+						return fmt.Errorf("%s.%s: property is not allowed here (boolean false schema)", path, name)
+					}
 					continue
 				}
 				subSchema, ok := sub.(map[string]any)
@@ -705,3 +762,274 @@ func TestMigration000012DefinesProductsAndBindings(t *testing.T) {
 }
 
 func boolPtrManifest(b bool) *bool { return &b }
+
+// --- GA Task 2 amendment (plan dc81e80): the Product Pack schema must mirror
+// the amended SDK surface — technical-safety floor, per-write idempotency,
+// precondition/authoritative postcondition probes, execution/observation
+// receipt schemas — with the same frozen vocabularies. The literals below are
+// the frozen values; sdk/go/connector/manifest_test.go pins the SDK constants
+// to the SAME literals (TestVerificationVocabularyFrozen), keeping schema and
+// SDK in lockstep without a module dependency, exactly like CapabilityPattern.
+
+var (
+	frozenSourceAuthorityTiers   = []any{"system_of_record", "authoritative_replica", "derived"}
+	frozenSourceVersionSemantics = []any{"monotonic_counter", "content_digest", "last_modified_timestamp"}
+	frozenDuplicateSemantics     = []any{"return_prior_result", "reject", "no_op"}
+	frozenProbeIDPattern         = `^[a-z][a-z0-9_]*$`
+)
+
+// amendedFixturePackDoc returns the canonical amended Product Pack as a raw
+// JSON instance: the pre-amendment typed fixture plus the amendment members.
+// The floor and per-write members are injected as raw JSON so this test
+// captures the required schema shape independently of the Go types (and
+// compiled before the SDK types existed, for the RED phase).
+func amendedFixturePackDoc(t *testing.T) map[string]any {
+	t.Helper()
+	doc := toInstance(t, fixtureProductPack()).(map[string]any)
+	doc["technical_safety_floor"] = map[string]any{
+		"effect_ceiling":              "write",
+		"max_writes_per_minute":       float64(60),
+		"max_payload_bytes":           float64(1 << 20),
+		"require_approval_for_writes": true,
+	}
+	probeFor := func(action string) map[string]any {
+		return map[string]any{
+			"probe_id":                 "post_" + action + "_state",
+			"capability":               "erp.purchase_order.read",
+			"source_authority":         "system_of_record",
+			"source_version_semantics": "monotonic_counter",
+			"freshness_bound_seconds":  float64(300),
+			"observation_schema": map[string]any{
+				"ref":    "schema.erp.purchase_order." + action + ".observation",
+				"digest": packDigestOf("obs-" + action),
+			},
+		}
+	}
+	for i, action := range map[int]string{1: "approve", 2: "reject"} {
+		cap := doc["capabilities"].([]any)[i].(map[string]any)
+		cap["idempotency"] = map[string]any{
+			"key_scheme":   "business_document",
+			"scope":        "per_tenant",
+			"on_duplicate": "return_prior_result",
+		}
+		cap["postcondition_probes"] = []any{probeFor(action)}
+		cap["execution_receipt_schema"] = map[string]any{
+			"ref":    "schema.erp.purchase_order." + action + ".execution_receipt",
+			"digest": packDigestOf("exec-" + action),
+		}
+		cap["observation_receipt_schema"] = map[string]any{
+			"ref":    "schema.erp.purchase_order." + action + ".observation_receipt",
+			"digest": packDigestOf("obsr-" + action),
+		}
+	}
+	approve := doc["capabilities"].([]any)[1].(map[string]any)
+	approve["precondition_probes"] = []any{map[string]any{
+		"probe_id":   "pre_approve_state",
+		"capability": "erp.purchase_order.read",
+	}}
+	return doc
+}
+
+func defsSection(t *testing.T, schema map[string]any, name string) map[string]any {
+	t.Helper()
+	defs, ok := schema["$defs"].(map[string]any)
+	if !ok {
+		t.Fatalf("product-pack schema has no $defs section")
+	}
+	section, ok := defs[name].(map[string]any)
+	if !ok {
+		t.Fatalf("product-pack schema $defs must define %q for the amended contract", name)
+	}
+	return section
+}
+
+func requiredSet(section map[string]any) map[string]bool {
+	out := map[string]bool{}
+	req, _ := section["required"].([]any)
+	for _, r := range req {
+		if s, ok := r.(string); ok {
+			out[s] = true
+		}
+	}
+	return out
+}
+
+// TestProductPackSchemaDeclaresAmendedSurface proves the schema DECLARES the
+// amended members, requires the technical-safety floor at pack level, and
+// freezes the amendment vocabularies to the exact SDK literals.
+func TestProductPackSchemaDeclaresAmendedSurface(t *testing.T) {
+	schema := loadSchema(t, productPackSchemaPath)
+
+	declared := map[string]bool{}
+	walkDeclaredPropertyNames(schema, declared)
+	for _, name := range []string{
+		"technical_safety_floor", "effect_ceiling", "max_writes_per_minute", "max_payload_bytes",
+		"require_approval_for_writes", "idempotency", "key_scheme", "on_duplicate",
+		"precondition_probes", "postcondition_probes", "probe_id", "source_authority",
+		"source_version_semantics", "freshness_bound_seconds", "observation_schema",
+		"execution_receipt_schema", "observation_receipt_schema",
+	} {
+		if !declared[name] {
+			t.Errorf("product-pack schema must declare amended member %q", name)
+		}
+	}
+
+	topRequired := requiredSet(schema)
+	if !topRequired["technical_safety_floor"] {
+		t.Error("product-pack schema must REQUIRE technical_safety_floor at pack level")
+	}
+
+	floor := defsSection(t, schema, "technicalSafetyFloor")
+	if !requiredSet(floor)["effect_ceiling"] {
+		t.Error("technicalSafetyFloor must require effect_ceiling")
+	}
+
+	idem := defsSection(t, schema, "idempotency")
+	for _, want := range []string{"key_scheme", "scope", "on_duplicate"} {
+		if !requiredSet(idem)[want] {
+			t.Errorf("idempotency must require %q", want)
+		}
+	}
+
+	post := defsSection(t, schema, "postconditionProbe")
+	for _, want := range []string{"probe_id", "capability", "source_authority", "source_version_semantics", "freshness_bound_seconds", "observation_schema"} {
+		if !requiredSet(post)[want] {
+			t.Errorf("postconditionProbe must require %q (a probe without source authority/version/freshness and canonical observation schema is invalid)", want)
+		}
+	}
+
+	pre := defsSection(t, schema, "preconditionProbe")
+	for _, want := range []string{"probe_id", "capability"} {
+		if !requiredSet(pre)[want] {
+			t.Errorf("preconditionProbe must require %q", want)
+		}
+	}
+
+	probeID := defsSection(t, schema, "probeId")
+	if pat, _ := probeID["pattern"].(string); pat != frozenProbeIDPattern {
+		t.Errorf("probeId pattern %q, want frozen %q", pat, frozenProbeIDPattern)
+	}
+
+	// key_scheme/scope share the frozen lowercase machine-name form (same
+	// class as probe ids): a camel-cased key like "expectedOutcome" would
+	// evade the case-sensitive outcome ban, so the pattern closes that hole.
+	machineName := defsSection(t, schema, "machineName")
+	if pat, _ := machineName["pattern"].(string); pat != frozenProbeIDPattern {
+		t.Errorf("machineName pattern %q, want the frozen lowercase machine-name form %q", pat, frozenProbeIDPattern)
+	}
+	idemProps, _ := idem["properties"].(map[string]any)
+	for _, member := range []string{"key_scheme", "scope"} {
+		sub, _ := idemProps[member].(map[string]any)
+		if ref, _ := sub["$ref"].(string); ref != "#/$defs/machineName" {
+			t.Errorf("idempotency %s must reference #/$defs/machineName, got %v", member, sub)
+		}
+	}
+
+	enumOf := func(name string) []any {
+		enum, _ := defsSection(t, schema, name)["enum"].([]any)
+		return enum
+	}
+	if got := enumOf("sourceAuthority"); !reflect.DeepEqual(got, frozenSourceAuthorityTiers) {
+		t.Errorf("sourceAuthority enum %v, want frozen tiers %v", got, frozenSourceAuthorityTiers)
+	}
+	if got := enumOf("sourceVersionSemantics"); !reflect.DeepEqual(got, frozenSourceVersionSemantics) {
+		t.Errorf("sourceVersionSemantics enum %v, want frozen %v", got, frozenSourceVersionSemantics)
+	}
+	if got := enumOf("duplicateSemantics"); !reflect.DeepEqual(got, frozenDuplicateSemantics) {
+		t.Errorf("duplicateSemantics enum %v, want frozen %v", got, frozenDuplicateSemantics)
+	}
+	if floorEffect, _ := floor["properties"].(map[string]any)["effect_ceiling"].(map[string]any); floorEffect == nil {
+		t.Error("technicalSafetyFloor must declare effect_ceiling")
+	} else if got, _ := floorEffect["enum"].([]any); !reflect.DeepEqual(got, []any{"read", "write"}) {
+		t.Errorf("effect_ceiling enum %v, want the frozen effect vocabulary [read write]", got)
+	}
+}
+
+// TestProductPackSchemaEnforcesAmendedWriteRules proves the schema is
+// load-bearing for the amendment: the amended canonical pack validates, and
+// each amended rule rejects its violation. Value-level outcome/goal_achieved/
+// graph-provider bans are NOT expressible in RE2 patterns (no negative
+// lookahead), so the SDK validator carries them (manifest_test.go
+// TestProductPackNeverCarriesBusinessOutcomeAuthority); the schema carries the
+// closed-world structure (additionalProperties:false) that bans outcome-
+// flavored KEYS.
+func TestProductPackSchemaEnforcesAmendedWriteRules(t *testing.T) {
+	schema := loadSchema(t, productPackSchemaPath)
+
+	if err := schemaValidate(schema, schema, amendedFixturePackDoc(t)); err != nil {
+		t.Fatalf("amended canonical product pack must satisfy the schema, got %v", err)
+	}
+
+	// Lockstep guard: the raw-injected spec-shape fixture must be byte-for-
+	// byte the JSON instance of the typed SDK fixture, so the two cannot
+	// silently drift apart (the raw form is kept because it captured the RED
+	// phase independently of the Go types).
+	if typed := toInstance(t, fixtureProductPack()); !reflect.DeepEqual(amendedFixturePackDoc(t), typed) {
+		t.Error("amendedFixturePackDoc raw injections diverged from the typed fixtureProductPack instance")
+	}
+
+	writeCap := func(d map[string]any) map[string]any { return d["capabilities"].([]any)[1].(map[string]any) }
+	firstProbe := func(d map[string]any) map[string]any {
+		return writeCap(d)["postcondition_probes"].([]any)[0].(map[string]any)
+	}
+
+	bad := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"missing technical safety floor", func(d map[string]any) { delete(d, "technical_safety_floor") }},
+		{"floor missing effect ceiling", func(d map[string]any) {
+			delete(d["technical_safety_floor"].(map[string]any), "effect_ceiling")
+		}},
+		{"floor with an undeclared member", func(d map[string]any) {
+			d["technical_safety_floor"].(map[string]any)["blast_radius_notes"] = "x"
+		}},
+		{"write capability missing idempotency", func(d map[string]any) { delete(writeCap(d), "idempotency") }},
+		{"idempotency unknown duplicate semantics", func(d map[string]any) {
+			writeCap(d)["idempotency"].(map[string]any)["on_duplicate"] = "overwrite"
+		}},
+		{"write capability missing postcondition probes", func(d map[string]any) { delete(writeCap(d), "postcondition_probes") }},
+		{"write capability empty postcondition probes", func(d map[string]any) { writeCap(d)["postcondition_probes"] = []any{} }},
+		{"write capability missing execution receipt schema", func(d map[string]any) { delete(writeCap(d), "execution_receipt_schema") }},
+		{"write capability missing observation receipt schema", func(d map[string]any) { delete(writeCap(d), "observation_receipt_schema") }},
+		{"postcondition probe missing source authority", func(d map[string]any) { delete(firstProbe(d), "source_authority") }},
+		{"postcondition probe unknown source authority", func(d map[string]any) { firstProbe(d)["source_authority"] = "vendor_claim" }},
+		{"postcondition probe missing source version semantics", func(d map[string]any) { delete(firstProbe(d), "source_version_semantics") }},
+		{"postcondition probe missing freshness bound", func(d map[string]any) { delete(firstProbe(d), "freshness_bound_seconds") }},
+		{"postcondition probe zero freshness bound", func(d map[string]any) { firstProbe(d)["freshness_bound_seconds"] = float64(0) }},
+		{"postcondition probe missing observation schema", func(d map[string]any) { delete(firstProbe(d), "observation_schema") }},
+		{"postcondition probe malformed probe id", func(d map[string]any) { firstProbe(d)["probe_id"] = "Check PO!" }},
+		{"read capability declaring postcondition probes", func(d map[string]any) {
+			readCap := d["capabilities"].([]any)[0].(map[string]any)
+			readCap["postcondition_probes"] = []any{firstProbe(d)}
+		}},
+		// --- fix-round tightenings ---
+		{"idempotency key scheme evades the outcome ban via camel case", func(d map[string]any) {
+			writeCap(d)["idempotency"].(map[string]any)["key_scheme"] = "expectedOutcome"
+		}},
+		{"idempotency scope not a machine name", func(d map[string]any) {
+			writeCap(d)["idempotency"].(map[string]any)["scope"] = "Per Tenant"
+		}},
+		{"read capability declaring idempotency", func(d map[string]any) {
+			readCap := d["capabilities"].([]any)[0].(map[string]any)
+			readCap["idempotency"] = map[string]any{"key_scheme": "business_document", "scope": "per_tenant", "on_duplicate": "no_op"}
+		}},
+		{"read capability declaring execution receipt schema", func(d map[string]any) {
+			readCap := d["capabilities"].([]any)[0].(map[string]any)
+			readCap["execution_receipt_schema"] = map[string]any{"ref": "schema.erp.purchase_order.read.execution_receipt", "digest": packDigestOf("exec-read")}
+		}},
+		{"read capability declaring observation receipt schema", func(d map[string]any) {
+			readCap := d["capabilities"].([]any)[0].(map[string]any)
+			readCap["observation_receipt_schema"] = map[string]any{"ref": "schema.erp.purchase_order.read.observation_receipt", "digest": packDigestOf("obsr-read")}
+		}},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := amendedFixturePackDoc(t)
+			tc.mutate(doc)
+			if err := schemaValidate(schema, schema, doc); err == nil {
+				t.Fatalf("schema must reject: %s", tc.name)
+			}
+		})
+	}
+}
