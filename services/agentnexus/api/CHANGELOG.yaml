@@ -5,6 +5,35 @@
 #  `make contracts-verify` together with the contract parity tests).
 protocol: agentnexus-public-contract
 entries:
+  - version: "1.4.0"
+    date: "2026-07-14"
+    breaking: false
+    title: "Activate verification-purpose reads that mint signed observation receipts (GA Task 0D amendment, plan dc81e80)"
+    summary: >-
+      Additive, backward-compatible evolution of the frozen contract: the
+      /v1/runtime/read operation gains an OPTIONAL verification binding on
+      the request and an OPTIONAL signed ObservationReceipt emission on the
+      response, activating the v1.3.0 receipt type end to end. No existing
+      schema, field, operation or enum changes; ordinary reads keep their
+      exact prior request and response shapes. Identity-out-of-request,
+      opaque-handle and connector-topology boundaries are preserved, and the
+      authority boundary of v1.3.0 stays frozen: the receipt proves what an
+      authorized source reported at a bounded time - AgentNexus never
+      interprets domain success, never asserts a business Outcome and never
+      touches the calling Agent platform's result graph.
+    changes:
+      - "New VerificationBinding block (action_ref + parameter_hash + postcondition_id + verification_need_id + data_class): binds the original executed Action and the declared PostconditionSpec/VerificationNeed pair a read verifies, carrying the need's declared business-semantic data-class expectation (VerificationNeed vocabulary; no parallel names). The block is all-or-nothing - every member is required and validated by the frozen v1.3.0 validators (opaque act_ handle, sha256 parameter hash)."
+      - "EvidenceReadRequest gains the OPTIONAL verification_binding member, coupled bidirectionally to the frozen verification purpose \"postcondition_verification\" (SDK PurposeVerification): a binding without that purpose and that purpose without a binding are BOTH rejected (detached verification reads fail closed)."
+      - "EvidenceReadResponse gains the OPTIONAL observation_receipt member: the signed runtime.ObservationReceipt (contract v1.3.0), emitted ONLY on an allowed verification-purpose read and never on ordinary reads or denials."
+      - "Authority-derivation rule frozen: observation authority tier, sealed source version, observed-at and freshness bounds are DERIVED SERVER-SIDE from the private registry binding and the service clock. They are never accepted from request JSON - no public request field can carry them and strict decoding rejects the unknown keys; a caller-declared expectation that conflicts with server-derived truth (data-class mismatch) fails closed as a deny."
+      - "Cache honesty extends to receipts: reads serve locate-staged content, so observed_at states the STAGING instant (the response as_of), never the mint instant, and fresh_until is observed_at plus the registry-declared freshness bound - a receipt never claims fresher than the staged reality. A verification-purpose read requires the explicit cached-read grant, the CURRENT source version and an unexpired freshness bound; otherwise it fails closed without minting."
+      - "Proto parity: agentnexus.evidence.v1 gains the VerificationBinding message and the append-only EvidenceReadRequest field 9 (verification_binding). The read-response envelope remains an OpenAPI/SDK surface (as since contract v1.2.0), so no response message is added."
+    artifacts:
+      - "api/openapi/gateway-runtime.yaml"
+      - "api/proto/agentnexus/evidence/v1/evidence.proto"
+    sdk:
+      module: "github.com/astraclawteam/agentnexus/sdk/go/runtime"
+      note: "adds PurposeVerification and VerificationBinding (evidence.go) plus the optional EvidenceReadRequest.verification_binding member with canonical detached-read rejection"
   - version: "1.3.0"
     date: "2026-07-14"
     breaking: false

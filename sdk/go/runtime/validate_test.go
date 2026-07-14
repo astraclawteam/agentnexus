@@ -503,6 +503,130 @@ func TestContractEvidenceReadRequest(t *testing.T) {
 	})
 }
 
+// validVerificationRead is the canonical verification-purpose read fixture
+// (contract v1.4.0, GA Task 0D amendment): the frozen verification purpose
+// plus the all-or-nothing verification binding block.
+func validVerificationRead() EvidenceReadRequest {
+	return EvidenceReadRequest{
+		RequestID:          "req-verify-1",
+		TraceID:            "trace-verify-1",
+		BusinessContextRef: "wc_0123456789abcdef",
+		EvidenceRef:        "evd_0123456789abcdef",
+		Purpose:            PurposeVerification,
+		ExpiresAt:          contractNow.Add(10 * time.Minute),
+		VerificationBinding: &VerificationBinding{
+			ActionRef:          "act_0123456789abcdef",
+			ParameterHash:      HashParameters([]byte(`{"po_number":"PO-1009"}`)),
+			PostconditionID:    "post-po-1009-approved",
+			VerificationNeedID: "verify-po-1009-approved",
+			DataClass:          "erp.purchase_order_registry",
+		},
+	}
+}
+
+// TestContractVerificationReadBinding freezes the OPTIONAL verification block
+// of EvidenceReadRequest (contract v1.4.0, GA Task 0D amendment). A
+// verification-purpose read binds the original executed Action (action_ref +
+// parameter_hash) and the declared PostconditionSpec/VerificationNeed pair it
+// verifies, carrying the need's declared business-semantic data-class
+// expectation (VerificationNeed vocabulary; no parallel names). The block is
+// all-or-nothing with the frozen verification purpose: a binding without the
+// verification purpose and a verification purpose without a binding are BOTH
+// rejected (detached verification reads). Source authority, source version,
+// observed-at and freshness are DERIVED SERVER-SIDE and can never be supplied
+// by the caller: no request field can represent them and the strict decoder
+// rejects the unknown keys.
+func TestContractVerificationReadBinding(t *testing.T) {
+	if PurposeVerification != "postcondition_verification" {
+		t.Fatalf("PurposeVerification = %q, want frozen literal \"postcondition_verification\"", PurposeVerification)
+	}
+	if err := validVerificationRead().Validate(); err != nil {
+		t.Fatalf("canonical verification read must validate, got %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		mutate  func(*EvidenceReadRequest)
+		wantErr string
+	}{
+		{"binding without the verification purpose is detached", func(r *EvidenceReadRequest) { r.Purpose = "payroll-review" }, "purpose"},
+		{"verification purpose without a binding is detached", func(r *EvidenceReadRequest) { r.VerificationBinding = nil }, "verification_binding"},
+		{"missing action binding", func(r *EvidenceReadRequest) { r.VerificationBinding.ActionRef = "" }, "action_ref"},
+		{"non-opaque action binding", func(r *EvidenceReadRequest) { r.VerificationBinding.ActionRef = "action-9" }, "action_ref"},
+		{"foreign-prefix action binding", func(r *EvidenceReadRequest) { r.VerificationBinding.ActionRef = "rcp_0123456789abcdef" }, "action_ref"},
+		{"missing parameter hash binding", func(r *EvidenceReadRequest) { r.VerificationBinding.ParameterHash = "" }, "parameter_hash"},
+		{"malformed parameter hash binding", func(r *EvidenceReadRequest) { r.VerificationBinding.ParameterHash = "sha256:nothex" }, "parameter_hash"},
+		{"missing postcondition binding", func(r *EvidenceReadRequest) { r.VerificationBinding.PostconditionID = "" }, "postcondition_id"},
+		{"missing verification need binding", func(r *EvidenceReadRequest) { r.VerificationBinding.VerificationNeedID = "" }, "verification_need_id"},
+		{"missing declared data class expectation", func(r *EvidenceReadRequest) { r.VerificationBinding.DataClass = "" }, "data_class"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := validVerificationRead()
+			binding := *request.VerificationBinding
+			request.VerificationBinding = &binding
+			tc.mutate(&request)
+			mustContainError(t, request.Validate(), tc.wantErr)
+		})
+	}
+
+	// Forged observation metadata: authority, observed-at, freshness and
+	// source version are server-derived truth. They are not representable in
+	// the request type, so the strict decoder rejects every attempt to supply
+	// or override them as an unknown key.
+	t.Run("caller-supplied observation authority and freshness are rejected", func(t *testing.T) {
+		canonical, err := json.Marshal(validVerificationRead())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeEvidenceReadRequest(canonical); err != nil {
+			t.Fatalf("canonical verification read JSON must decode, got %v", err)
+		}
+		forge := func(t *testing.T, raw []byte, oldFragment, newFragment string) []byte {
+			t.Helper()
+			forged := strings.Replace(string(raw), oldFragment, newFragment, 1)
+			if forged == string(raw) {
+				t.Fatalf("fixture fragment %q not found in %s", oldFragment, raw)
+			}
+			return []byte(forged)
+		}
+		for name, fragment := range map[string]string{
+			"authority in the binding":      `"action_ref":"act_0123456789abcdef","authority":"system_of_record"`,
+			"observed_at in the binding":    `"action_ref":"act_0123456789abcdef","observed_at":"2026-07-13T10:00:00Z"`,
+			"fresh_until in the binding":    `"action_ref":"act_0123456789abcdef","fresh_until":"2027-01-01T00:00:00Z"`,
+			"source_version in the binding": `"action_ref":"act_0123456789abcdef","source_version":99`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				forged := forge(t, canonical, `"action_ref":"act_0123456789abcdef"`, fragment)
+				if _, err := DecodeEvidenceReadRequest(forged); err == nil {
+					t.Fatal("caller-supplied observation metadata must be rejected by strict decoding")
+				}
+			})
+		}
+		for name, fragment := range map[string]string{
+			"authority on the envelope":   `"request_id":"req-verify-1","authority":"system_of_record"`,
+			"observed_at on the envelope": `"request_id":"req-verify-1","observed_at":"2026-07-13T10:00:00Z"`,
+			"fresh_until on the envelope": `"request_id":"req-verify-1","fresh_until":"2027-01-01T00:00:00Z"`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				forged := forge(t, canonical, `"request_id":"req-verify-1"`, fragment)
+				if _, err := DecodeEvidenceReadRequest(forged); err == nil {
+					t.Fatal("caller-supplied observation metadata must be rejected by strict decoding")
+				}
+			})
+		}
+	})
+
+	t.Run("ordinary reads stay untouched", func(t *testing.T) {
+		request := validVerificationRead()
+		request.VerificationBinding = nil
+		request.Purpose = "read the approver chain evidence"
+		if err := request.Validate(); err != nil {
+			t.Fatalf("ordinary evidence read must stay valid without a verification binding, got %v", err)
+		}
+	})
+}
+
 func TestContractBuildParametersMarshalStableHashing(t *testing.T) {
 	// HTML-relevant bytes are the trap: encoding/json re-emits <, > and & as
 	// \u-escapes when the enclosing request is marshaled, so only
@@ -783,9 +907,9 @@ func TestContractNoTrustedIdentityFieldsInTypes(t *testing.T) {
 	types := []any{
 		PrincipalContext{}, Constraints{}, DataNeed{}, EvidenceRequest{}, EvidenceReadRequest{},
 		EvidenceHandle{}, BusinessCapabilityRequest{}, ActionRequest{}, Action{}, Precondition{},
-		PostconditionSpec{}, VerificationNeed{}, RiskDecision{}, Signature{}, ApprovalPlanRef{},
-		ApprovalRequest{}, ApprovalEvidence{}, StepGrant{}, ActionReceipt{}, ObservationReceipt{},
-		AuditEvent{},
+		PostconditionSpec{}, VerificationNeed{}, VerificationBinding{}, RiskDecision{}, Signature{},
+		ApprovalPlanRef{}, ApprovalRequest{}, ApprovalEvidence{}, StepGrant{}, ActionReceipt{},
+		ObservationReceipt{}, AuditEvent{},
 	}
 	forbidden := map[string]bool{
 		"enterprise_id": true, "actor_user_id": true, "connector_instance_id": true,

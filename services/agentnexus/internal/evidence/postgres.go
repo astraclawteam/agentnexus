@@ -36,6 +36,18 @@ func (s *PostgresStore) UpsertSourceBinding(ctx context.Context, binding SourceB
 	if s == nil || s.pool == nil {
 		return SourceBinding{}, ErrUnavailable
 	}
+	// GA Task 0D amendment: the observation-authority declaration
+	// (AuthorityTier/FreshnessBound) has no durable column yet - migration
+	// slots 000009-000011 are reserved for Tasks 0E/0F/0G, so extending
+	// evidence_source_bindings is deferred to the task that next opens a
+	// slot. Persisting the row while silently DROPPING the declaration would
+	// be a silent degradation (reads would later fail closed with no hint of
+	// why), so the store refuses EXPLICITLY: authority-declared bindings are
+	// memory-registry-only until the reserved-slot migration lands.
+	if binding.AuthorityTier != "" || binding.FreshnessBound != 0 {
+		return SourceBinding{}, errors.Join(ErrUnavailable, errors.New(
+			"observation-authority declarations cannot be persisted yet: migration slots 000009-000011 are reserved for Tasks 0E/0F/0G and evidence_source_bindings has no authority columns; verification-purpose reads over this store fail closed by design"))
+	}
 	row, err := db.New(s.pool).UpsertEvidenceSourceBinding(ctx, db.UpsertEvidenceSourceBindingParams{
 		TenantRef:           binding.TenantRef,
 		ID:                  binding.ID,

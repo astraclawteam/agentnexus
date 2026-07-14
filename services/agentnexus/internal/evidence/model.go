@@ -97,9 +97,19 @@ type SourceBinding struct {
 	CachedReadAllowed bool
 	// RetentionTTL is the optional raw-content retention TTL (0 = none).
 	RetentionTTL time.Duration
-	Deleted      bool
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// AuthorityTier and FreshnessBound are the OPTIONAL observation-authority
+	// declaration of this source (GA Task 0D amendment): the frozen tier
+	// under which the source reports (AuthorityTier* literals) and the bound
+	// within which an observation staged from it may be treated as fresh.
+	// Declared together or not at all; without a declaration, verification-
+	// purpose reads of this data class fail CLOSED (the service never invents
+	// an authority and never accepts one from a caller). Internal registry
+	// state only - never part of the public contract surface.
+	AuthorityTier  string
+	FreshnessBound time.Duration
+	Deleted        bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // connectorBacked reports whether this binding resolves through the

@@ -97,7 +97,7 @@ func newGatewayEvidenceService(t *testing.T, source policy.SnapshotSource, recor
 // convention).
 func newEvidenceTestRouter(t *testing.T, sessions browserSessionResolver, service EvidenceService, audit BrowserAuditSink) http.Handler {
 	t.Helper()
-	handler, err := newEvidenceHandler("ent-1", service, audit)
+	handler, err := newEvidenceHandler("ent-1", service, audit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

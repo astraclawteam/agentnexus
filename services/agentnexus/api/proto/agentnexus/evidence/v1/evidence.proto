@@ -47,6 +47,22 @@ message EvidenceHandle {
   string expires_at = 4; // RFC 3339
 }
 
+// VerificationBinding is the verification block of a verification-purpose
+// read (contract v1.4.0, GA Task 0D amendment): it binds the original
+// executed Action (action_ref + parameter_hash) and the declared
+// PostconditionSpec/VerificationNeed pair the read verifies, carrying the
+// need's declared business-semantic data-class expectation. The block is
+// all-or-nothing and coupled to the frozen verification purpose
+// "postcondition_verification". Source authority, sealed source version,
+// observed-at and freshness are derived server-side and never travel here.
+message VerificationBinding {
+  string action_ref = 1;           // opaque act_* handle of the executed Action
+  string parameter_hash = 2;       // sha256:<64 hex> binding of the exact parameters
+  string postcondition_id = 3;     // declared PostconditionSpec under verification
+  string verification_need_id = 4; // declared VerificationNeed being satisfied
+  string data_class = 5;           // the need's declared business-semantic data class
+}
+
 // EvidenceReadRequest reads one located evidence handle under policy.
 message EvidenceReadRequest {
   string request_id = 1;
@@ -57,4 +73,9 @@ message EvidenceReadRequest {
   string purpose = 6;
   Constraints constraints = 7;
   string expires_at = 8; // RFC 3339
+  // Optional verification block (contract v1.4.0); present exactly when
+  // purpose is "postcondition_verification". An allowed verification-purpose
+  // read emits a signed agentnexus.actions.v1.ObservationReceipt on the
+  // response envelope (an OpenAPI/SDK surface, as since contract v1.2.0).
+  VerificationBinding verification_binding = 9;
 }

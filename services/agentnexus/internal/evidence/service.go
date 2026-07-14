@@ -42,6 +42,12 @@ const (
 	denySourceVersionStale  = "source_version_stale"
 	denyBindingRebound      = "binding_rebound"
 	denyCachedRead          = "cached_read_not_permitted"
+	// Verification-read denials (GA Task 0D amendment). Coded reasons only:
+	// the caller learns "deny", the lineage learns why.
+	denyNeedMismatch           = "verification_need_mismatch"
+	denyObservationUnsupported = "observation_authority_undeclared"
+	denyObservationStale       = "observation_freshness_expired"
+	denyActionUnbound          = "action_binding_mismatch"
 )
 
 const (
@@ -71,6 +77,14 @@ type Service struct {
 	newID           func(prefix string) string
 	maxContentBytes int
 	maxHandleTTL    time.Duration
+	// signer signs observation receipts (GA Task 0D amendment). Nil-guarded
+	// like the other production ports: unwired, verification-purpose reads
+	// fail CLOSED while ordinary reads are unaffected.
+	signer ObservationSigner
+	// actionBinding is the OPTIONAL GA Task 0F seam (authoritative
+	// Action-binding verification); nil until Task 0F wires it, without
+	// weakening the local checks.
+	actionBinding ActionBindingVerifier
 }
 
 // Option configures a Service.
@@ -114,6 +128,19 @@ func WithMaxHandleTTL(ttl time.Duration) Option {
 	}
 }
 
+// WithObservationSigner wires the observation signing port (GA Task 0D
+// amendment). Without it, verification-purpose reads fail closed.
+func WithObservationSigner(signer ObservationSigner) Option {
+	return func(s *Service) { s.signer = signer }
+}
+
+// WithActionBindingVerifier wires the GA Task 0F authoritative Action-binding
+// check into verification-purpose reads. Absent wiring, the service performs
+// the local self-consistency checks only (never a silent stand-in pass).
+func WithActionBindingVerifier(verifier ActionBindingVerifier) Option {
+	return func(s *Service) { s.actionBinding = verifier }
+}
+
 // NewService builds the evidence service over its ports.
 func NewService(store Store, objects ObjectStore, keys KeyProvider, source ContentSource, decider CapabilityDecider, audit AuditSink, opts ...Option) *Service {
 	svc := &Service{
@@ -151,14 +178,17 @@ type LocateResult struct {
 
 // ReadResult is the read outcome. A cached response ALWAYS states the source
 // version, the as-of time and the explicit served-from-cache marker; a deny
-// carries the decision only.
+// carries the decision only. ObservationReceipt is present ONLY on an
+// allowed verification-purpose read (GA Task 0D amendment) - ordinary reads
+// keep their exact prior shape.
 type ReadResult struct {
-	Decision        string         `json:"decision"`
-	Data            map[string]any `json:"data,omitempty"`
-	SourceVersion   int64          `json:"source_version,omitempty"`
-	AsOf            time.Time      `json:"as_of,omitzero"`
-	ServedFromCache bool           `json:"served_from_cache,omitempty"`
-	ContinuationRef string         `json:"continuation_ref,omitempty"`
+	Decision           string                      `json:"decision"`
+	Data               map[string]any              `json:"data,omitempty"`
+	SourceVersion      int64                       `json:"source_version,omitempty"`
+	AsOf               time.Time                   `json:"as_of,omitzero"`
+	ServedFromCache    bool                        `json:"served_from_cache,omitempty"`
+	ContinuationRef    string                      `json:"continuation_ref,omitempty"`
+	ObservationReceipt *runtime.ObservationReceipt `json:"observation_receipt,omitempty"`
 }
 
 // RegisterSourceBinding installs (or updates) one private semantic registry
@@ -171,6 +201,16 @@ func (s *Service) RegisterSourceBinding(ctx context.Context, binding SourceBindi
 		!canonical(binding.AccessCapability) || !canonical(binding.ResourceType) || !canonical(binding.ResourceID) ||
 		hasControlBytes(binding.SourceRef) || binding.RetentionTTL < 0 || binding.SourceVersion < 0 {
 		return SourceBinding{}, ErrInvalidRequest
+	}
+	// The observation-authority declaration is all-or-nothing: a frozen tier
+	// WITH a positive freshness bound, or neither. A tier without a bound
+	// (unbounded observations) and a bound without a tier (freshness under no
+	// declared authority) are both undeclarable, as is any non-frozen tier
+	// literal.
+	if binding.AuthorityTier != "" || binding.FreshnessBound != 0 {
+		if !validAuthorityTier(binding.AuthorityTier) || binding.FreshnessBound <= 0 {
+			return SourceBinding{}, errors.Join(ErrInvalidRequest, errors.New("observation authority declares a frozen tier together with a positive freshness bound"))
+		}
 	}
 	now := s.now()
 	if binding.ID == "" {
@@ -645,6 +685,26 @@ func (s *Service) Read(ctx context.Context, principal runtime.PrincipalContext, 
 		return ReadResult{}, errors.Join(ErrInvalidRequest, errors.New("purpose is not canonical"))
 	}
 
+	// Verification-purpose coupling (GA Task 0D amendment), re-enforced here
+	// even though the SDK validators already reject detached shapes (defense
+	// in depth: the service is also called directly). The signer nil-guard
+	// runs BEFORE any handle or content is touched: an unwired signing port
+	// fails the verification read closed with zero data egress.
+	declared := req.VerificationBinding
+	if declared != nil {
+		if req.Purpose != runtime.PurposeVerification {
+			return ReadResult{}, errors.Join(ErrInvalidRequest, errors.New("a verification binding requires the verification purpose"))
+		}
+		if err := validateVerificationBinding(*declared); err != nil {
+			return ReadResult{}, errors.Join(ErrInvalidRequest, err)
+		}
+		if s.signer == nil {
+			return ReadResult{}, errors.Join(ErrUnavailable, errors.New("observation signer is not wired; verification-purpose reads fail closed"))
+		}
+	} else if req.Purpose == runtime.PurposeVerification {
+		return ReadResult{}, errors.Join(ErrInvalidRequest, errors.New("the verification purpose requires a verification binding"))
+	}
+
 	handle, err := s.store.GetHandle(ctx, principal.TenantRef, req.EvidenceRef)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -707,6 +767,40 @@ func (s *Service) Read(ctx context.Context, principal runtime.PrincipalContext, 
 	case !binding.CachedReadAllowed || !handle.CachedReadAllowed:
 		// Serving staged (cached) content requires the EXPLICIT grant.
 		return s.denyRead(ctx, principal, req, handle, denyCachedRead), nil
+	}
+
+	// Verification-read binding checks (GA Task 0D amendment), all against
+	// SERVER-SIDE truth. Cache policy: in this plane every read serves
+	// locate-staged content, so the fresh source resolution IS the locate
+	// staging - a verification read may mint only under the explicit
+	// cached-read grant (enforced above), on the CURRENT source version
+	// (enforced above: a moved-on source denies), and while the staging
+	// instant is still inside the registry-declared freshness bound. The
+	// receipt then states observed_at = staging instant, never the mint
+	// instant, so it never claims fresher than reality.
+	if declared != nil {
+		switch {
+		case handle.DataClass != declared.DataClass:
+			// The caller-declared need expectation conflicts with the
+			// resolved read: a mismatched verification need fails closed.
+			return s.denyRead(ctx, principal, req, handle, denyNeedMismatch), nil
+		case !validAuthorityTier(binding.AuthorityTier) || binding.FreshnessBound <= 0:
+			// No declared observation authority to derive: the service never
+			// invents a tier and never accepts one from the caller.
+			return s.denyRead(ctx, principal, req, handle, denyObservationUnsupported), nil
+		case !now.Before(handle.StagedAt.Add(binding.FreshnessBound)):
+			// The staged observation aged past its declared freshness bound;
+			// minting would claim fresher than reality.
+			return s.denyRead(ctx, principal, req, handle, denyObservationStale), nil
+		}
+		if s.actionBinding != nil {
+			// GA Task 0F seam: the wired verifier is authoritative for the
+			// Action side of the binding (stored Action, parameter hash,
+			// declared postcondition/need membership).
+			if err := s.actionBinding.VerifyActionBinding(ctx, principal.TenantRef, *declared); err != nil {
+				return s.denyRead(ctx, principal, req, handle, denyActionUnbound), nil
+			}
+		}
 	}
 
 	// Re-evaluate the capability against the CURRENT sealed org version: an
@@ -786,7 +880,10 @@ func (s *Service) Read(ctx context.Context, principal runtime.PrincipalContext, 
 	page = projectRecords(page, req.Fields)
 
 	// The lineage append of an ALLOWED read is mandatory: no unaudited data
-	// egress.
+	// egress. A verification read records its declared binding in the same
+	// lineage entry (refs and ids only) and the entry's reference becomes the
+	// receipt's audit_ref_id, so the observation ref is generated first.
+	observationRef := ""
 	details := map[string]any{
 		"decision":             DecisionAllow,
 		"data_class":           handle.DataClass,
@@ -800,7 +897,18 @@ func (s *Service) Read(ctx context.Context, principal runtime.PrincipalContext, 
 	if continuationRef != "" {
 		details["continuation_ref"] = continuationRef
 	}
-	if _, err := s.audit.AppendEvidenceAudit(ctx, AuditEvent{
+	if declared != nil {
+		observationRef = s.newID(runtime.HandleObservation)
+		if !canonical(observationRef) {
+			return ReadResult{}, ErrUnavailable
+		}
+		details["action_ref"] = declared.ActionRef
+		details["postcondition_id"] = declared.PostconditionID
+		details["verification_need_id"] = declared.VerificationNeedID
+		details["observation_ref"] = observationRef
+		details["observation_authority"] = binding.AuthorityTier
+	}
+	auditRef, err := s.audit.AppendEvidenceAudit(ctx, AuditEvent{
 		TenantRef:    principal.TenantRef,
 		PrincipalRef: principal.PrincipalRef,
 		Action:       auditActionRead,
@@ -808,8 +916,30 @@ func (s *Service) Read(ctx context.Context, principal runtime.PrincipalContext, 
 		ResourceID:   handle.EvidenceRef,
 		TraceID:      req.TraceID,
 		Details:      details,
-	}); err != nil {
+	})
+	if err != nil || auditRef == "" {
 		return ReadResult{}, errors.Join(ErrUnavailable, errors.New("read lineage append failed"))
+	}
+
+	// Mint the signed observation receipt of an allowed verification read. A
+	// verification read that cannot produce its receipt fails CLOSED: the
+	// caller asked for a verified observation, not for bare data.
+	var receipt *runtime.ObservationReceipt
+	if declared != nil {
+		minted, err := s.mintObservationReceipt(ctx, observationRef, *declared, handle, binding, auditRef)
+		if err != nil {
+			return ReadResult{}, err
+		}
+		receipt = &minted
+		s.logger.InfoContext(ctx, "evidence.observation_minted",
+			slog.String("tenant_ref", principal.TenantRef),
+			slog.String("observation_ref", minted.ObservationRef),
+			slog.String("evidence_ref", minted.EvidenceRef),
+			slog.String("action_ref", minted.ActionRef),
+			slog.String("authority", minted.Authority),
+			slog.Int64("source_version", minted.SourceVersion),
+			slog.String("observation_hash", minted.ObservationHash),
+		)
 	}
 
 	s.logger.InfoContext(ctx, "evidence.read",
@@ -821,12 +951,13 @@ func (s *Service) Read(ctx context.Context, principal runtime.PrincipalContext, 
 		slog.String("decision", DecisionAllow),
 	)
 	return ReadResult{
-		Decision:        DecisionAllow,
-		Data:            map[string]any{"records": page},
-		SourceVersion:   handle.SourceVersion,
-		AsOf:            handle.StagedAt,
-		ServedFromCache: true,
-		ContinuationRef: continuationRef,
+		Decision:           DecisionAllow,
+		Data:               map[string]any{"records": page},
+		SourceVersion:      handle.SourceVersion,
+		AsOf:               handle.StagedAt,
+		ServedFromCache:    true,
+		ContinuationRef:    continuationRef,
+		ObservationReceipt: receipt,
 	}, nil
 }
 

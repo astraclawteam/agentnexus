@@ -575,6 +575,119 @@ func TestPublicContractParity(t *testing.T) {
 		}
 	})
 
+	// The verification-purpose read binding (contract v1.4.0, GA Task 0D
+	// amendment, deferral recorded in the task-0d handoff): an
+	// EvidenceReadRequest may carry ONE optional VerificationBinding block -
+	// the original executed Action (action_ref + parameter_hash) plus the
+	// declared PostconditionSpec/VerificationNeed pair and its data-class
+	// expectation (VerificationNeed vocabulary; no parallel names) - and an
+	// allowed verification-purpose read emits the signed ObservationReceipt
+	// on the response. The block is all-or-nothing (every member required);
+	// observation authority, source version, observed-at and freshness stay
+	// SERVER-DERIVED: no request property may carry them.
+	t.Run("VerificationReadBindsDeclaredNeedAndEmitsReceipt", func(t *testing.T) {
+		schemas := nestedMap(t, runtimeDoc, "components", "schemas")
+
+		// Proto mirror (append-only): the evidence plane carries the same
+		// request-side binding block. The read-response envelope remains an
+		// OpenAPI/SDK surface (as since contract v1.2.0), so no response
+		// message is mirrored.
+		raw, err := os.ReadFile(protoPath(filepath.Join("evidence", "v1", "evidence.proto")))
+		if err != nil {
+			t.Fatalf("evidence.proto missing: %v", err)
+		}
+		for _, token := range []string{
+			"message VerificationBinding",
+			"string action_ref = 1;",
+			"string parameter_hash = 2;",
+			"string postcondition_id = 3;",
+			"string verification_need_id = 4;",
+			"string data_class = 5;",
+			"VerificationBinding verification_binding = 9;",
+		} {
+			if !strings.Contains(string(raw), token) {
+				t.Errorf("evidence.proto is missing frozen declaration %q", token)
+			}
+		}
+
+		readRequest, ok := schemas["EvidenceReadRequest"].(map[string]any)
+		if !ok {
+			t.Fatal("EvidenceReadRequest schema missing")
+		}
+		requestProperties, requestRequired := composedSchema(t, runtimeDoc, readRequest)
+		if bindingProperty, ok := requestProperties["verification_binding"].(map[string]any); !ok {
+			t.Error("EvidenceReadRequest must declare the optional verification_binding block")
+		} else {
+			if bindingProperty["$ref"] != "#/components/schemas/VerificationBinding" {
+				t.Errorf("verification_binding = %v, want $ref VerificationBinding", bindingProperty["$ref"])
+			}
+			if requestRequired["verification_binding"] {
+				t.Error("verification_binding is OPTIONAL on EvidenceReadRequest (required only with the verification purpose; the SDK rules are normative)")
+			}
+		}
+		for _, serverDerived := range []string{"authority", "observed_at", "fresh_until", "source_version"} {
+			if _, exists := requestProperties[serverDerived]; exists {
+				t.Errorf("EvidenceReadRequest must not accept server-derived observation metadata %q from the caller", serverDerived)
+			}
+		}
+
+		readResponse, ok := schemas["EvidenceReadResponse"].(map[string]any)
+		if !ok {
+			t.Fatal("EvidenceReadResponse schema missing")
+		}
+		responseProperties, responseRequired := composedSchema(t, runtimeDoc, readResponse)
+		if receiptProperty, ok := responseProperties["observation_receipt"].(map[string]any); !ok {
+			t.Error("EvidenceReadResponse must declare the optional observation_receipt emission")
+		} else {
+			receiptAllOf, _ := receiptProperty["allOf"].([]any)
+			receiptRef := ""
+			if len(receiptAllOf) == 1 {
+				if entry, ok := receiptAllOf[0].(map[string]any); ok {
+					receiptRef, _ = entry["$ref"].(string)
+				}
+			}
+			if receiptRef != "#/components/schemas/ObservationReceipt" {
+				t.Errorf("observation_receipt must reference the frozen ObservationReceipt schema, got %v", receiptProperty)
+			}
+			if responseRequired["observation_receipt"] {
+				t.Error("observation_receipt is emitted ONLY on allowed verification-purpose reads and must stay optional")
+			}
+		}
+
+		schema, ok := schemas["VerificationBinding"].(map[string]any)
+		if !ok {
+			t.Fatal("VerificationBinding schema missing from gateway-runtime.yaml")
+		}
+		frozen := []string{"action_ref", "parameter_hash", "postcondition_id", "verification_need_id", "data_class"}
+		properties, required := composedSchema(t, runtimeDoc, schema)
+		var gotProperties []string
+		for name := range properties {
+			gotProperties = append(gotProperties, name)
+		}
+		sort.Strings(gotProperties)
+		wantFrozen := append([]string(nil), frozen...)
+		sort.Strings(wantFrozen)
+		if !equalStrings(gotProperties, wantFrozen) {
+			t.Errorf("VerificationBinding properties = %v, want frozen set %v", gotProperties, wantFrozen)
+		}
+		if gotRequired := sortedNames(required); !equalStrings(gotRequired, wantFrozen) {
+			t.Errorf("VerificationBinding required = %v, want the all-or-nothing block %v", gotRequired, wantFrozen)
+		}
+		actionRef := requireProperty(t, runtimeDoc, properties, "action_ref")
+		if pattern, _ := actionRef["pattern"].(string); !strings.HasPrefix(pattern, "^act_") {
+			t.Errorf("VerificationBinding action_ref pattern = %q, want an opaque act_ handle", pattern)
+		}
+		parameterHash := requireProperty(t, runtimeDoc, properties, "parameter_hash")
+		if parameterHash["pattern"] != sha256RefPattern {
+			t.Errorf("VerificationBinding parameter_hash pattern = %v, want %q", parameterHash["pattern"], sha256RefPattern)
+		}
+		for _, serverDerived := range []string{"authority", "observed_at", "fresh_until", "source_version", "source"} {
+			if _, exists := properties[serverDerived]; exists {
+				t.Errorf("VerificationBinding must not accept server-derived observation metadata %q from the caller", serverDerived)
+			}
+		}
+	})
+
 	t.Run("NoVendorSpecificNames", func(t *testing.T) {
 		for name, text := range texts {
 			lower := strings.ToLower(text)

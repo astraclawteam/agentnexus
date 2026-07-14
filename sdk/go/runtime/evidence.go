@@ -97,6 +97,63 @@ func (r EvidenceRequest) Validate() error {
 	return nil
 }
 
+// PurposeVerification is the frozen purpose of a verification-purpose read
+// (contract v1.4.0, GA Task 0D amendment). A read under this purpose carries
+// the all-or-nothing VerificationBinding block and, when allowed, produces a
+// signed ObservationReceipt. The coupling is bidirectional: a
+// VerificationBinding without this purpose and this purpose without a
+// VerificationBinding are BOTH rejected (detached verification reads).
+const PurposeVerification = "postcondition_verification"
+
+// VerificationBinding is the OPTIONAL verification block of an
+// EvidenceReadRequest (contract v1.4.0, GA Task 0D amendment): it binds the
+// original executed Action (action_ref + parameter_hash) and the declared
+// PostconditionSpec/VerificationNeed pair this read verifies, and carries the
+// need's declared business-semantic data-class expectation (VerificationNeed
+// vocabulary - postcondition_id/data_class - plus the ObservationReceipt
+// cross-reference name verification_need_id; no parallel vocabulary).
+//
+// Authority boundary: the block declares WHAT the caller is verifying, never
+// how trustworthy the observation is. Source authority, sealed source
+// version, observed-at and freshness are DERIVED SERVER-SIDE and can never be
+// supplied here - no field of this type can represent them, and the strict
+// request decoder rejects the unknown keys. The resulting ObservationReceipt
+// proves what an authorized source reported at a bounded time; AgentNexus
+// never interprets domain success and never asserts a business Outcome.
+type VerificationBinding struct {
+	// ActionRef and ParameterHash bind the original executed Action.
+	ActionRef     string `json:"action_ref"`
+	ParameterHash string `json:"parameter_hash"`
+	// PostconditionID references the declared PostconditionSpec under
+	// verification; VerificationNeedID references the declared
+	// VerificationNeed being satisfied.
+	PostconditionID    string `json:"postcondition_id"`
+	VerificationNeedID string `json:"verification_need_id"`
+	// DataClass is the need's declared business-semantic data class; it must
+	// match the data class of the evidence handle actually read (mismatched
+	// verification needs are rejected).
+	DataClass string `json:"data_class"`
+}
+
+// Validate applies the canonical VerificationBinding rules: the block is
+// all-or-nothing, so every member is required and validated by the frozen
+// v1.3.0 validators.
+func (b VerificationBinding) Validate() error {
+	if err := ValidateHandle(b.ActionRef, HandleAction); err != nil {
+		return fieldErrorf("action_ref", "%v", err)
+	}
+	if err := ValidateSHA256Ref(b.ParameterHash); err != nil {
+		return fieldErrorf("parameter_hash", "%v", err)
+	}
+	if err := requireNonEmpty("postcondition_id", b.PostconditionID); err != nil {
+		return err
+	}
+	if err := requireNonEmpty("verification_need_id", b.VerificationNeedID); err != nil {
+		return err
+	}
+	return requireNonEmpty("data_class", b.DataClass)
+}
+
 // EvidenceReadRequest reads one located evidence handle under policy. It is
 // the SDK expression of the /v1/runtime/read operation and of
 // agentnexus.evidence.v1.EvidenceReadRequest.
@@ -108,10 +165,15 @@ type EvidenceReadRequest struct {
 	Fields             []string     `json:"fields,omitempty"`
 	Purpose            string       `json:"purpose"`
 	Constraints        *Constraints `json:"constraints,omitempty"`
-	ExpiresAt          time.Time    `json:"expires_at"`
+	// VerificationBinding is the OPTIONAL verification block (contract
+	// v1.4.0): present exactly when Purpose is PurposeVerification.
+	VerificationBinding *VerificationBinding `json:"verification_binding,omitempty"`
+	ExpiresAt           time.Time            `json:"expires_at"`
 }
 
-// Validate applies the canonical EvidenceReadRequest rules.
+// Validate applies the canonical EvidenceReadRequest rules, including the
+// bidirectional coupling of the verification block and the frozen
+// verification purpose (a detached verification read is rejected).
 func (r EvidenceReadRequest) Validate() error {
 	if err := validateRequestID(r.RequestID); err != nil {
 		return err
@@ -132,6 +194,16 @@ func (r EvidenceReadRequest) Validate() error {
 		if err := r.Constraints.Validate(); err != nil {
 			return fieldErrorf("constraints", "%v", err)
 		}
+	}
+	if r.VerificationBinding != nil {
+		if err := r.VerificationBinding.Validate(); err != nil {
+			return fieldErrorf("verification_binding", "%v", err)
+		}
+		if r.Purpose != PurposeVerification {
+			return fieldErrorf("purpose", "a verification binding requires the frozen verification purpose %q; a detached verification binding is rejected", PurposeVerification)
+		}
+	} else if r.Purpose == PurposeVerification {
+		return fieldErrorf("verification_binding", "the verification purpose %q requires a verification binding; a detached verification purpose is rejected", PurposeVerification)
 	}
 	if r.ExpiresAt.IsZero() {
 		return fieldErrorf("expires_at", "is required")

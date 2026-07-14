@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AgentNexus Gateway Runtime API
-  version: 1.3.0
+  version: 1.4.0
   description: >-
     Vendor-neutral Agent runtime contract v1 (ELC-NEXUS-1 candidate).
     Trusted identity — tenant, actor, organization snapshot, trust class,
@@ -133,7 +133,7 @@ paths:
     post:
       operationId: readRuntimeEvidence
       summary: Read one located evidence handle through ticketed policy enforcement.
-      description: Reads are served from staged, encrypted evidence bound at locate time. An allowed response always states source_version, as_of and served_from_cache — a cached read never masquerades as real-time data — and invalidated, revoked, expired or source-deleted handles fail closed as a deny decision.
+      description: Reads are served from staged, encrypted evidence bound at locate time. An allowed response always states source_version, as_of and served_from_cache — a cached read never masquerades as real-time data — and invalidated, revoked, expired or source-deleted handles fail closed as a deny decision. A verification-purpose read (purpose "postcondition_verification" with the all-or-nothing verification_binding block) additionally emits a signed observation_receipt whose source authority, sealed source version, observed-at and freshness bounds are derived server-side from the private registry binding and clock — never from the caller — with observed_at stating the staging instant (as_of), so a receipt never claims fresher than the staged reality.
       security: [{browserSession: []}, {caseTicket: []}]
       requestBody:
         required: true
@@ -498,6 +498,29 @@ components:
         evidence:
           type: array
           items: {$ref: '#/components/schemas/EvidenceHandle'}
+    VerificationBinding:
+      type: object
+      additionalProperties: false
+      required: [action_ref, parameter_hash, postcondition_id, verification_need_id, data_class]
+      description: >-
+        Verification block of a verification-purpose read (contract v1.4.0,
+        GA Task 0D amendment): binds the original executed Action (action_ref
+        + parameter_hash) and the declared PostconditionSpec/VerificationNeed
+        pair this read verifies, carrying the need's declared
+        business-semantic data-class expectation. The block is all-or-nothing
+        (every member required) and coupled bidirectionally to the frozen
+        verification purpose "postcondition_verification"; a detached
+        verification binding or a detached verification purpose is rejected.
+        Source authority, sealed source version, observed-at and freshness
+        are DERIVED SERVER-SIDE from the private registry binding and clock;
+        they are never accepted from the caller (unknown fields are rejected
+        server-side per the SDK rules).
+      properties:
+        action_ref: {$ref: '#/components/schemas/ActionRef'}
+        parameter_hash: {$ref: '#/components/schemas/Sha256Ref'}
+        postcondition_id: {type: string, minLength: 1, maxLength: 128, description: The declared PostconditionSpec this read verifies.}
+        verification_need_id: {type: string, minLength: 1, maxLength: 128, description: The declared VerificationNeed this read satisfies.}
+        data_class: {type: string, minLength: 1, maxLength: 256, description: The need's declared business-semantic data class; must match the data class of the evidence handle actually read (mismatched verification needs are rejected). Never a connector table, API path or instance.}
     EvidenceReadRequest:
       allOf:
         - $ref: '#/components/schemas/RequestEnvelope'
@@ -509,6 +532,7 @@ components:
             fields: {type: array, items: {type: string, maxLength: 256}}
             purpose: {type: string, minLength: 1, maxLength: 1024}
             constraints: {$ref: '#/components/schemas/Constraints'}
+            verification_binding: {$ref: '#/components/schemas/VerificationBinding'}
             expires_at: {type: string, format: date-time}
     EvidenceReadResponse:
       type: object
@@ -537,6 +561,19 @@ components:
           allOf:
             - $ref: '#/components/schemas/EvidenceRef'
           description: Opaque handle of the next page when constraints.max_results bounded this read; absence means the result is complete (results are never silently truncated).
+        observation_receipt:
+          allOf:
+            - $ref: '#/components/schemas/ObservationReceipt'
+          description: >-
+            Signed ObservationReceipt emitted ONLY on an allowed
+            verification-purpose read (contract v1.4.0, GA Task 0D
+            amendment); absent on every ordinary read and on every deny.
+            Authority, sealed source version, observed_at and fresh_until are
+            server-derived; observed_at states the staging instant (as_of) so
+            the receipt never claims fresher than the staged reality. The
+            receipt proves what an authorized source reported at a bounded
+            time - AgentNexus never interprets domain success and never
+            asserts a business Outcome.
     RiskLevel:
       type: string
       enum:

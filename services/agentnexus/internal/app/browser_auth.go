@@ -265,7 +265,10 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 	}
 	var evidenceRuntime *evidenceHandler
 	if deps.Evidence != nil {
-		evidenceRuntime, err = newEvidenceHandler(deps.Config.EnterpriseID, deps.Evidence, deps.Audit)
+		// No logger is injected through BrowserAuthDependencies yet; nil
+		// selects the constructor's explicit slog.Default() fallback through
+		// the single handler-logger seam.
+		evidenceRuntime, err = newEvidenceHandler(deps.Config.EnterpriseID, deps.Evidence, deps.Audit, nil)
 		if err != nil {
 			return nil, err
 		}

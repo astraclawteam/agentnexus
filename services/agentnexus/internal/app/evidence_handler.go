@@ -31,13 +31,20 @@ type evidenceHandler struct {
 	enterpriseID string
 	service      EvidenceService
 	audit        BrowserAuditSink
+	logger       *slog.Logger
 }
 
-func newEvidenceHandler(enterpriseID string, service EvidenceService, audit BrowserAuditSink) (*evidenceHandler, error) {
+// newEvidenceHandler builds the handler. The logger is the single injection
+// seam for handler-side observability (0D review follow-up: no more implicit
+// slog.Default() at log sites); nil falls back to slog.Default() explicitly.
+func newEvidenceHandler(enterpriseID string, service EvidenceService, audit BrowserAuditSink, logger *slog.Logger) (*evidenceHandler, error) {
 	if enterpriseID == "" || service == nil {
 		return nil, errors.New("evidence dependencies incomplete")
 	}
-	return &evidenceHandler{enterpriseID: enterpriseID, service: service, audit: audit}, nil
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &evidenceHandler{enterpriseID: enterpriseID, service: service, audit: audit, logger: logger}, nil
 }
 
 func (h *evidenceHandler) register(mux *http.ServeMux) {
@@ -65,7 +72,7 @@ func (h *evidenceHandler) locate(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.service.Locate(r.Context(), trustedCtx.Principal, authz, request)
 	if err != nil {
-		writeEvidenceServiceError(w, r, err)
+		h.writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -91,12 +98,14 @@ func (h *evidenceHandler) read(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.service.Read(r.Context(), trustedCtx.Principal, authz, request)
 	if err != nil {
-		writeEvidenceServiceError(w, r, err)
+		h.writeServiceError(w, r, err)
 		return
 	}
 	// The read envelope: a deny carries the decision only; an allow always
 	// states its cache provenance (source version, as-of time, explicit
-	// served-from-cache marker) — never masquerading as real-time data.
+	// served-from-cache marker) — never masquerading as real-time data. The
+	// signed observation receipt rides ONLY an allowed verification-purpose
+	// read (contract v1.4.0); ordinary reads keep their exact prior shape.
 	payload := map[string]any{"decision": result.Decision}
 	if result.Decision == evidence.DecisionAllow {
 		payload["data"] = result.Data
@@ -105,6 +114,9 @@ func (h *evidenceHandler) read(w http.ResponseWriter, r *http.Request) {
 		payload["served_from_cache"] = result.ServedFromCache
 		if result.ContinuationRef != "" {
 			payload["continuation_ref"] = result.ContinuationRef
+		}
+		if result.ObservationReceipt != nil {
+			payload["observation_receipt"] = result.ObservationReceipt
 		}
 	}
 	writeJSON(w, http.StatusOK, payload)
@@ -159,11 +171,12 @@ func (h *evidenceHandler) rejectDecode(w http.ResponseWriter, r *http.Request, t
 	writeEvidenceError(w, http.StatusBadRequest, "invalid_request")
 }
 
-// writeEvidenceServiceError maps service errors onto fixed opaque envelopes.
-// The joined internal cause is LOGGED before it is discarded (it carries only
-// sentinels, refs and coded reasons — never content or source topology, which
-// the service-level canary tests assert on the same error texts).
-func writeEvidenceServiceError(w http.ResponseWriter, r *http.Request, err error) {
+// writeServiceError maps service errors onto fixed opaque envelopes. The
+// joined internal cause is LOGGED (through the handler's injected logger)
+// before it is discarded — it carries only sentinels, refs and coded reasons,
+// never content or source topology, which the service-level canary tests
+// assert on the same error texts.
+func (h *evidenceHandler) writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	status, reason := http.StatusServiceUnavailable, "evidence_unavailable"
 	switch {
 	case errors.Is(err, evidence.ErrInvalidRequest):
@@ -175,7 +188,7 @@ func writeEvidenceServiceError(w http.ResponseWriter, r *http.Request, err error
 	case errors.Is(err, evidence.ErrDenied):
 		status, reason = http.StatusForbidden, "evidence_denied"
 	}
-	slog.WarnContext(r.Context(), "evidence.request_failed",
+	h.logger.WarnContext(r.Context(), "evidence.request_failed",
 		slog.String("path", r.URL.Path),
 		slog.Int("status", status),
 		slog.String("reason", reason),
