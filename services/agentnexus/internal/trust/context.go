@@ -36,10 +36,11 @@ import (
 type Source string
 
 const (
-	SourceBrowserSession    Source = "browser_session"
-	SourceServiceCredential Source = "service_credential"
-	SourceAccessTicket      Source = "access_ticket"
-	SourceStepGrant         Source = "step_grant"
+	SourceBrowserSession     Source = "browser_session"
+	SourceBrowserAccessToken Source = "browser_access_token"
+	SourceServiceCredential  Source = "service_credential"
+	SourceAccessTicket       Source = "access_ticket"
+	SourceStepGrant          Source = "step_grant"
 )
 
 // OriginHeader declares the calling Agent product. It is UNVERIFIED trace
@@ -131,12 +132,25 @@ const (
 type SessionIdentity struct {
 	TenantRef    string
 	PrincipalRef string
-	ExpiresAt    time.Time
+	// ClientRef is populated for browser access tokens with the configured
+	// confidential console client that received the token. Cookie sessions
+	// leave it empty and use the deployment's default browser client class.
+	ClientRef         string
+	ExpiresAt         time.Time
+	IdleExpiresAt     time.Time
+	AbsoluteExpiresAt time.Time
 }
 
 // BrowserSessionVerifier verifies an opaque browser-session token.
 type BrowserSessionVerifier interface {
 	VerifyBrowserSession(context.Context, string) (SessionIdentity, error)
+}
+
+// BrowserAccessTokenVerifier verifies an opaque, revocable browser BFF token.
+// It returns the same member identity as the bound browser session while
+// keeping the credential source explicit for authorization and audit policy.
+type BrowserAccessTokenVerifier interface {
+	VerifyBrowserAccessToken(context.Context, string) (SessionIdentity, error)
 }
 
 // TicketIdentity is a verified Access Ticket (Case Ticket) identity.
@@ -223,6 +237,20 @@ type Context struct {
 	// enterprise connector capabilities. AstraClaw/Xiaozhi origins and
 	// service credentials never may.
 	ConnectorCapabilityAllowed bool
+	// BrowserIdleExpiresAt and BrowserAbsoluteExpiresAt are populated only
+	// for browser session / BFF-token contexts. They let browser-profile
+	// handlers use the identity resolved once at ingress without re-reading
+	// the credential store.
+	BrowserIdleExpiresAt     time.Time
+	BrowserAbsoluteExpiresAt time.Time
+}
+
+// BrowserCredential is the already-verified opaque browser credential bound
+// to a request. Token is returned only to the browser-session revocation
+// handler and must never be logged or persisted.
+type BrowserCredential struct {
+	Source Source
+	Token  string
 }
 
 // forgedIdentityHeaders are request headers that would smuggle trusted
@@ -300,13 +328,14 @@ type ResolverConfig struct {
 	// SessionCookieName overrides DefaultSessionCookieName.
 	SessionCookieName string
 	// BrowserClientRef overrides DefaultBrowserClientRef.
-	BrowserClientRef string
-	Sessions         BrowserSessionVerifier
-	AccessTickets    AccessTicketVerifier
-	StepGrants       StepGrantVerifier
-	Services         ServiceCredentialVerifier
-	OrgSnapshots     OrgSnapshotResolver
-	Audit            AuditSink
+	BrowserClientRef    string
+	Sessions            BrowserSessionVerifier
+	BrowserAccessTokens BrowserAccessTokenVerifier
+	AccessTickets       AccessTicketVerifier
+	StepGrants          StepGrantVerifier
+	Services            ServiceCredentialVerifier
+	OrgSnapshots        OrgSnapshotResolver
+	Audit               AuditSink
 	// Protected reports whether a request requires a trusted context. Only
 	// protected requests are resolved; forged-identity header screening
 	// covers every request.
@@ -406,6 +435,77 @@ func FromRequest(req *http.Request) (Context, error) {
 	return bound.ctx, nil
 }
 
+// ResolveBrowserRequest applies the exact same conflict, syntax, tenant,
+// expiry and verifier rules as ingress middleware and returns the verified
+// browser credential needed by the session profile/logout endpoints. Those
+// endpoints are intentionally outside the generic protected-path middleware
+// because they must clear a rejected session cookie and logout needs the
+// verified opaque token for revocation.
+func (r *Resolver) ResolveBrowserRequest(req *http.Request) (Context, BrowserCredential, error) {
+	if r == nil || req == nil {
+		return Context{}, BrowserCredential{}, ErrUnauthenticated
+	}
+	if header, forged := forgedIdentityHeader(req.Header); forged {
+		r.audit(req, Rejection{Reason: ReasonForgedIdentityHeader, Field: header, Path: req.URL.Path})
+		return Context{}, BrowserCredential{}, ErrForgedIdentity
+	}
+	origin, ok := declaredOrigin(req.Header)
+	if !ok {
+		reason := ReasonMalformedOrigin
+		if len(req.Header.Values(OriginHeader)) > 1 {
+			reason = ReasonConflictingOrigin
+		}
+		r.audit(req, Rejection{Reason: reason, Field: OriginHeader, Path: req.URL.Path})
+		return Context{}, BrowserCredential{}, ErrForgedIdentity
+	}
+	resolved, err := r.resolve(req, origin)
+	if err != nil {
+		// Logout is a capability-reducing operation and must be retryable after
+		// a previous attempt revoked the session but failed to append audit.
+		// Return only a canonical single Bearer envelope; the caller must still
+		// validate it against the server-side token binding before mutation.
+		if credential, ok := browserCredentialValue(req, r.cfg.SessionCookieName, SourceBrowserAccessToken); ok {
+			return Context{}, credential, err
+		}
+		return Context{}, BrowserCredential{}, err
+	}
+	credential, ok := browserCredentialValue(req, r.cfg.SessionCookieName, resolved.Source)
+	if !ok {
+		r.audit(req, Rejection{Source: resolved.Source, Reason: ReasonCredentialRejected, Path: req.URL.Path, Origin: origin})
+		return Context{}, BrowserCredential{}, ErrInvalidCredential
+	}
+	return resolved, credential, nil
+}
+
+func browserCredentialValue(req *http.Request, cookieName string, source Source) (BrowserCredential, bool) {
+	switch source {
+	case SourceBrowserSession:
+		cookies := make([]*http.Cookie, 0, 1)
+		for _, cookie := range req.Cookies() {
+			if cookie.Name == cookieName {
+				cookies = append(cookies, cookie)
+			}
+		}
+		if len(cookies) != 1 || !opaqueCredential(cookies[0].Value) {
+			return BrowserCredential{}, false
+		}
+		return BrowserCredential{Source: source, Token: cookies[0].Value}, true
+	case SourceBrowserAccessToken:
+		values := req.Header.Values("Authorization")
+		if len(values) != 1 {
+			return BrowserCredential{}, false
+		}
+		scheme, value, found := strings.Cut(values[0], " ")
+		value = strings.TrimSpace(value)
+		if !found || !strings.EqualFold(scheme, "Bearer") || !opaqueCredential(value) || strings.ContainsAny(value, " \t") {
+			return BrowserCredential{}, false
+		}
+		return BrowserCredential{Source: source, Token: value}, true
+	default:
+		return BrowserCredential{}, false
+	}
+}
+
 func (r *Resolver) resolve(req *http.Request, origin string) (Context, error) {
 	var sessionCookies []*http.Cookie
 	for _, cookie := range req.Cookies() {
@@ -443,14 +543,16 @@ func (r *Resolver) resolveSession(req *http.Request, origin, token string) (Cont
 		return Context{}, r.credentialFailure(req, SourceBrowserSession, origin, err)
 	}
 	return r.principalContext(req, principalInput{
-		source:       SourceBrowserSession,
-		tenantRef:    identity.TenantRef,
-		principalRef: identity.PrincipalRef,
-		clientRef:    r.cfg.BrowserClientRef,
-		releaseRef:   UnregisteredReleaseRef,
-		expiresAt:    identity.ExpiresAt,
-		expiring:     true,
-		origin:       origin,
+		source:                   SourceBrowserSession,
+		tenantRef:                identity.TenantRef,
+		principalRef:             identity.PrincipalRef,
+		clientRef:                r.cfg.BrowserClientRef,
+		releaseRef:               UnregisteredReleaseRef,
+		expiresAt:                identity.ExpiresAt,
+		browserIdleExpiresAt:     identity.IdleExpiresAt,
+		browserAbsoluteExpiresAt: identity.AbsoluteExpiresAt,
+		expiring:                 true,
+		origin:                   origin,
 	})
 }
 
@@ -488,6 +590,35 @@ func (r *Resolver) resolveAuthorization(req *http.Request, origin, header string
 			expiresAt:     identity.ExpiresAt,
 			expiring:      true,
 			origin:        origin,
+		})
+	case strings.EqualFold(scheme, "Bearer"):
+		if r.cfg.BrowserAccessTokens == nil {
+			r.audit(req, Rejection{Reason: ReasonSourceNotConfigured, Source: SourceBrowserAccessToken, Path: req.URL.Path, Origin: origin})
+			return Context{}, ErrInvalidCredential
+		}
+		if !opaqueCredential(value) {
+			r.audit(req, Rejection{Reason: ReasonMalformedCredential, Source: SourceBrowserAccessToken, Path: req.URL.Path, Origin: origin})
+			return Context{}, ErrInvalidCredential
+		}
+		identity, err := r.cfg.BrowserAccessTokens.VerifyBrowserAccessToken(req.Context(), value)
+		if err != nil {
+			return Context{}, r.credentialFailure(req, SourceBrowserAccessToken, origin, err)
+		}
+		clientRef := identity.ClientRef
+		if clientRef == "" {
+			clientRef = r.cfg.BrowserClientRef
+		}
+		return r.principalContext(req, principalInput{
+			source:                   SourceBrowserAccessToken,
+			tenantRef:                identity.TenantRef,
+			principalRef:             identity.PrincipalRef,
+			clientRef:                clientRef,
+			releaseRef:               UnregisteredReleaseRef,
+			expiresAt:                identity.ExpiresAt,
+			browserIdleExpiresAt:     identity.IdleExpiresAt,
+			browserAbsoluteExpiresAt: identity.AbsoluteExpiresAt,
+			expiring:                 true,
+			origin:                   origin,
 		})
 	case strings.EqualFold(scheme, "StepGrant"):
 		if r.cfg.StepGrants == nil {
@@ -542,13 +673,15 @@ func (r *Resolver) resolveAuthorization(req *http.Request, origin, header string
 }
 
 type principalInput struct {
-	source        Source
-	tenantRef     string
-	principalRef  string
-	clientRef     string
-	releaseRef    string
-	caseTicketRef string
-	expiresAt     time.Time
+	source                   Source
+	tenantRef                string
+	principalRef             string
+	clientRef                string
+	releaseRef               string
+	caseTicketRef            string
+	expiresAt                time.Time
+	browserIdleExpiresAt     time.Time
+	browserAbsoluteExpiresAt time.Time
 	// expiring marks a credential kind that carries its own intrinsic expiry
 	// (browser session, Access Ticket, Step Grant). Such a credential must
 	// present a real future expiry; a zero or past expiry is rejected, never
@@ -618,6 +751,8 @@ func (r *Resolver) principalContext(req *http.Request, input principalInput) (Co
 		CaseTicketRef:              input.caseTicketRef,
 		Origin:                     input.origin,
 		ConnectorCapabilityAllowed: connectorCapabilityAllowed(input.source, input.origin),
+		BrowserIdleExpiresAt:       input.browserIdleExpiresAt,
+		BrowserAbsoluteExpiresAt:   input.browserAbsoluteExpiresAt,
 	}, nil
 }
 

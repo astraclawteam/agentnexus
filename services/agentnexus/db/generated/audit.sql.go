@@ -359,6 +359,39 @@ func (q *Queries) GetLatestAuditBatchRoot(ctx context.Context, enterpriseID stri
 	return i, err
 }
 
+const getAuditEventByID = `-- name: GetAuditEventByID :one
+SELECT id, enterprise_id, case_ticket_id, step_grant_id, actor_user_id, connector_instance_id, resource_type, resource_id, action, decision, input_hash, output_hash, evidence_pointer, prev_hash, event_hash, created_at FROM audit_events WHERE enterprise_id=$1 AND id=$2
+`
+
+type GetAuditEventByIDParams struct {
+	EnterpriseID string
+	ID           string
+}
+
+func (q *Queries) GetAuditEventByID(ctx context.Context, arg GetAuditEventByIDParams) (AuditEvent, error) {
+	row := q.db.QueryRow(ctx, getAuditEventByID, arg.EnterpriseID, arg.ID)
+	var i AuditEvent
+	err := row.Scan(
+		&i.ID,
+		&i.EnterpriseID,
+		&i.CaseTicketID,
+		&i.StepGrantID,
+		&i.ActorUserID,
+		&i.ConnectorInstanceID,
+		&i.ResourceType,
+		&i.ResourceID,
+		&i.Action,
+		&i.Decision,
+		&i.InputHash,
+		&i.OutputHash,
+		&i.EvidencePointer,
+		&i.PrevHash,
+		&i.EventHash,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getLatestEnterpriseAuditHash = `-- name: GetLatestEnterpriseAuditHash :one
 SELECT COALESCE((
     SELECT event_hash FROM audit_events

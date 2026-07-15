@@ -14,6 +14,7 @@ type MemoryStore struct {
 	users                  map[string]struct{}
 	sessions               map[string]storedSession
 	codes                  map[string]storedAuthorizationCode
+	accessTokens           map[string]storedAccessToken
 	loginAttempts          map[string]storedLoginAttempt
 	loginAttemptGeneration map[string]uint64
 	nextAttemptGeneration  uint64
@@ -28,6 +29,7 @@ func NewMemoryStore() *MemoryStore {
 		users:                  map[string]struct{}{},
 		sessions:               map[string]storedSession{},
 		codes:                  map[string]storedAuthorizationCode{},
+		accessTokens:           map[string]storedAccessToken{},
 		loginAttempts:          map[string]storedLoginAttempt{},
 		loginAttemptGeneration: map[string]uint64{},
 		scopeCounts:            map[loginAttemptScope]int{},
@@ -296,6 +298,10 @@ func (s *MemoryStore) CreateAuthorizationCode(ctx context.Context, code storedAu
 	if _, ok := s.users[bindingKey(code.EnterpriseID, code.UserID)]; !ok {
 		return errInvalidBinding
 	}
+	session, ok := s.sessions[code.BrowserSessionIDHash]
+	if !ok || session.RevokedAt != nil || session.EnterpriseID != code.EnterpriseID || session.UserID != code.UserID {
+		return errInvalidBinding
+	}
 	if _, ok := s.codes[code.CodeHash]; ok {
 		return errDuplicate
 	}
@@ -319,6 +325,17 @@ func (s *MemoryStore) ExchangeAuthorizationCode(ctx context.Context, request exc
 	if !ok || record.ConsumedAt != nil || !request.Now.Before(record.ExpiresAt) || record.ClientID != request.ClientID || record.RedirectURI != request.RedirectURI {
 		return storedAuthorizationCode{}, errNotFound
 	}
+	if _, exists := s.accessTokens[request.AccessTokenHash]; exists {
+		return storedAuthorizationCode{}, errDuplicate
+	}
+	session, ok := s.sessions[record.BrowserSessionIDHash]
+	if !ok || session.RevokedAt != nil || !request.Now.Before(session.IdleExpiresAt) || !request.Now.Before(session.AbsoluteExpiresAt) {
+		return storedAuthorizationCode{}, errNotFound
+	}
+	expiresAt := session.AbsoluteExpiresAt
+	if !expiresAt.After(request.Now) || request.AccessTokenHash == "" || request.Audience == "" {
+		return storedAuthorizationCode{}, errNotFound
+	}
 	challenge, err := base64.RawURLEncoding.DecodeString(record.CodeChallenge)
 	if err != nil || len(challenge) != len(request.VerifierDigest) || subtle.ConstantTimeCompare(challenge, request.VerifierDigest[:]) != 1 {
 		return storedAuthorizationCode{}, errNotFound
@@ -326,7 +343,65 @@ func (s *MemoryStore) ExchangeAuthorizationCode(ctx context.Context, request exc
 	consumed := request.Now
 	record.ConsumedAt = &consumed
 	s.codes[request.CodeHash] = record
+	s.accessTokens[request.AccessTokenHash] = storedAccessToken{TokenHash: request.AccessTokenHash, BrowserSessionIDHash: record.BrowserSessionIDHash, EnterpriseID: record.EnterpriseID, UserID: record.UserID, ClientID: record.ClientID, Audience: request.Audience, CreatedAt: request.Now, ExpiresAt: expiresAt}
+	record.AccessTokenExpiresAt = expiresAt
 	return record, nil
+}
+
+func (s *MemoryStore) UseAccessToken(ctx context.Context, tokenHash, clientID, audience, enterpriseID string, now time.Time) (storedAccessToken, error) {
+	if err := ctx.Err(); err != nil {
+		return storedAccessToken{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return storedAccessToken{}, s.err
+	}
+	record, ok := s.accessTokens[tokenHash]
+	session, sessionOK := s.sessions[record.BrowserSessionIDHash]
+	if !ok || !sessionOK || record.RevokedAt != nil || session.RevokedAt != nil || record.ClientID != clientID || record.Audience != audience || record.EnterpriseID != enterpriseID || record.EnterpriseID != session.EnterpriseID || record.UserID != session.UserID || !now.Before(record.ExpiresAt) || !now.Before(session.IdleExpiresAt) || !now.Before(session.AbsoluteExpiresAt) {
+		return storedAccessToken{}, errNotFound
+	}
+	session.LastSeenAt = now
+	session.IdleExpiresAt = minTime(now.Add(defaultIdleTimeout), session.AbsoluteExpiresAt)
+	s.sessions[session.IDHash] = session
+	record.SessionCreatedAt = session.CreatedAt
+	record.SessionLastSeenAt = session.LastSeenAt
+	record.SessionIdleExpiresAt = session.IdleExpiresAt
+	record.SessionAbsoluteExpiresAt = session.AbsoluteExpiresAt
+	return record, nil
+}
+
+func (s *MemoryStore) RevokeSessionByAccessToken(ctx context.Context, tokenHash, clientID, audience, enterpriseID string, now time.Time) (storedSession, error) {
+	if err := ctx.Err(); err != nil {
+		return storedSession{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return storedSession{}, s.err
+	}
+	token, ok := s.accessTokens[tokenHash]
+	session, sessionOK := s.sessions[token.BrowserSessionIDHash]
+	if !ok || !sessionOK || token.ClientID != clientID || token.Audience != audience || token.EnterpriseID != enterpriseID || token.EnterpriseID != session.EnterpriseID || token.UserID != session.UserID || token.RevokedAt != nil || !now.Before(token.ExpiresAt) || (session.RevokedAt == nil && (!now.Before(session.IdleExpiresAt) || !now.Before(session.AbsoluteExpiresAt))) {
+		return storedSession{}, errNotFound
+	}
+	if session.RevokedAt == nil {
+		revoked := now
+		session.RevokedAt = &revoked
+	}
+	s.sessions[session.IDHash] = session
+	return session, nil
+}
+
+func (s *MemoryStore) accessTokenSnapshot() map[string]storedAccessToken {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]storedAccessToken, len(s.accessTokens))
+	for k, v := range s.accessTokens {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *MemoryStore) sessionSnapshot() map[string]storedSession {

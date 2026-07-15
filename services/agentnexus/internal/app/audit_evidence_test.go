@@ -14,11 +14,23 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 )
 
-type recordingAuditEvidenceSink struct{ input AuditEvidenceInput }
+type recordingAuditEvidenceSink struct {
+	input AuditEvidenceInput
+	err   error
+}
 
 func (s *recordingAuditEvidenceSink) AppendAuditEvidence(_ context.Context, input AuditEvidenceInput) (string, error) {
 	s.input = input
-	return "audit-1", nil
+	return "audit-1", s.err
+}
+
+func TestAuditEvidenceMapsCanonicalPayloadMismatchToConflict(t *testing.T) {
+	sink := &recordingAuditEvidenceSink{err: ErrAuditIdempotencyConflict}
+	router := newAuditEvidenceTestRouter(t, auditTicketStub(), sink)
+	rr := postAuditEvidence(t, router, strings.NewReader(`{"business_context_ref":"opaque-ticket","action":"dream_policy_created","resource_type":"dream_policy","resource_id":"pol-1"}`), true)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "idempotency_conflict") {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
 }
 
 type stubServiceCredentials struct {
@@ -62,6 +74,7 @@ func postAuditEvidence(t *testing.T, router http.Handler, body io.Reader, withBa
 	req := httptest.NewRequest(http.MethodPost, "/v1/audit/evidence", body)
 	req.Header.Set("Content-Type", "application/json")
 	if withBasic {
+		req.Header.Set("Idempotency-Key", "audit-handler-key-0001")
 		req.SetBasicAuth("agentatlas", "secret")
 	}
 	rr := httptest.NewRecorder()
@@ -84,7 +97,7 @@ func TestAuditEvidenceRecordsDreamPolicyCreateRequest(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response["audit_ref_id"] != "audit-1" || sink.input.Action != AuditActionDreamPolicyCreateRequested || sink.input.EnterpriseID != "ent-1" || sink.input.ActorUserID != "u-1" || sink.input.CaseTicketID != "case-1" || sink.input.ResourceType != "dream_policy" || sink.input.ResourceID != "pol-1" {
+	if response["audit_ref_id"] != "audit-1" || sink.input.IdempotencyKey != "audit-handler-key-0001" || sink.input.Action != AuditActionDreamPolicyCreateRequested || sink.input.EnterpriseID != "ent-1" || sink.input.ActorUserID != "u-1" || sink.input.CaseTicketID != "case-1" || sink.input.ResourceType != "dream_policy" || sink.input.ResourceID != "pol-1" {
 		t.Fatalf("response=%v input=%+v", response, sink.input)
 	}
 }
@@ -229,4 +242,46 @@ func TestAuditDetailDepthAndStringBounds(t *testing.T) {
 			t.Fatalf("invalid detail accepted: %#v", value)
 		}
 	}
+}
+
+func TestAuditEvidenceAcceptsBoundBrowserBearerAndStillVerifiesCaseTicket(t *testing.T) {
+	sink := &recordingAuditEvidenceSink{}
+	tickets := &stubTicketActors{identity: trust.TicketIdentity{TenantRef: "ent-1", PrincipalRef: "u-1", TicketRef: "case-1", ExpiresAt: time.Now().Add(time.Hour)}}
+	h, err := newAuditEvidenceHandler("ent-1", tickets, sink, &recordingTrustAudit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := newGatewayAPIMux("gateway-api", "test")
+	h.register(mux)
+	resolver, err := trust.NewResolver(trust.ResolverConfig{
+		TenantRef:           "ent-1",
+		BrowserAccessTokens: staticBrowserAccessTokenVerifier{identity: trust.SessionIdentity{TenantRef: "ent-1", PrincipalRef: "u-1", ExpiresAt: time.Now().Add(time.Hour)}},
+		OrgSnapshots:        staticAuditOrgSnapshot{},
+		Protected:           func(r *http.Request) bool { return trustProtectedPath(r.URL.Path) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/audit/evidence", strings.NewReader(`{"business_context_ref":"opaque-ticket","action":"dream_policy_created","resource_type":"dream_policy","resource_id":"pol-1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer opaque-token")
+	rr := httptest.NewRecorder()
+	resolver.Middleware(mux).ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated || sink.input.ActorUserID != "u-1" {
+		t.Fatalf("status=%d input=%+v body=%s", rr.Code, sink.input, rr.Body.String())
+	}
+}
+
+type staticBrowserAccessTokenVerifier struct {
+	identity trust.SessionIdentity
+}
+
+type staticAuditOrgSnapshot struct{}
+
+func (staticAuditOrgSnapshot) ResolveSealedOrgVersion(context.Context, string, string) (int64, error) {
+	return 1, nil
+}
+
+func (s staticBrowserAccessTokenVerifier) VerifyBrowserAccessToken(context.Context, string) (trust.SessionIdentity, error) {
+	return s.identity, nil
 }

@@ -18,12 +18,13 @@ type CreateSessionInput struct {
 }
 
 type IssueCodeInput struct {
-	EnterpriseID  string
-	UserID        string
-	ClientID      string
-	RedirectURI   string
-	Nonce         string
-	CodeChallenge string
+	EnterpriseID        string
+	UserID              string
+	ClientID            string
+	RedirectURI         string
+	Nonce               string
+	CodeChallenge       string
+	BrowserSessionToken string
 }
 
 type ExchangeCodeInput struct {
@@ -34,9 +35,12 @@ type ExchangeCodeInput struct {
 }
 
 type ExchangeResult struct {
-	EnterpriseID string
-	UserID       string
-	Nonce        string
+	EnterpriseID         string
+	UserID               string
+	Nonce                string
+	AccessToken          string
+	AccessTokenExpiresAt time.Time
+	AccessTokenExpiresIn time.Duration
 }
 
 type CreateLoginAttemptInput struct {
@@ -81,24 +85,44 @@ type storedSession struct {
 }
 
 type storedAuthorizationCode struct {
-	CodeHash      string
-	EnterpriseID  string
-	UserID        string
-	ClientID      string
-	RedirectURI   string
-	Nonce         string
-	CodeChallenge string
-	CreatedAt     time.Time
-	ExpiresAt     time.Time
-	ConsumedAt    *time.Time
+	CodeHash             string
+	EnterpriseID         string
+	UserID               string
+	ClientID             string
+	RedirectURI          string
+	Nonce                string
+	CodeChallenge        string
+	CreatedAt            time.Time
+	ExpiresAt            time.Time
+	ConsumedAt           *time.Time
+	BrowserSessionIDHash string
+	AccessTokenExpiresAt time.Time
+}
+
+type storedAccessToken struct {
+	TokenHash                string
+	BrowserSessionIDHash     string
+	EnterpriseID             string
+	UserID                   string
+	ClientID                 string
+	Audience                 string
+	CreatedAt                time.Time
+	ExpiresAt                time.Time
+	RevokedAt                *time.Time
+	SessionCreatedAt         time.Time
+	SessionLastSeenAt        time.Time
+	SessionIdleExpiresAt     time.Time
+	SessionAbsoluteExpiresAt time.Time
 }
 
 type exchangeRequest struct {
-	CodeHash       string
-	VerifierDigest [32]byte
-	ClientID       string
-	RedirectURI    string
-	Now            time.Time
+	CodeHash        string
+	VerifierDigest  [32]byte
+	ClientID        string
+	RedirectURI     string
+	Now             time.Time
+	AccessTokenHash string
+	Audience        string
 }
 
 func publicSession(session storedSession) BrowserSession {

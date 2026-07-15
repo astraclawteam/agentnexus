@@ -381,8 +381,13 @@ func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 	if err := json.Unmarshal(token.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["id_token"] == "" || payload["token_type"] != "Bearer" || payload["access_token"] != nil || payload["refresh_token"] != nil {
-		t.Fatalf("payload=%v", payload)
+	accessToken, _ := payload["access_token"].(string)
+	if payload["id_token"] == "" || payload["token_type"] != "Bearer" || accessToken == "" || payload["refresh_token"] != nil {
+		t.Fatalf("token payload fields invalid id=%v access=%v type=%v refresh_present=%v", payload["id_token"] != "", accessToken != "", payload["token_type"], payload["refresh_token"] != nil)
+	}
+	bearerMe := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", nil, "Authorization", "Bearer "+accessToken)
+	if bearerMe.Code != http.StatusOK {
+		t.Fatalf("bearer me=%d body=%s", bearerMe.Code, bearerMe.Body.String())
 	}
 
 	me := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", cookie)
@@ -406,16 +411,78 @@ func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 		t.Fatalf("profile=%+v", profile)
 	}
 
-	logout := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", cookie)
+	logout := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", nil, "Authorization", "Bearer "+accessToken)
 	if logout.Code != http.StatusNoContent {
 		t.Fatalf("logout=%d", logout.Code)
 	}
-	cleared := logout.Result().Cookies()[0]
-	if cleared.Name != browserSessionCookie || cleared.MaxAge >= 0 || !cleared.HttpOnly || !cleared.Secure || cleared.SameSite != http.SameSiteLaxMode || cleared.Path != "/" {
-		t.Fatalf("cleared=%+v", cleared)
+	h.audit.mu.Lock()
+	logoutClientID := h.audit.events[len(h.audit.events)-1].ClientID
+	h.audit.mu.Unlock()
+	if logoutClientID != "agentatlas" {
+		t.Fatalf("logout client_id=%q want agentatlas", logoutClientID)
 	}
 	if got := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", cookie).Code; got != http.StatusUnauthorized {
 		t.Fatalf("post logout=%d", got)
+	}
+	if got := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", nil, "Authorization", "Bearer "+accessToken).Code; got != http.StatusUnauthorized {
+		t.Fatalf("post logout bearer=%d", got)
+	}
+}
+
+func TestBrowserAccessTokenVerifierAcceptsEveryConfiguredConsoleClient(t *testing.T) {
+	resolver := &configuredAccessTokenResolver{validClientID: "agentnexus-admin"}
+	verifier := newBrowserAccessTokenTrustVerifier(resolver, browserauth.OIDCConfig{
+		EnterpriseID: "ent-1",
+		ConsoleClients: map[string][]string{
+			"agentatlas":       {"https://atlas.example.com/auth/callback"},
+			"agentnexus-admin": {"https://nexus-admin.example.com/auth/callback"},
+		},
+	})
+	identity, err := verifier.VerifyBrowserAccessToken(context.Background(), "opaque-access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.TenantRef != "ent-1" || identity.PrincipalRef != "user-1" || identity.ClientRef != "agentnexus-admin" {
+		t.Fatalf("identity=%+v", identity)
+	}
+	if strings.Join(resolver.clients, ",") != "agentatlas,agentnexus-admin" {
+		t.Fatalf("client attempts=%v", resolver.clients)
+	}
+}
+
+func TestRejectedBearerLogoutRetriesAfterFailClosedRevocation(t *testing.T) {
+	h := newBrowserHarness(t)
+	accessToken := issueHarnessAccessToken(t, h)
+	h.audit.err = errors.New("audit unavailable")
+	failed := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", nil, "Authorization", "Bearer "+accessToken)
+	if failed.Code != http.StatusServiceUnavailable {
+		t.Fatalf("failed logout=%d body=%s", failed.Code, failed.Body.String())
+	}
+	if got := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", nil, "Authorization", "Bearer "+accessToken).Code; got != http.StatusUnauthorized {
+		t.Fatalf("revoked token me=%d", got)
+	}
+	h.audit.err = nil
+	retried := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", nil, "Authorization", "Bearer "+accessToken)
+	if retried.Code != http.StatusNoContent {
+		t.Fatalf("retried logout=%d body=%s", retried.Code, retried.Body.String())
+	}
+}
+
+func TestConsoleServiceCredentialVerifierAcceptsEveryConfiguredClient(t *testing.T) {
+	credentials, err := browserauth.NewConsoleClientCredentials(map[string][]string{
+		"agentatlas":       {testConsoleClientSecret},
+		"agentnexus-admin": {"AgentNexus-admin-console-secret-N8xR2pT6yK9dF3mQ4"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := consoleServiceCredentialVerifier{config: browserauth.OIDCConfig{EnterpriseID: "ent-1", ConsoleCredentials: credentials}}
+	identity, err := verifier.VerifyServiceCredential(context.Background(), "agentnexus-admin", "AgentNexus-admin-console-secret-N8xR2pT6yK9dF3mQ4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.TenantRef != "ent-1" || identity.ClientRef != "agentnexus-admin" {
+		t.Fatalf("identity=%+v", identity)
 	}
 }
 
@@ -803,7 +870,7 @@ func TestBrowserAuthRejectsCrossEnterpriseSessionsAndCodes(t *testing.T) {
 	if me.Code != http.StatusUnauthorized || !hasClearedCookie(me, browserSessionCookie) {
 		t.Fatalf("me=%d cookies=%v", me.Code, me.Result().Cookies())
 	}
-	code, err := h.sessions.IssueCode(context.Background(), browserauth.IssueCodeInput{EnterpriseID: "ent-2", UserID: "user-2", ClientID: "agentatlas", RedirectURI: "https://atlas.example.com/auth/callback", Nonce: "n", CodeChallenge: testS256(testVerifier)})
+	code, err := h.sessions.IssueCode(context.Background(), browserauth.IssueCodeInput{EnterpriseID: "ent-2", UserID: "user-2", ClientID: "agentatlas", RedirectURI: "https://atlas.example.com/auth/callback", Nonce: "n", CodeChallenge: testS256(testVerifier), BrowserSessionToken: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -948,6 +1015,30 @@ func (h *browserHarness) authorizeQuery(state, nonce string) url.Values {
 	return url.Values{"client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}, "state": {state}, "nonce": {nonce}, "code_challenge": {testS256(testVerifier)}, "code_challenge_method": {"S256"}, "response_type": {"code"}, "scope": {"openid"}}
 }
 
+func issueHarnessAccessToken(t *testing.T, h *browserHarness) string {
+	t.Helper()
+	authorize := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("retry-state", "retry-nonce").Encode(), "", nil)
+	upstream, err := url.Parse(authorize.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.idp.setNonce(upstream.Query().Get("nonce"))
+	callback := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(upstream.Query().Get("state")), "", loginBindingCookie(t, authorize))
+	location, err := url.Parse(callback.Header().Get("Location"))
+	if err != nil || location.Query().Get("code") == "" {
+		t.Fatalf("callback=%d location=%q err=%v", callback.Code, callback.Header().Get("Location"), err)
+	}
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {location.Query().Get("code")}, "code_verifier": {testVerifier}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+	token := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
+	var payload struct {
+		AccessToken string `json:"access_token"`
+	}
+	if token.Code != http.StatusOK || json.Unmarshal(token.Body.Bytes(), &payload) != nil || payload.AccessToken == "" {
+		t.Fatalf("token=%d body=%s", token.Code, token.Body.String())
+	}
+	return payload.AccessToken
+}
+
 type testIdentities struct{}
 
 func (testIdentities) ResolveExternalIdentity(_ context.Context, enterpriseID, issuer, subject string) (string, string, error) {
@@ -986,6 +1077,19 @@ type memoryAudit struct {
 	sessions    BrowserSessionService
 }
 
+type configuredAccessTokenResolver struct {
+	validClientID string
+	clients       []string
+}
+
+func (r *configuredAccessTokenResolver) GetAccessTokenSession(_ context.Context, _ string, clientID, audience, enterpriseID string) (browserauth.BrowserSession, error) {
+	r.clients = append(r.clients, clientID)
+	if clientID != r.validClientID || audience != clientID || enterpriseID != "ent-1" {
+		return browserauth.BrowserSession{}, browserauth.ErrInvalidAccessToken
+	}
+	return browserauth.BrowserSession{EnterpriseID: enterpriseID, UserID: "user-1", IdleExpiresAt: time.Now().Add(time.Hour), AbsoluteExpiresAt: time.Now().Add(2 * time.Hour)}, nil
+}
+
 func (m *memoryAudit) LogoutBrowserSession(ctx context.Context, token string, event BrowserAuditEvent) (browserauth.BrowserSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -996,6 +1100,22 @@ func (m *memoryAudit) LogoutBrowserSession(ctx context.Context, token string, ev
 	session, err := m.sessions.LogoutSession(ctx, token)
 	if err != nil {
 		return browserauth.BrowserSession{}, err
+	}
+	event.ActorUserID = session.UserID
+	m.events = append(m.events, event)
+	return session, nil
+}
+
+func (m *memoryAudit) LogoutBrowserAccessToken(ctx context.Context, token string, event BrowserAuditEvent) (browserauth.BrowserSession, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, m.sawDeadline = ctx.Deadline()
+	session, err := m.sessions.LogoutAccessTokenSession(ctx, token, event.ClientID, event.ClientID, event.EnterpriseID)
+	if err != nil {
+		return browserauth.BrowserSession{}, err
+	}
+	if m.err != nil {
+		return browserauth.BrowserSession{}, m.err
 	}
 	event.ActorUserID = session.UserID
 	m.events = append(m.events, event)

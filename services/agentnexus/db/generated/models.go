@@ -257,6 +257,18 @@ type AuditSigningKey struct {
 	RevokedAt pgtype.Timestamptz
 }
 
+type BrowserAccessToken struct {
+	TokenHash            string
+	BrowserSessionIDHash string
+	EnterpriseID         string
+	EnterpriseUserID     string
+	ClientID             string
+	Audience             string
+	CreatedAt            pgtype.Timestamptz
+	ExpiresAt            pgtype.Timestamptz
+	RevokedAt            pgtype.Timestamptz
+}
+
 type BrowserSession struct {
 	IDHash            string
 	EnterpriseID      string
@@ -458,16 +470,17 @@ type ExternalReceiptRequest struct {
 }
 
 type OauthAuthorizationCode struct {
-	CodeHash         string
-	ClientID         string
-	RedirectUri      string
-	EnterpriseID     string
-	EnterpriseUserID string
-	CodeChallenge    string
-	Nonce            string
-	CreatedAt        pgtype.Timestamptz
-	ExpiresAt        pgtype.Timestamptz
-	ConsumedAt       pgtype.Timestamptz
+	CodeHash             string
+	ClientID             string
+	RedirectUri          string
+	EnterpriseID         string
+	EnterpriseUserID     string
+	CodeChallenge        string
+	Nonce                string
+	CreatedAt            pgtype.Timestamptz
+	ExpiresAt            pgtype.Timestamptz
+	ConsumedAt           pgtype.Timestamptz
+	BrowserSessionIDHash string
 }
 
 type OidcAuthorizeRateLimit struct {

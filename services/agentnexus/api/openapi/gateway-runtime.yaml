@@ -67,7 +67,7 @@ paths:
               $ref: '#/components/schemas/BrowserTokenRequest'
       responses:
         '200':
-          description: Short-lived ID token; no access or refresh token is issued.
+          description: ID token plus an opaque revocable BFF access token bound to the browser session; no refresh token is issued.
           content:
             application/json:
               schema:
@@ -76,7 +76,7 @@ paths:
     get:
       operationId: getBrowserSession
       summary: Resolve the current HttpOnly browser session and sealed organization snapshot.
-      security: [{browserSession: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}]
       responses:
         '200':
           description: Current browser identity as opaque verified references.
@@ -89,14 +89,14 @@ paths:
     post:
       operationId: logoutBrowserSession
       summary: Revoke the current browser session and clear its cookie.
-      security: [{browserSession: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}]
       responses:
         '204': {description: Session revoked.}
   /v1/authorization/decisions:
     post:
       operationId: decideAuthorization
       summary: Evaluate one exact capability on one business resource against the sealed organization policy snapshot of the verified session.
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -115,7 +115,7 @@ paths:
       operationId: locateRuntimeEvidence
       summary: Locate evidence for declared business-semantic data needs; results are opaque evidence handles.
       description: Semantic resolution is private — data classes resolve to internal source bindings server-side and connector topology never appears in responses or errors. The verified trusted context supplies identity and the sealed organization version.
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -134,7 +134,7 @@ paths:
       operationId: readRuntimeEvidence
       summary: Read one located evidence handle through ticketed policy enforcement.
       description: Reads are served from staged, encrypted evidence bound at locate time. An allowed response always states source_version, as_of and served_from_cache — a cached read never masquerades as real-time data — and invalidated, revoked, expired or source-deleted handles fail closed as a deny decision. A verification-purpose read (purpose "postcondition_verification" with the all-or-nothing verification_binding block) additionally emits a signed observation_receipt whose source authority, sealed source version, observed-at and freshness bounds are derived server-side from the private registry binding and clock — never from the caller — with observed_at stating the staging instant (as_of), so a receipt never claims fresher than the staged reality.
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -152,6 +152,7 @@ paths:
     post:
       operationId: requestRuntimeAction
       summary: Request one typed, hash-bound, risk-decided action inside a work case.
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -186,6 +187,7 @@ paths:
     get:
       operationId: getRuntimeActionReceipt
       summary: Fetch the receipt of one Action by its opaque receipt handle.
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       parameters:
         - name: receipt_ref
           in: path
@@ -212,7 +214,7 @@ paths:
         TECHNICAL succeeded/failed status — never a business Outcome. A
         redelivered or duplicate result carrying the same result_id is
         deduplicated by the inbox and applied exactly once.
-      security: [{trustedServiceSecret: []}, {browserSession: []}, {caseTicket: []}]
+      security: [{trustedServiceSecret: []}, {browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       parameters:
         - name: action_ref
           in: path
@@ -247,7 +249,7 @@ paths:
         own grant, dispatch and execution/observation receipts (it is not a magic
         rollback). Idempotent per original action_ref; an action that declared no
         compensation reference is rejected.
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       parameters:
         - name: action_ref
           in: path
@@ -286,7 +288,7 @@ paths:
         transport failure keeps the transmission pending and can never create
         approval progress or a grant. There is no approver, queue or risk
         field anywhere on this surface.
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -309,7 +311,7 @@ paths:
     get:
       operationId: getApprovalTransmission
       summary: Get the transmission status of one approval plan for diagnostics.
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       parameters:
         - name: plan_ref
           in: path
@@ -329,7 +331,7 @@ paths:
       operationId: revokeApprovalTransmission
       summary: Revoke a transmitted approval plan (terminal, idempotent, append-only).
       description: Recorded evidence of a revoked transmission is unusable for grant issuance and later evidence is rejected.
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       parameters:
         - name: plan_ref
           in: path
@@ -362,7 +364,7 @@ paths:
         grant. Identical resubmission is idempotent; a replayed approval_ref
         with different content, a second decision for the same plan or reuse
         against another plan is rejected.
-      security: [{trustedServiceSecret: []}, {browserSession: []}, {caseTicket: []}]
+      security: [{trustedServiceSecret: []}, {browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -385,7 +387,7 @@ paths:
     post:
       operationId: createStepGrant
       summary: Issue an audited short-lived one-use grant bound to one exact operation (capability + parameter hash).
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -403,7 +405,7 @@ paths:
     post:
       operationId: verifyStepGrant
       summary: Verify an opaque Step Grant against one exact operation.
-      security: [{browserSession: []}, {caseTicket: []}]
+      security: [{browserSession: []}, {browserAccessToken: []}, {caseTicket: []}]
       requestBody:
         required: true
         content:
@@ -421,7 +423,9 @@ paths:
     post:
       operationId: appendAuditEvidence
       summary: Record a trusted first-party service request in the audit chain.
-      security: [{trustedServiceSecret: []}]
+      security: [{trustedServiceSecret: []}, {browserAccessToken: []}]
+      parameters:
+        - {name: Idempotency-Key, in: header, required: false, schema: {type: string, minLength: 16, maxLength: 128}, description: Stable operation-derived key; retries with the same canonical payload return the same audit_ref_id.}
       requestBody:
         required: true
         content:
@@ -435,6 +439,7 @@ paths:
               schema: {$ref: '#/components/schemas/AuditEvidenceResponse'}
         '400': {description: Invalid action, resource binding, or bounded details.}
         '401': {description: Invalid service credentials or Case Ticket.}
+        '409': {description: Idempotency-Key was already used with a different canonical audit payload.}
         '503': {description: Ticket or audit persistence unavailable.}
   /v1/agent-clients:
     post:
@@ -540,6 +545,10 @@ components:
       type: apiKey
       in: cookie
       name: nexus_browser_session
+    browserAccessToken:
+      type: http
+      scheme: bearer
+      description: Opaque browser BFF token bound to client, audience, enterprise, user, and browser session.
     caseTicket:
       type: apiKey
       in: header
@@ -1222,9 +1231,10 @@ components:
     BrowserTokenResponse:
       type: object
       additionalProperties: false
-      required: [id_token, token_type, expires_in]
+      required: [id_token, access_token, token_type, expires_in]
       properties:
         id_token: {type: string}
+        access_token: {type: string, description: Opaque revocable token; the server stores only its hash.}
         token_type: {type: string, enum: [Bearer]}
         expires_in: {type: integer, minimum: 1}
     AgentClientRef:

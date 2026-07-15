@@ -15,6 +15,8 @@ import (
 
 type AuditEvidenceAction = audit.Action
 
+var ErrAuditIdempotencyConflict = errors.New("audit idempotency payload mismatch")
+
 const (
 	AuditActionWorkflowDraftCreated       = audit.ActionWorkflowDraftCreated
 	AuditActionWorkflowVersionPublished   = audit.ActionWorkflowVersionPublished
@@ -32,23 +34,24 @@ const (
 func ValidAuditEvidenceAction(action AuditEvidenceAction) bool { return audit.ValidAction(action) }
 
 type AuditEvidenceInput struct {
-	EnterpriseID string
-	ActorUserID  string
-	CaseTicketID string
-	Action       AuditEvidenceAction
-	ResourceType string
-	ResourceID   string
-	TraceID      string
-	Details      map[string]any
+	IdempotencyKey string
+	EnterpriseID   string
+	ActorUserID    string
+	CaseTicketID   string
+	Action         AuditEvidenceAction
+	ResourceType   string
+	ResourceID     string
+	TraceID        string
+	Details        map[string]any
 }
 
 type AuditEvidenceSink interface {
 	AppendAuditEvidence(context.Context, AuditEvidenceInput) (string, error)
 }
 
-// auditEvidenceHandler appends trusted first-party service audit evidence.
-// The service identity comes from the verified trusted context (service
-// credential source); the request body binds the Case Ticket lineage through
+// auditEvidenceHandler appends trusted first-party audit evidence. The
+// verified context may be a confidential service credential or a browser BFF
+// access token. The request body binds the Case Ticket lineage through
 // business_context_ref and carries NO tenant or actor identity.
 type auditEvidenceHandler struct {
 	enterpriseID string
@@ -79,9 +82,22 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_service"})
 		return
 	}
-	if trustedCtx.Source != trust.SourceServiceCredential || trustedCtx.Principal.TenantRef != h.enterpriseID {
+	if (trustedCtx.Source != trust.SourceServiceCredential && trustedCtx.Source != trust.SourceBrowserAccessToken) || trustedCtx.Principal.TenantRef != h.enterpriseID {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_service"})
 		return
+	}
+	keys := r.Header.Values("Idempotency-Key")
+	if len(keys) > 1 || (len(keys) == 1 && !boundedText(keys[0], 128, false)) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_idempotency_key"})
+		return
+	}
+	idempotencyKey := ""
+	if len(keys) == 1 {
+		idempotencyKey = strings.TrimSpace(keys[0])
+		if utf8.RuneCountInString(idempotencyKey) < 16 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_idempotency_key"})
+			return
+		}
 	}
 	var request struct {
 		RequestID          string              `json:"request_id"`
@@ -120,7 +136,15 @@ func (h *auditEvidenceHandler) append(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_ticket"})
 		return
 	}
-	id, err := h.sink.AppendAuditEvidence(r.Context(), AuditEvidenceInput{EnterpriseID: identity.TenantRef, ActorUserID: identity.PrincipalRef, CaseTicketID: identity.TicketRef, Action: request.Action, ResourceType: request.ResourceType, ResourceID: request.ResourceID, TraceID: request.TraceID, Details: request.Details})
+	if trustedCtx.Source == trust.SourceBrowserAccessToken && trustedCtx.Principal.PrincipalRef != identity.PrincipalRef {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_ticket"})
+		return
+	}
+	id, err := h.sink.AppendAuditEvidence(r.Context(), AuditEvidenceInput{IdempotencyKey: idempotencyKey, EnterpriseID: identity.TenantRef, ActorUserID: identity.PrincipalRef, CaseTicketID: identity.TicketRef, Action: request.Action, ResourceType: request.ResourceType, ResourceID: request.ResourceID, TraceID: request.TraceID, Details: request.Details})
+	if errors.Is(err, ErrAuditIdempotencyConflict) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "idempotency_conflict"})
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit_unavailable"})
 		return

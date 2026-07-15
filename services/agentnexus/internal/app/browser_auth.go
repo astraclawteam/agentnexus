@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,9 +39,11 @@ const oidcBrowserCookieTTL = 24 * time.Hour
 
 type BrowserSessionService interface {
 	GetSession(context.Context, string) (browserauth.BrowserSession, error)
+	GetAccessTokenSession(context.Context, string, string, string, string) (browserauth.BrowserSession, error)
 	CreateSession(context.Context, browserauth.CreateSessionInput) (string, browserauth.BrowserSession, error)
 	RevokeSession(context.Context, string) error
 	LogoutSession(context.Context, string) (browserauth.BrowserSession, error)
+	LogoutAccessTokenSession(context.Context, string, string, string, string) (browserauth.BrowserSession, error)
 	IssueCode(context.Context, browserauth.IssueCodeInput) (string, error)
 	ExchangeCode(context.Context, browserauth.ExchangeCodeInput) (browserauth.ExchangeResult, error)
 	CreateLoginAttempt(context.Context, browserauth.CreateLoginAttemptInput) (string, string, browserauth.LoginAttempt, error)
@@ -83,6 +86,7 @@ type BrowserProfileResolver interface {
 type BrowserAuditEvent struct {
 	EnterpriseID string
 	ActorUserID  string
+	ClientID     string
 	Action       string
 	Decision     string
 }
@@ -92,10 +96,18 @@ type BrowserAuditSink interface {
 	LogoutBrowserSession(context.Context, string, BrowserAuditEvent) (browserauth.BrowserSession, error)
 }
 
+type browserAccessTokenLogoutSink interface {
+	LogoutBrowserAccessToken(context.Context, string, BrowserAuditEvent) (browserauth.BrowserSession, error)
+}
+
 // browserSessionResolver is the narrow session-lookup surface the trust
 // resolver needs.
 type browserSessionResolver interface {
 	GetSession(context.Context, string) (browserauth.BrowserSession, error)
+}
+
+type browserAccessTokenResolver interface {
+	GetAccessTokenSession(context.Context, string, string, string, string) (browserauth.BrowserSession, error)
 }
 
 // browserSessionTrustVerifier adapts the browser session service onto the
@@ -110,7 +122,58 @@ func (v browserSessionTrustVerifier) VerifyBrowserSession(ctx context.Context, t
 	if err != nil {
 		return trust.SessionIdentity{}, errors.Join(trust.ErrCredentialRejected, err)
 	}
-	return trust.SessionIdentity{TenantRef: session.EnterpriseID, PrincipalRef: session.UserID, ExpiresAt: session.IdleExpiresAt}, nil
+	expiresAt := session.IdleExpiresAt
+	if !session.AbsoluteExpiresAt.IsZero() && (expiresAt.IsZero() || session.AbsoluteExpiresAt.Before(expiresAt)) {
+		expiresAt = session.AbsoluteExpiresAt
+	}
+	return trust.SessionIdentity{TenantRef: session.EnterpriseID, PrincipalRef: session.UserID, ExpiresAt: expiresAt, IdleExpiresAt: session.IdleExpiresAt, AbsoluteExpiresAt: session.AbsoluteExpiresAt}, nil
+}
+
+type browserAccessTokenTrustVerifier struct {
+	sessions     browserAccessTokenResolver
+	enterpriseID string
+	clientIDs    []string
+}
+
+func newBrowserAccessTokenTrustVerifier(sessions browserAccessTokenResolver, config browserauth.OIDCConfig) browserAccessTokenTrustVerifier {
+	return browserAccessTokenTrustVerifier{sessions: sessions, enterpriseID: config.EnterpriseID, clientIDs: configuredConsoleClientIDs(config)}
+}
+
+func configuredConsoleClientIDs(config browserauth.OIDCConfig) []string {
+	clientIDs := make([]string, 0, len(config.ConsoleClients))
+	for clientID := range config.ConsoleClients {
+		clientIDs = append(clientIDs, clientID)
+	}
+	sort.Strings(clientIDs)
+	return clientIDs
+}
+
+func (v browserAccessTokenTrustVerifier) VerifyBrowserAccessToken(ctx context.Context, token string) (trust.SessionIdentity, error) {
+	var session browserauth.BrowserSession
+	var matchedClientID string
+	for _, clientID := range v.clientIDs {
+		resolved, err := v.sessions.GetAccessTokenSession(ctx, token, clientID, clientID, v.enterpriseID)
+		if errors.Is(err, browserauth.ErrInvalidAccessToken) {
+			continue
+		}
+		if errors.Is(err, browserauth.ErrAccessTokenUnavailable) {
+			return trust.SessionIdentity{}, errors.Join(trust.ErrSourceUnavailable, err)
+		}
+		if err != nil {
+			return trust.SessionIdentity{}, errors.Join(trust.ErrCredentialRejected, err)
+		}
+		session = resolved
+		matchedClientID = clientID
+		break
+	}
+	if matchedClientID == "" {
+		return trust.SessionIdentity{}, errors.Join(trust.ErrCredentialRejected, browserauth.ErrInvalidAccessToken)
+	}
+	expiresAt := session.IdleExpiresAt
+	if !session.AbsoluteExpiresAt.IsZero() && (expiresAt.IsZero() || session.AbsoluteExpiresAt.Before(expiresAt)) {
+		expiresAt = session.AbsoluteExpiresAt
+	}
+	return trust.SessionIdentity{TenantRef: session.EnterpriseID, PrincipalRef: session.UserID, ClientRef: matchedClientID, ExpiresAt: expiresAt, IdleExpiresAt: session.IdleExpiresAt, AbsoluteExpiresAt: session.AbsoluteExpiresAt}, nil
 }
 
 // consoleServiceCredentialVerifier verifies the confidential first-party
@@ -119,7 +182,7 @@ func (v browserSessionTrustVerifier) VerifyBrowserSession(ctx context.Context, t
 type consoleServiceCredentialVerifier struct{ config browserauth.OIDCConfig }
 
 func (v consoleServiceCredentialVerifier) VerifyServiceCredential(_ context.Context, clientID, secret string) (trust.ServiceIdentity, error) {
-	if clientID == "agentatlas" && v.config.AuthenticateConsoleClient(clientID, secret) {
+	if v.config.AuthenticateConsoleClient(clientID, secret) {
 		return trust.ServiceIdentity{TenantRef: v.config.EnterpriseID, ClientRef: clientID, ReleaseRef: trust.UnregisteredReleaseRef}, nil
 	}
 	return trust.ServiceIdentity{}, trust.ErrCredentialRejected
@@ -229,13 +292,14 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 		orgVersions = sealedOrgVersionResolver{source: deps.AuthorizationPolicy}
 	}
 	trustResolver, err := trust.NewResolver(trust.ResolverConfig{
-		TenantRef:     deps.Config.EnterpriseID,
-		Sessions:      browserSessionTrustVerifier{sessions: deps.Sessions},
-		AccessTickets: deps.TicketActors,
-		StepGrants:    deps.StepGrants,
-		Services:      consoleServiceCredentialVerifier{config: deps.Config},
-		OrgSnapshots:  orgVersions,
-		Audit:         browserTrustAuditSink{sink: deps.Audit},
+		TenantRef:           deps.Config.EnterpriseID,
+		Sessions:            browserSessionTrustVerifier{sessions: deps.Sessions},
+		BrowserAccessTokens: newBrowserAccessTokenTrustVerifier(deps.Sessions, deps.Config),
+		AccessTickets:       deps.TicketActors,
+		StepGrants:          deps.StepGrants,
+		Services:            consoleServiceCredentialVerifier{config: deps.Config},
+		OrgSnapshots:        orgVersions,
+		Audit:               browserTrustAuditSink{sink: deps.Audit},
 		Protected: func(r *http.Request) bool {
 			return trustProtectedPath(r.URL.Path)
 		},
@@ -434,7 +498,7 @@ func (h *browserAuthHandler) authorize(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(browserSessionCookie); err == nil {
 		session, sessionErr := h.sessions.GetSession(r.Context(), cookie.Value)
 		if sessionErr == nil && session.EnterpriseID == h.config.EnterpriseID {
-			code, err := h.sessions.IssueCode(r.Context(), browserauth.IssueCodeInput{EnterpriseID: session.EnterpriseID, UserID: session.UserID, ClientID: clientID, RedirectURI: redirectURI, Nonce: nonce, CodeChallenge: challenge})
+			code, err := h.sessions.IssueCode(r.Context(), browserauth.IssueCodeInput{EnterpriseID: session.EnterpriseID, UserID: session.UserID, ClientID: clientID, RedirectURI: redirectURI, Nonce: nonce, CodeChallenge: challenge, BrowserSessionToken: cookie.Value})
 			if err != nil {
 				writeOAuthError(w, http.StatusServiceUnavailable)
 				return
@@ -522,7 +586,7 @@ func (h *browserAuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 		}
 		writeOAuthError(w, status)
 	}
-	downstreamCode, err := h.sessions.IssueCode(r.Context(), browserauth.IssueCodeInput{EnterpriseID: enterpriseID, UserID: userID, ClientID: attempt.ClientID, RedirectURI: attempt.RedirectURI, Nonce: attempt.ConsoleNonce, CodeChallenge: attempt.CodeChallenge})
+	downstreamCode, err := h.sessions.IssueCode(r.Context(), browserauth.IssueCodeInput{EnterpriseID: enterpriseID, UserID: userID, ClientID: attempt.ClientID, RedirectURI: attempt.RedirectURI, Nonce: attempt.ConsoleNonce, CodeChallenge: attempt.CodeChallenge, BrowserSessionToken: sessionToken})
 	if err != nil {
 		fail(http.StatusServiceUnavailable)
 		return
@@ -609,12 +673,12 @@ func (h *browserAuthHandler) token(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
 		return
 	}
-	idToken, ttl, err := h.issuer.SignIDToken(browserauth.IDTokenInput{Subject: result.UserID, Audience: clientID, Nonce: result.Nonce, EnterpriseID: result.EnterpriseID, EnterpriseUserID: result.UserID})
+	idToken, _, err := h.issuer.SignIDToken(browserauth.IDTokenInput{Subject: result.UserID, Audience: clientID, Nonce: result.Nonce, EnterpriseID: result.EnterpriseID, EnterpriseUserID: result.UserID})
 	if err != nil {
 		writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id_token": idToken, "token_type": "Bearer", "expires_in": int(ttl.Seconds())})
+	writeJSON(w, http.StatusOK, map[string]any{"id_token": idToken, "access_token": result.AccessToken, "token_type": "Bearer", "expires_in": int(result.AccessTokenExpiresIn.Seconds())})
 }
 
 func (h *browserAuthHandler) discovery(w http.ResponseWriter, _ *http.Request) {
@@ -635,28 +699,20 @@ func (h *browserAuthHandler) jwks(w http.ResponseWriter, _ *http.Request) {
 
 func (h *browserAuthHandler) me(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	cookie, err := r.Cookie(browserSessionCookie)
+	trustedCtx, _, err := h.trustResolver.ResolveBrowserRequest(r)
 	if err != nil {
-		writeOAuthError(w, http.StatusUnauthorized)
-		return
-	}
-	session, err := h.sessions.GetSession(r.Context(), cookie.Value)
-	if err != nil {
-		if errors.Is(err, browserauth.ErrSessionUnavailable) {
+		if trust.HTTPStatus(err) == http.StatusServiceUnavailable {
 			writeOAuthError(w, http.StatusServiceUnavailable)
 			return
 		}
-		clearSessionCookie(w)
+		if _, cookieErr := r.Cookie(browserSessionCookie); cookieErr == nil {
+			clearSessionCookie(w)
+		}
 		writeOAuthError(w, http.StatusUnauthorized)
 		return
 	}
-	if session.EnterpriseID != h.config.EnterpriseID {
-		clearSessionCookie(w)
-		writeOAuthError(w, http.StatusUnauthorized)
-		return
-	}
-	profile, err := h.profiles.ResolveBrowserProfile(r.Context(), session.EnterpriseID, session.UserID)
-	if err != nil || profile.EnterpriseID != session.EnterpriseID || profile.EnterpriseUserID != session.UserID || profile.OrgVersion < 1 {
+	profile, err := h.profiles.ResolveBrowserProfile(r.Context(), trustedCtx.Principal.TenantRef, trustedCtx.Principal.PrincipalRef)
+	if err != nil || profile.EnterpriseID != trustedCtx.Principal.TenantRef || profile.EnterpriseUserID != trustedCtx.Principal.PrincipalRef || profile.OrgVersion < 1 {
 		writeOAuthError(w, http.StatusServiceUnavailable)
 		return
 	}
@@ -666,18 +722,47 @@ func (h *browserAuthHandler) me(w http.ResponseWriter, r *http.Request) {
 	if profile.Permissions == nil {
 		profile.Permissions = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "enterprise_id": profile.EnterpriseID, "enterprise_user_id": profile.EnterpriseUserID, "display_name": profile.DisplayName, "org_version": profile.OrgVersion, "org_unit_ids": profile.OrgUnitIDs, "permissions": profile.Permissions, "advanced_mode_allowed": profile.AdvancedModeAllowed, "idle_expires_at": session.IdleExpiresAt, "absolute_expires_at": session.AbsoluteExpiresAt})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "enterprise_id": profile.EnterpriseID, "enterprise_user_id": profile.EnterpriseUserID, "display_name": profile.DisplayName, "org_version": profile.OrgVersion, "org_unit_ids": profile.OrgUnitIDs, "permissions": profile.Permissions, "advanced_mode_allowed": profile.AdvancedModeAllowed, "idle_expires_at": trustedCtx.BrowserIdleExpiresAt, "absolute_expires_at": trustedCtx.BrowserAbsoluteExpiresAt})
 }
 
 func (h *browserAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(browserSessionCookie)
-	if err != nil {
-		clearSessionCookie(w)
+	trustedCtx, credential, resolveErr := h.trustResolver.ResolveBrowserRequest(r)
+	if resolveErr != nil {
+		if trust.HTTPStatus(resolveErr) == http.StatusServiceUnavailable {
+			writeOAuthError(w, http.StatusServiceUnavailable)
+			return
+		}
+		if errors.Is(resolveErr, trust.ErrInvalidCredential) && credential.Source == trust.SourceBrowserAccessToken && h.retryRejectedAccessTokenLogout(w, r, credential.Token) {
+			return
+		}
+		if _, cookieErr := r.Cookie(browserSessionCookie); cookieErr == nil {
+			clearSessionCookie(w)
+		}
+		writeOAuthError(w, http.StatusUnauthorized)
+		return
+	}
+	if credential.Source == trust.SourceBrowserAccessToken {
+		tokenAudit, ok := h.audit.(browserAccessTokenLogoutSink)
+		if !ok {
+			writeOAuthError(w, http.StatusServiceUnavailable)
+			return
+		}
+		logoutCtx, cancel := boundedCleanupContext(r.Context())
+		session, err := tokenAudit.LogoutBrowserAccessToken(logoutCtx, credential.Token, BrowserAuditEvent{EnterpriseID: h.config.EnterpriseID, ClientID: trustedCtx.Principal.AgentClientRef, Action: "browser_session.logout", Decision: "allow"})
+		cancel()
+		if errors.Is(err, browserauth.ErrInvalidAccessToken) || errors.Is(err, browserauth.ErrInvalidSession) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if err != nil || session.EnterpriseID != h.config.EnterpriseID || session.UserID == "" {
+			writeOAuthError(w, http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	logoutCtx, cancel := boundedCleanupContext(r.Context())
-	session, err := h.audit.LogoutBrowserSession(logoutCtx, cookie.Value, BrowserAuditEvent{EnterpriseID: h.config.EnterpriseID, Action: "browser_session.logout", Decision: "allow"})
+	session, err := h.audit.LogoutBrowserSession(logoutCtx, credential.Token, BrowserAuditEvent{EnterpriseID: h.config.EnterpriseID, Action: "browser_session.logout", Decision: "allow"})
 	cancel()
 	if errors.Is(err, browserauth.ErrInvalidSession) {
 		clearSessionCookie(w)
@@ -694,6 +779,34 @@ func (h *browserAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// retryRejectedAccessTokenLogout handles the narrow fail-closed retry case:
+// a prior logout revoked the browser session but audit persistence failed.
+// The trust resolver returns only a syntax-checked single Bearer envelope;
+// every attempt below is still bound by the server-side token row's tenant,
+// configured client_id and audience before it can mutate or append audit.
+func (h *browserAuthHandler) retryRejectedAccessTokenLogout(w http.ResponseWriter, r *http.Request, token string) bool {
+	tokenAudit, ok := h.audit.(browserAccessTokenLogoutSink)
+	if !ok {
+		writeOAuthError(w, http.StatusServiceUnavailable)
+		return true
+	}
+	logoutCtx, cancel := boundedCleanupContext(r.Context())
+	defer cancel()
+	for _, clientID := range configuredConsoleClientIDs(h.config) {
+		session, err := tokenAudit.LogoutBrowserAccessToken(logoutCtx, token, BrowserAuditEvent{EnterpriseID: h.config.EnterpriseID, ClientID: clientID, Action: "browser_session.logout", Decision: "allow"})
+		if errors.Is(err, browserauth.ErrInvalidAccessToken) || errors.Is(err, browserauth.ErrInvalidSession) {
+			continue
+		}
+		if err != nil || session.EnterpriseID != h.config.EnterpriseID || session.UserID == "" {
+			writeOAuthError(w, http.StatusServiceUnavailable)
+			return true
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+	return false
 }
 
 func boundedCleanupContext(parent context.Context) (context.Context, context.CancelFunc) {

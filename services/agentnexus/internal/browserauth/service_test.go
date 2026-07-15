@@ -36,7 +36,7 @@ func TestCreateSessionHashesSecretsAndUsesFixedTTLs(t *testing.T) {
 		t.Fatalf("absolute ttl=%s", session.AbsoluteExpiresAt.Sub(clock.now))
 	}
 	stored := store.sessionSnapshot()
-	if len(stored) != 1 {
+	if len(stored) != 2 {
 		t.Fatalf("stored sessions=%d", len(stored))
 	}
 	for hash, record := range stored {
@@ -158,7 +158,7 @@ func TestEnterpriseUserMismatchFailsClosedBeforePersistence(t *testing.T) {
 	if _, _, err := svc.CreateSession(context.Background(), CreateSessionInput{EnterpriseID: "ent-2", UserID: "user-1"}); err == nil {
 		t.Fatal("mismatched user accepted")
 	}
-	if len(store.sessionSnapshot()) != 0 {
+	if len(store.sessionSnapshot()) != 1 {
 		t.Fatal("mismatched session persisted")
 	}
 	if _, err := svc.IssueCode(context.Background(), IssueCodeInput{EnterpriseID: "ent-2", UserID: "user-1", ClientID: "atlas", RedirectURI: "https://atlas/cb", Nonce: "n", CodeChallenge: s256(validVerifier)}); err == nil {
@@ -183,10 +183,150 @@ func TestExchangeCodeIsOneTimeAndPKCEBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.EnterpriseID != "ent-1" || result.UserID != "user-1" || result.Nonce != "nonce-1" {
-		t.Fatalf("result=%+v", result)
+		t.Fatalf("unexpected identity enterprise=%q user=%q nonce=%q", result.EnterpriseID, result.UserID, result.Nonce)
 	}
 	if _, err := svc.ExchangeCode(context.Background(), ExchangeCodeInput{Code: code, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"}); !errors.Is(err, ErrInvalidGrant) {
 		t.Fatalf("reuse=%v", err)
+	}
+}
+
+func TestExchangeCodeIssuesSessionBoundOpaqueAccessToken(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	sessionToken, session, err := svc.CreateSession(context.Background(), CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := validIssueInput()
+	input.BrowserSessionToken = sessionToken
+	code, err := svc.IssueCode(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.ExchangeCode(context.Background(), ExchangeCodeInput{Code: code, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validOpaqueSecret(result.AccessToken) || !result.AccessTokenExpiresAt.Equal(session.AbsoluteExpiresAt) {
+		t.Fatalf("unsafe access token shape valid=%v expiry_matches=%v", validOpaqueSecret(result.AccessToken), result.AccessTokenExpiresAt.Equal(session.AbsoluteExpiresAt))
+	}
+	if strings.Contains(fmt.Sprintf("%+v", store.accessTokenSnapshot()), result.AccessToken) {
+		t.Fatal("raw access token persisted")
+	}
+	resolved, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1")
+	if err != nil || resolved.EnterpriseID != "ent-1" || resolved.UserID != "user-1" {
+		t.Fatalf("resolved=%+v err=%v", resolved, err)
+	}
+	clock := &mutableClock{now: fixedNow.Add(7 * time.Hour)}
+	svc.now = clock.Now
+	resolved, err = svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1")
+	if err != nil || !resolved.IdleExpiresAt.Equal(fixedNow.Add(15*time.Hour)) {
+		t.Fatalf("bearer idle slide=%s err=%v", resolved.IdleExpiresAt, err)
+	}
+	if err := svc.RevokeSession(context.Background(), sessionToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1"); !errors.Is(err, ErrInvalidAccessToken) {
+		t.Fatalf("revoked session token err=%v", err)
+	}
+}
+
+func TestAccessTokenFailsClosedForWrongBindingAndExpiry(t *testing.T) {
+	svc, store, clock := newTestService(t)
+	sessionToken, _, err := svc.CreateSession(context.Background(), CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := validIssueInput()
+	input.BrowserSessionToken = sessionToken
+	code, err := svc.IssueCode(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.ExchangeCode(context.Background(), ExchangeCodeInput{Code: code, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range [][3]string{{"other", "agentatlas", "ent-1"}, {"agentatlas", "other", "ent-1"}, {"agentatlas", "agentatlas", "ent-2"}} {
+		if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, binding[0], binding[1], binding[2]); !errors.Is(err, ErrInvalidAccessToken) {
+			t.Fatalf("binding=%v err=%v", binding, err)
+		}
+	}
+	if session := store.sessionSnapshot()[hashHex(sessionToken)]; !session.LastSeenAt.Equal(fixedNow) || session.RevokedAt != nil {
+		t.Fatalf("wrong tenant mutated session")
+	}
+	if _, err := svc.LogoutAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-2"); !errors.Is(err, ErrInvalidAccessToken) {
+		t.Fatalf("wrong tenant logout err=%v", err)
+	}
+	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1"); err != nil {
+		t.Fatalf("wrong tenant logout revoked session: %v", err)
+	}
+	clock.now = fixedNow.Add(8 * time.Hour)
+	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1"); !errors.Is(err, ErrInvalidAccessToken) {
+		t.Fatalf("idle expiry err=%v", err)
+	}
+	clock.now = result.AccessTokenExpiresAt
+	if _, err := svc.GetAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1"); !errors.Is(err, ErrInvalidAccessToken) {
+		t.Fatalf("expiry err=%v", err)
+	}
+}
+
+func TestAccessTokenLogoutCannotRevokeAContradictorySessionBinding(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	sessionToken, _, err := svc.CreateSession(context.Background(), CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := validIssueInput()
+	input.BrowserSessionToken = sessionToken
+	code, err := svc.IssueCode(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.ExchangeCode(context.Background(), ExchangeCodeInput{Code: code, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.AddEnterpriseUser("ent-2", "user-2")
+	foreignToken, _, err := svc.CreateSession(context.Background(), CreateSessionInput{EnterpriseID: "ent-2", UserID: "user-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessHash := hashHex(result.AccessToken)
+	store.mu.Lock()
+	corrupt := store.accessTokens[accessHash]
+	corrupt.BrowserSessionIDHash = hashHex(foreignToken)
+	store.accessTokens[accessHash] = corrupt
+	store.mu.Unlock()
+
+	if _, err := svc.LogoutAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1"); !errors.Is(err, ErrInvalidAccessToken) {
+		t.Fatalf("contradictory binding logout err=%v", err)
+	}
+	if foreign := store.sessionSnapshot()[hashHex(foreignToken)]; foreign.RevokedAt != nil {
+		t.Fatal("contradictory token binding revoked a foreign session")
+	}
+}
+
+func TestAccessTokenHashCollisionDoesNotConsumeAuthorizationCode(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	firstCode, err := svc.IssueCode(context.Background(), validIssueInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExchangeCode(context.Background(), ExchangeCodeInput{Code: firstCode, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"}); err != nil {
+		t.Fatal(err)
+	}
+	colliding := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('d'), secretFixture('c')}}).Generate))
+	secondCode, err := colliding.IssueCode(context.Background(), validIssueInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ExchangeCodeInput{Code: secondCode, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"}
+	if _, err := colliding.ExchangeCode(context.Background(), request); !errors.Is(err, ErrGrantUnavailable) {
+		t.Fatalf("collision err=%v", err)
+	}
+	retry := NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator(func() (string, error) { return secretFixture('e'), nil }))
+	if _, err := retry.ExchangeCode(context.Background(), request); err != nil {
+		t.Fatalf("retry err=%v", err)
 	}
 }
 
@@ -326,6 +466,7 @@ func TestMemoryStoreRejectsDuplicateSessionHashAcrossEnterprises(t *testing.T) {
 func TestMemoryStoreCannotRecreateConsumedAuthorizationCodeHash(t *testing.T) {
 	store := NewMemoryStore()
 	store.AddEnterpriseUser("ent-1", "user-1")
+	store.sessions[hashHex(secretFixture('b'))] = storedSession{IDHash: hashHex(secretFixture('b')), EnterpriseID: "ent-1", UserID: "user-1", CreatedAt: fixedNow, LastSeenAt: fixedNow, IdleExpiresAt: fixedNow.Add(8 * time.Hour), AbsoluteExpiresAt: fixedNow.Add(24 * time.Hour), UserAgentHash: hashHex("test")}
 	secret := secretFixture('c')
 	service := func() *Service {
 		return NewService(store, WithClock(func() time.Time { return fixedNow }), WithTestSecretGenerator(func() (string, error) { return secret, nil }))
@@ -458,7 +599,7 @@ func TestLogoutSessionAtomicallyReturnsActorWithoutSlidingIdle(t *testing.T) {
 		t.Fatalf("actor=%+v", actor)
 	}
 	for key, record := range store.sessionSnapshot() {
-		if !record.LastSeenAt.Equal(before[key].LastSeenAt) || record.RevokedAt == nil {
+		if key != hashHex(secretFixture('b')) && (!record.LastSeenAt.Equal(before[key].LastSeenAt) || record.RevokedAt == nil) {
 			t.Fatalf("record=%+v created=%+v", record, created)
 		}
 	}
@@ -523,7 +664,7 @@ func (g *sequenceGenerator) Generate() (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if len(g.values) == 0 {
-		return "", errors.New("sequence exhausted")
+		return secretFixture('z'), nil
 	}
 	v := g.values[0]
 	g.values = g.values[1:]
@@ -535,12 +676,13 @@ func newTestService(t *testing.T) (*Service, *MemoryStore, *mutableClock) {
 	clock := &mutableClock{now: fixedNow}
 	store := NewMemoryStore()
 	store.AddEnterpriseUser("ent-1", "user-1")
-	svc := NewService(store, WithClock(clock.Now), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('s'), secretFixture('c')}}).Generate))
+	store.sessions[hashHex(secretFixture('b'))] = storedSession{IDHash: hashHex(secretFixture('b')), EnterpriseID: "ent-1", UserID: "user-1", CreatedAt: fixedNow, LastSeenAt: fixedNow, IdleExpiresAt: fixedNow.Add(8 * time.Hour), AbsoluteExpiresAt: fixedNow.Add(24 * time.Hour), UserAgentHash: hashHex("test")}
+	svc := NewService(store, WithClock(clock.Now), WithTestSecretGenerator((&sequenceGenerator{values: []string{secretFixture('s'), secretFixture('c'), secretFixture('a')}}).Generate))
 	return svc, store, clock
 }
 
 func validIssueInput() IssueCodeInput {
-	return IssueCodeInput{EnterpriseID: "ent-1", UserID: "user-1", ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback", Nonce: "nonce-1", CodeChallenge: s256(validVerifier)}
+	return IssueCodeInput{EnterpriseID: "ent-1", UserID: "user-1", ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback", Nonce: "nonce-1", CodeChallenge: s256(validVerifier), BrowserSessionToken: secretFixture('b')}
 }
 func s256(verifier string) string {
 	sum := sha256.Sum256([]byte(verifier))

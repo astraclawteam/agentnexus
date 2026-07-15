@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -131,11 +132,14 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 	assertNoStore(t, token)
 	var tokenPayload map[string]any
 	decodeJSON(t, token, &tokenPayload)
-	if tokenPayload["id_token"] == "" || tokenPayload["access_token"] != nil || tokenPayload["refresh_token"] != nil {
-		t.Fatalf("unsafe token payload=%v", tokenPayload)
+	accessToken, _ := tokenPayload["access_token"].(string)
+	if tokenPayload["id_token"] == "" || accessToken == "" || tokenPayload["refresh_token"] != nil {
+		t.Fatalf("token payload fields invalid id=%v access=%v refresh_present=%v", tokenPayload["id_token"] != "", accessToken != "", tokenPayload["refresh_token"] != nil)
 	}
+	assertBrowserAccessTokenStorage(t, pool, accessToken)
+	bffClient := &http.Client{Transport: bearerTransport{base: client.Transport, token: accessToken}}
 
-	me := mustRequest(t, client, http.MethodGet, gatewayURL+"/v1/browser-sessions/me", "", nil)
+	me := mustRequest(t, bffClient, http.MethodGet, gatewayURL+"/v1/browser-sessions/me", "", nil)
 	if me.StatusCode != http.StatusOK {
 		t.Fatalf("me status=%d body=%s", me.StatusCode, readBody(t, me))
 	}
@@ -158,10 +162,10 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 	}
 
 	// Trusted context cutover: identity, org scope and sealed version derive
-	// from the verified session; the request carries only correlation, the
+	// from the verified browser BFF token; the request carries only correlation, the
 	// resource binding and the requested capability.
 	decisionBody := `{"request_id":"decision-e2e-1","resource_type":"knowledge","resource_id":"knowledge-low","capability":"knowledge.suggest"}`
-	decisionResponse := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/authorization/decisions", decisionBody, map[string]string{"Content-Type": "application/json"})
+	decisionResponse := mustRequest(t, bffClient, http.MethodPost, gatewayURL+"/v1/authorization/decisions", decisionBody, map[string]string{"Content-Type": "application/json"})
 	if decisionResponse.StatusCode != http.StatusOK {
 		t.Fatalf("decision status=%d body=%s", decisionResponse.StatusCode, readBody(t, decisionResponse))
 	}
@@ -183,7 +187,7 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 	// GA Task 0E approval TRANSMISSION: the verified session transmits the
 	// caller's signed plan UNCHANGED, records the authority's evidence and
 	// revokes — AgentNexus never chooses an approver anywhere below.
-	transmitted := transmitApprovalPlan(t, client, gatewayURL)
+	transmitted := transmitApprovalPlan(t, bffClient, gatewayURL)
 	if transmitted.Status != "delivered" || transmitted.PlanRef != e2ePlanRef || transmitted.DeliveryAttempts != 1 || transmitted.Decision != "" {
 		t.Fatalf("transmitted=%+v", transmitted)
 	}
@@ -191,7 +195,7 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 	if len(deliveries) != 1 || deliveries[0].PlanRef != e2ePlanRef || deliveries[0].PlanHash != e2ePlanHash || deliveries[0].Authority != "agentatlas" || deliveries[0].Capability != "knowledge.article.publish" || deliveries[0].ParameterHash != e2eParamHash {
 		t.Fatalf("channel deliveries=%+v", deliveries)
 	}
-	statusResp := mustRequest(t, client, http.MethodGet, gatewayURL+"/v1/approvals/transmissions/"+e2ePlanRef, "", nil)
+	statusResp := mustRequest(t, bffClient, http.MethodGet, gatewayURL+"/v1/approvals/transmissions/"+e2ePlanRef, "", nil)
 	if statusResp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d body=%s", statusResp.StatusCode, readBody(t, statusResp))
 	}
@@ -202,22 +206,22 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 		t.Fatalf("transmission status=%+v", transmissionStatus)
 	}
 
-	wrongHash := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/approvals/evidence", e2eEvidenceBody(t, "sha256:"+strings.Repeat("9", 64)), map[string]string{"Content-Type": "application/json"})
+	wrongHash := mustRequest(t, bffClient, http.MethodPost, gatewayURL+"/v1/approvals/evidence", e2eEvidenceBody(t, "sha256:"+strings.Repeat("9", 64)), map[string]string{"Content-Type": "application/json"})
 	if wrongHash.StatusCode != http.StatusForbidden {
 		t.Fatalf("wrong-hash evidence status=%d body=%s", wrongHash.StatusCode, readBody(t, wrongHash))
 	}
 	wrongHash.Body.Close()
 
-	recorded := recordApprovalEvidence(t, client, gatewayURL)
+	recorded := recordApprovalEvidence(t, bffClient, gatewayURL)
 	if recorded.Status != "evidence_recorded" || recorded.Decision != "approved" {
 		t.Fatalf("recorded=%+v", recorded)
 	}
-	duplicate := recordApprovalEvidence(t, client, gatewayURL)
+	duplicate := recordApprovalEvidence(t, bffClient, gatewayURL)
 	if duplicate.Status != "evidence_recorded" {
 		t.Fatalf("duplicate evidence=%+v", duplicate)
 	}
 
-	revokeResp := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/approvals/transmissions/"+e2ePlanRef+"/revocations", `{"request_id":"revoke-e2e-1","reason":"requester withdrew the change"}`, map[string]string{"Content-Type": "application/json"})
+	revokeResp := mustRequest(t, bffClient, http.MethodPost, gatewayURL+"/v1/approvals/transmissions/"+e2ePlanRef+"/revocations", `{"request_id":"revoke-e2e-1","reason":"requester withdrew the change"}`, map[string]string{"Content-Type": "application/json"})
 	if revokeResp.StatusCode != http.StatusOK {
 		t.Fatalf("revoke status=%d body=%s", revokeResp.StatusCode, readBody(t, revokeResp))
 	}
@@ -251,7 +255,7 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 	}
 
 	grantBody := `{"case_ticket_id":"ticket-e2e","resource_type":"dream_evidence","resource_id":"dream-evidence-1","action":"read","ttl_seconds":300}`
-	grant := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/step-grants", grantBody, map[string]string{"Content-Type": "application/json"})
+	grant := mustRequest(t, bffClient, http.MethodPost, gatewayURL+"/v1/step-grants", grantBody, map[string]string{"Content-Type": "application/json"})
 	if grant.StatusCode != http.StatusCreated {
 		t.Fatalf("grant status=%d body=%s", grant.StatusCode, readBody(t, grant))
 	}
@@ -265,12 +269,12 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 		t.Fatalf("grant payload=%+v", grantPayload)
 	}
 	verifyBody := fmt.Sprintf(`{"token":%q,"resource_type":"dream_evidence","resource_id":"dream-evidence-1","action":"read","scope":"dream:evidence:read"}`, grantPayload.Token)
-	verify := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/tickets/verify", verifyBody, map[string]string{"Content-Type": "application/json"})
+	verify := mustRequest(t, bffClient, http.MethodPost, gatewayURL+"/v1/tickets/verify", verifyBody, map[string]string{"Content-Type": "application/json"})
 	if verify.StatusCode != http.StatusOK {
 		t.Fatalf("verify status=%d body=%s", verify.StatusCode, readBody(t, verify))
 	}
 	assertNoStore(t, verify)
-	repeatVerify := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/tickets/verify", verifyBody, map[string]string{"Content-Type": "application/json"})
+	repeatVerify := mustRequest(t, bffClient, http.MethodPost, gatewayURL+"/v1/tickets/verify", verifyBody, map[string]string{"Content-Type": "application/json"})
 	if repeatVerify.StatusCode != http.StatusOK {
 		t.Fatalf("repeat verify status=%d body=%s", repeatVerify.StatusCode, readBody(t, repeatVerify))
 	}
@@ -278,38 +282,38 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), `CREATE FUNCTION fail_sensitive_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected audit failure'; END $$; CREATE TRIGGER fail_sensitive_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION fail_sensitive_audit()`); err != nil {
 		t.Fatal(err)
 	}
-	failedVerify := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/tickets/verify", verifyBody, map[string]string{"Content-Type": "application/json"})
+	failedVerify := mustRequest(t, bffClient, http.MethodPost, gatewayURL+"/v1/tickets/verify", verifyBody, map[string]string{"Content-Type": "application/json"})
 	if failedVerify.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("audit-failed verify status=%d body=%s", failedVerify.StatusCode, readBody(t, failedVerify))
 	}
 	failedVerify.Body.Close()
 
 	assertOpaqueStorage(t, pool, grantPayload.Token)
-	failedLogout := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/browser-sessions/logout", "", nil)
+	failedLogout := mustRequest(t, bffClient, http.MethodPost, gatewayURL+"/v1/browser-sessions/logout", "", nil)
 	if failedLogout.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("audit-failed logout status=%d body=%s", failedLogout.StatusCode, readBody(t, failedLogout))
 	}
 	failedLogout.Body.Close()
-	stillActive := mustRequest(t, client, http.MethodGet, gatewayURL+"/v1/browser-sessions/me", "", nil)
-	if stillActive.StatusCode != http.StatusOK {
-		t.Fatalf("audit-failed logout revoked session: %d body=%s", stillActive.StatusCode, readBody(t, stillActive))
+	stillActive := mustRequest(t, bffClient, http.MethodGet, gatewayURL+"/v1/browser-sessions/me", "", nil)
+	if stillActive.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("audit-failed logout restored access: %d body=%s", stillActive.StatusCode, readBody(t, stillActive))
 	}
 	stillActive.Body.Close()
 	if _, err := pool.Exec(context.Background(), `DROP TRIGGER fail_sensitive_audit ON audit_events; DROP FUNCTION fail_sensitive_audit()`); err != nil {
 		t.Fatal(err)
 	}
-	logout := mustRequest(t, client, http.MethodPost, gatewayURL+"/v1/browser-sessions/logout", "", nil)
-	if logout.StatusCode != http.StatusNoContent {
-		t.Fatalf("logout status=%d", logout.StatusCode)
+	retriedLogout := mustRequest(t, bffClient, http.MethodPost, gatewayURL+"/v1/browser-sessions/logout", "", nil)
+	if retriedLogout.StatusCode != http.StatusNoContent {
+		t.Fatalf("retried logout status=%d body=%s", retriedLogout.StatusCode, readBody(t, retriedLogout))
 	}
-	logout.Body.Close()
+	retriedLogout.Body.Close()
 	for action, want := range map[string]int{"step_grant.verify": 2, "browser_session.logout": 1} {
 		var count int
 		if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM audit_events WHERE enterprise_id=$1 AND action=$2 AND event_hash ~ '^sha256:[0-9a-f]{64}$'`, e2eEnterprise, action).Scan(&count); err != nil || count != want {
 			t.Fatalf("audit action=%s count=%d err=%v", action, count, err)
 		}
 	}
-	postLogout := mustRequest(t, client, http.MethodGet, gatewayURL+"/v1/browser-sessions/me", "", nil)
+	postLogout := mustRequest(t, bffClient, http.MethodGet, gatewayURL+"/v1/browser-sessions/me", "", nil)
 	if postLogout.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("post logout me=%d", postLogout.StatusCode)
 	}
@@ -893,6 +897,41 @@ func (f *fakeOIDCProvider) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
+
+type bearerTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func assertBrowserAccessTokenStorage(t *testing.T, pool *pgxpool.Pool, raw string) {
+	t.Helper()
+	digest := sha256.Sum256([]byte(raw))
+	wantHash := hex.EncodeToString(digest[:])
+	var tokenHash, clientID, audience, enterpriseID, userID string
+	var expiresAt, absoluteExpiresAt time.Time
+	err := pool.QueryRow(context.Background(), `SELECT t.token_hash,t.client_id,t.audience,t.enterprise_id,t.enterprise_user_id,t.expires_at,s.absolute_expires_at FROM browser_access_tokens t JOIN browser_sessions s ON s.id_hash=t.browser_session_id_hash WHERE t.token_hash=$1`, wantHash).Scan(&tokenHash, &clientID, &audience, &enterpriseID, &userID, &expiresAt, &absoluteExpiresAt)
+	if err != nil || tokenHash != wantHash || clientID != "agentatlas" || audience != "agentatlas" || enterpriseID != e2eEnterprise || userID != e2eUser || !expiresAt.Equal(absoluteExpiresAt) {
+		t.Fatalf("access token storage binding invalid hash=%s client=%s audience=%s enterprise=%s user=%s expiry_equal=%v err=%v", tokenHash, clientID, audience, enterpriseID, userID, expiresAt.Equal(absoluteExpiresAt), err)
+	}
+	var rawRows int
+	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM browser_access_tokens WHERE token_hash=$1`, raw).Scan(&rawRows); err != nil || rawRows != 0 {
+		t.Fatalf("raw access token persisted rows=%d err=%v", rawRows, err)
+	}
+}
+
+func (t bearerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	clone := request.Clone(request.Context())
+	clone.Header = request.Header.Clone()
+	if clone.Header.Get("Authorization") == "" {
+		clone.Header.Set("Authorization", "Bearer "+t.token)
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(clone)
+}
+
 func writeFakeJSON(w http.ResponseWriter, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
