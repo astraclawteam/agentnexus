@@ -130,8 +130,12 @@ const (
 
 // SessionIdentity is a verified browser-session identity.
 type SessionIdentity struct {
-	TenantRef         string
-	PrincipalRef      string
+	TenantRef    string
+	PrincipalRef string
+	// ClientRef is populated for browser access tokens with the configured
+	// confidential console client that received the token. Cookie sessions
+	// leave it empty and use the deployment's default browser client class.
+	ClientRef         string
 	ExpiresAt         time.Time
 	IdleExpiresAt     time.Time
 	AbsoluteExpiresAt time.Time
@@ -593,11 +597,15 @@ func (r *Resolver) resolveAuthorization(req *http.Request, origin, header string
 		if err != nil {
 			return Context{}, r.credentialFailure(req, SourceBrowserAccessToken, origin, err)
 		}
+		clientRef := identity.ClientRef
+		if clientRef == "" {
+			clientRef = r.cfg.BrowserClientRef
+		}
 		return r.principalContext(req, principalInput{
 			source:                   SourceBrowserAccessToken,
 			tenantRef:                identity.TenantRef,
 			principalRef:             identity.PrincipalRef,
-			clientRef:                r.cfg.BrowserClientRef,
+			clientRef:                clientRef,
 			releaseRef:               UnregisteredReleaseRef,
 			expiresAt:                identity.ExpiresAt,
 			browserIdleExpiresAt:     identity.IdleExpiresAt,

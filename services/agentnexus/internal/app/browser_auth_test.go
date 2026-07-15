@@ -415,11 +415,56 @@ func TestBrowserAuthCallbackTokenMeAndLogout(t *testing.T) {
 	if logout.Code != http.StatusNoContent {
 		t.Fatalf("logout=%d", logout.Code)
 	}
+	h.audit.mu.Lock()
+	logoutClientID := h.audit.events[len(h.audit.events)-1].ClientID
+	h.audit.mu.Unlock()
+	if logoutClientID != "agentatlas" {
+		t.Fatalf("logout client_id=%q want agentatlas", logoutClientID)
+	}
 	if got := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", cookie).Code; got != http.StatusUnauthorized {
 		t.Fatalf("post logout=%d", got)
 	}
 	if got := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", nil, "Authorization", "Bearer "+accessToken).Code; got != http.StatusUnauthorized {
 		t.Fatalf("post logout bearer=%d", got)
+	}
+}
+
+func TestBrowserAccessTokenVerifierAcceptsEveryConfiguredConsoleClient(t *testing.T) {
+	resolver := &configuredAccessTokenResolver{validClientID: "agentnexus-admin"}
+	verifier := newBrowserAccessTokenTrustVerifier(resolver, browserauth.OIDCConfig{
+		EnterpriseID: "ent-1",
+		ConsoleClients: map[string][]string{
+			"agentatlas":       {"https://atlas.example.com/auth/callback"},
+			"agentnexus-admin": {"https://nexus-admin.example.com/auth/callback"},
+		},
+	})
+	identity, err := verifier.VerifyBrowserAccessToken(context.Background(), "opaque-access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.TenantRef != "ent-1" || identity.PrincipalRef != "user-1" || identity.ClientRef != "agentnexus-admin" {
+		t.Fatalf("identity=%+v", identity)
+	}
+	if strings.Join(resolver.clients, ",") != "agentatlas,agentnexus-admin" {
+		t.Fatalf("client attempts=%v", resolver.clients)
+	}
+}
+
+func TestConsoleServiceCredentialVerifierAcceptsEveryConfiguredClient(t *testing.T) {
+	credentials, err := browserauth.NewConsoleClientCredentials(map[string][]string{
+		"agentatlas":       {testConsoleClientSecret},
+		"agentnexus-admin": {"AgentNexus-admin-console-secret-N8xR2pT6yK9dF3mQ4"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := consoleServiceCredentialVerifier{config: browserauth.OIDCConfig{EnterpriseID: "ent-1", ConsoleCredentials: credentials}}
+	identity, err := verifier.VerifyServiceCredential(context.Background(), "agentnexus-admin", "AgentNexus-admin-console-secret-N8xR2pT6yK9dF3mQ4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.TenantRef != "ent-1" || identity.ClientRef != "agentnexus-admin" {
+		t.Fatalf("identity=%+v", identity)
 	}
 }
 
@@ -990,6 +1035,19 @@ type memoryAudit struct {
 	sessions    BrowserSessionService
 }
 
+type configuredAccessTokenResolver struct {
+	validClientID string
+	clients       []string
+}
+
+func (r *configuredAccessTokenResolver) GetAccessTokenSession(_ context.Context, _ string, clientID, audience, enterpriseID string) (browserauth.BrowserSession, error) {
+	r.clients = append(r.clients, clientID)
+	if clientID != r.validClientID || audience != clientID || enterpriseID != "ent-1" {
+		return browserauth.BrowserSession{}, browserauth.ErrInvalidAccessToken
+	}
+	return browserauth.BrowserSession{EnterpriseID: enterpriseID, UserID: "user-1", IdleExpiresAt: time.Now().Add(time.Hour), AbsoluteExpiresAt: time.Now().Add(2 * time.Hour)}, nil
+}
+
 func (m *memoryAudit) LogoutBrowserSession(ctx context.Context, token string, event BrowserAuditEvent) (browserauth.BrowserSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1010,7 +1068,7 @@ func (m *memoryAudit) LogoutBrowserAccessToken(ctx context.Context, token string
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, m.sawDeadline = ctx.Deadline()
-	session, err := m.sessions.LogoutAccessTokenSession(ctx, token, "agentatlas", "agentatlas", event.EnterpriseID)
+	session, err := m.sessions.LogoutAccessTokenSession(ctx, token, event.ClientID, event.ClientID, event.EnterpriseID)
 	if err != nil {
 		return browserauth.BrowserSession{}, err
 	}

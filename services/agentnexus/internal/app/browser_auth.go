@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -85,6 +86,7 @@ type BrowserProfileResolver interface {
 type BrowserAuditEvent struct {
 	EnterpriseID string
 	ActorUserID  string
+	ClientID     string
 	Action       string
 	Decision     string
 }
@@ -130,21 +132,44 @@ func (v browserSessionTrustVerifier) VerifyBrowserSession(ctx context.Context, t
 type browserAccessTokenTrustVerifier struct {
 	sessions     browserAccessTokenResolver
 	enterpriseID string
+	clientIDs    []string
+}
+
+func newBrowserAccessTokenTrustVerifier(sessions browserAccessTokenResolver, config browserauth.OIDCConfig) browserAccessTokenTrustVerifier {
+	clientIDs := make([]string, 0, len(config.ConsoleClients))
+	for clientID := range config.ConsoleClients {
+		clientIDs = append(clientIDs, clientID)
+	}
+	sort.Strings(clientIDs)
+	return browserAccessTokenTrustVerifier{sessions: sessions, enterpriseID: config.EnterpriseID, clientIDs: clientIDs}
 }
 
 func (v browserAccessTokenTrustVerifier) VerifyBrowserAccessToken(ctx context.Context, token string) (trust.SessionIdentity, error) {
-	session, err := v.sessions.GetAccessTokenSession(ctx, token, "agentatlas", "agentatlas", v.enterpriseID)
-	if errors.Is(err, browserauth.ErrAccessTokenUnavailable) {
-		return trust.SessionIdentity{}, errors.Join(trust.ErrSourceUnavailable, err)
+	var session browserauth.BrowserSession
+	var matchedClientID string
+	for _, clientID := range v.clientIDs {
+		resolved, err := v.sessions.GetAccessTokenSession(ctx, token, clientID, clientID, v.enterpriseID)
+		if errors.Is(err, browserauth.ErrInvalidAccessToken) {
+			continue
+		}
+		if errors.Is(err, browserauth.ErrAccessTokenUnavailable) {
+			return trust.SessionIdentity{}, errors.Join(trust.ErrSourceUnavailable, err)
+		}
+		if err != nil {
+			return trust.SessionIdentity{}, errors.Join(trust.ErrCredentialRejected, err)
+		}
+		session = resolved
+		matchedClientID = clientID
+		break
 	}
-	if err != nil {
-		return trust.SessionIdentity{}, errors.Join(trust.ErrCredentialRejected, err)
+	if matchedClientID == "" {
+		return trust.SessionIdentity{}, errors.Join(trust.ErrCredentialRejected, browserauth.ErrInvalidAccessToken)
 	}
 	expiresAt := session.IdleExpiresAt
 	if !session.AbsoluteExpiresAt.IsZero() && (expiresAt.IsZero() || session.AbsoluteExpiresAt.Before(expiresAt)) {
 		expiresAt = session.AbsoluteExpiresAt
 	}
-	return trust.SessionIdentity{TenantRef: session.EnterpriseID, PrincipalRef: session.UserID, ExpiresAt: expiresAt, IdleExpiresAt: session.IdleExpiresAt, AbsoluteExpiresAt: session.AbsoluteExpiresAt}, nil
+	return trust.SessionIdentity{TenantRef: session.EnterpriseID, PrincipalRef: session.UserID, ClientRef: matchedClientID, ExpiresAt: expiresAt, IdleExpiresAt: session.IdleExpiresAt, AbsoluteExpiresAt: session.AbsoluteExpiresAt}, nil
 }
 
 // consoleServiceCredentialVerifier verifies the confidential first-party
@@ -153,7 +178,7 @@ func (v browserAccessTokenTrustVerifier) VerifyBrowserAccessToken(ctx context.Co
 type consoleServiceCredentialVerifier struct{ config browserauth.OIDCConfig }
 
 func (v consoleServiceCredentialVerifier) VerifyServiceCredential(_ context.Context, clientID, secret string) (trust.ServiceIdentity, error) {
-	if clientID == "agentatlas" && v.config.AuthenticateConsoleClient(clientID, secret) {
+	if v.config.AuthenticateConsoleClient(clientID, secret) {
 		return trust.ServiceIdentity{TenantRef: v.config.EnterpriseID, ClientRef: clientID, ReleaseRef: trust.UnregisteredReleaseRef}, nil
 	}
 	return trust.ServiceIdentity{}, trust.ErrCredentialRejected
@@ -265,7 +290,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 	trustResolver, err := trust.NewResolver(trust.ResolverConfig{
 		TenantRef:           deps.Config.EnterpriseID,
 		Sessions:            browserSessionTrustVerifier{sessions: deps.Sessions},
-		BrowserAccessTokens: browserAccessTokenTrustVerifier{sessions: deps.Sessions, enterpriseID: deps.Config.EnterpriseID},
+		BrowserAccessTokens: newBrowserAccessTokenTrustVerifier(deps.Sessions, deps.Config),
 		AccessTickets:       deps.TicketActors,
 		StepGrants:          deps.StepGrants,
 		Services:            consoleServiceCredentialVerifier{config: deps.Config},
@@ -697,7 +722,7 @@ func (h *browserAuthHandler) me(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *browserAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
-	_, credential, resolveErr := h.trustResolver.ResolveBrowserRequest(r)
+	trustedCtx, credential, resolveErr := h.trustResolver.ResolveBrowserRequest(r)
 	if resolveErr != nil {
 		if trust.HTTPStatus(resolveErr) == http.StatusServiceUnavailable {
 			writeOAuthError(w, http.StatusServiceUnavailable)
@@ -716,7 +741,7 @@ func (h *browserAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logoutCtx, cancel := boundedCleanupContext(r.Context())
-		session, err := tokenAudit.LogoutBrowserAccessToken(logoutCtx, credential.Token, BrowserAuditEvent{EnterpriseID: h.config.EnterpriseID, Action: "browser_session.logout", Decision: "allow"})
+		session, err := tokenAudit.LogoutBrowserAccessToken(logoutCtx, credential.Token, BrowserAuditEvent{EnterpriseID: h.config.EnterpriseID, ClientID: trustedCtx.Principal.AgentClientRef, Action: "browser_session.logout", Decision: "allow"})
 		cancel()
 		if errors.Is(err, browserauth.ErrInvalidAccessToken) || errors.Is(err, browserauth.ErrInvalidSession) {
 			w.WriteHeader(http.StatusNoContent)

@@ -192,7 +192,7 @@ func newTrustHarness(t *testing.T) *trustHarness {
 			revoked: map[string]bool{},
 		},
 		accessTokens: &fakeAccessTokens{identities: map[string]trust.SessionIdentity{
-			"access-token": {TenantRef: testTenant, PrincipalRef: "user-1", ExpiresAt: time.Now().Add(time.Hour)},
+			"access-token": {TenantRef: testTenant, PrincipalRef: "user-1", ClientRef: "agentnexus-admin", ExpiresAt: time.Now().Add(time.Hour)},
 		}},
 		tickets: &fakeTickets{identities: map[string]trust.TicketIdentity{
 			"ticket-token": {TenantRef: testTenant, PrincipalRef: "user-1", TicketRef: "ct-1", ExpiresAt: time.Now().Add(time.Hour)},
@@ -328,7 +328,7 @@ func TestTrustedContextResolvesBrowserAccessTokenOnce(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if echo.Tenant != testTenant || echo.Principal != "user-1" || echo.Source != string(trust.SourceBrowserAccessToken) || !echo.Connector {
+	if echo.Tenant != testTenant || echo.Principal != "user-1" || echo.Client != "agentnexus-admin" || echo.Source != string(trust.SourceBrowserAccessToken) || !echo.Connector {
 		t.Fatalf("context=%+v", echo)
 	}
 	if h.accessTokens.calls != 1 || h.snapshots.callCount() != 1 {

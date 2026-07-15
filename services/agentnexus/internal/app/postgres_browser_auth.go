@@ -521,11 +521,11 @@ func (s *PostgresBrowserAuditSink) LogoutBrowserSession(ctx context.Context, tok
 
 func (s *PostgresBrowserAuditSink) LogoutBrowserAccessToken(ctx context.Context, token string, input BrowserAuditEvent) (browserauth.BrowserSession, error) {
 	tokenHash := browserauth.HashBrowserAccessToken(token)
-	if s == nil || s.pool == nil || tokenHash == "" || input.EnterpriseID == "" || input.Action != "browser_session.logout" || input.Decision != "allow" {
+	if s == nil || s.pool == nil || tokenHash == "" || input.EnterpriseID == "" || !browserauth.ValidConsoleClientID(input.ClientID) || input.Action != "browser_session.logout" || input.Decision != "allow" {
 		return browserauth.BrowserSession{}, browserauth.ErrInvalidAccessToken
 	}
 	now := time.Now().UTC()
-	record, err := db.New(s.pool).RevokeAndGetBrowserSessionByAccessToken(ctx, db.RevokeAndGetBrowserSessionByAccessTokenParams{TokenHash: tokenHash, EnterpriseID: input.EnterpriseID, ClientID: "agentatlas", Audience: "agentatlas", RevokedAt: pgtype.Timestamptz{Time: now, Valid: true}})
+	record, err := db.New(s.pool).RevokeAndGetBrowserSessionByAccessToken(ctx, db.RevokeAndGetBrowserSessionByAccessTokenParams{TokenHash: tokenHash, EnterpriseID: input.EnterpriseID, ClientID: input.ClientID, Audience: input.ClientID, RevokedAt: pgtype.Timestamptz{Time: now, Valid: true}})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return browserauth.BrowserSession{}, browserauth.ErrInvalidAccessToken
 	}
