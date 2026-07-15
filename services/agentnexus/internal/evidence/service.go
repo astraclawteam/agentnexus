@@ -783,22 +783,22 @@ func (s *Service) Read(ctx context.Context, principal runtime.PrincipalContext, 
 		case handle.DataClass != declared.DataClass:
 			// The caller-declared need expectation conflicts with the
 			// resolved read: a mismatched verification need fails closed.
-			return s.denyRead(ctx, principal, req, handle, denyNeedMismatch), nil
+			return s.denyVerificationRead(ctx, principal, req, handle, denyNeedMismatch, declared), nil
 		case !validAuthorityTier(binding.AuthorityTier) || binding.FreshnessBound <= 0:
 			// No declared observation authority to derive: the service never
 			// invents a tier and never accepts one from the caller.
-			return s.denyRead(ctx, principal, req, handle, denyObservationUnsupported), nil
+			return s.denyVerificationRead(ctx, principal, req, handle, denyObservationUnsupported, declared), nil
 		case !now.Before(handle.StagedAt.Add(binding.FreshnessBound)):
 			// The staged observation aged past its declared freshness bound;
 			// minting would claim fresher than reality.
-			return s.denyRead(ctx, principal, req, handle, denyObservationStale), nil
+			return s.denyVerificationRead(ctx, principal, req, handle, denyObservationStale, declared), nil
 		}
 		if s.actionBinding != nil {
 			// GA Task 0F seam: the wired verifier is authoritative for the
 			// Action side of the binding (stored Action, parameter hash,
 			// declared postcondition/need membership).
 			if err := s.actionBinding.VerifyActionBinding(ctx, principal.TenantRef, *declared); err != nil {
-				return s.denyRead(ctx, principal, req, handle, denyActionUnbound), nil
+				return s.denyVerificationRead(ctx, principal, req, handle, denyActionUnbound, declared), nil
 			}
 		}
 	}
@@ -965,11 +965,34 @@ func (s *Service) Read(ctx context.Context, principal runtime.PrincipalContext, 
 // deny. The public envelope carries the decision only — reasons stay in the
 // lineage, and neither carries content or topology.
 func (s *Service) denyRead(ctx context.Context, principal runtime.PrincipalContext, req runtime.EvidenceReadRequest, handle Handle, reason string) ReadResult {
+	return s.denyVerificationRead(ctx, principal, req, handle, reason, nil)
+}
+
+// denyVerificationRead is denyRead enriched for verification-binding denials.
+// It additionally records the declared binding's business-semantic refs/ids
+// (GA Task 0F fold-in, deferred from the plan's 0E deny-path enrichment) so a
+// forensic reviewer can see WHICH Action binding a denied verification read
+// was evaluated against — not just the coded reason. The recorded ids mirror
+// the ALLOW-path lineage keys (action_ref/postcondition_id/verification_need_id)
+// and add the parameter hash and the DECLARED data class under its own key
+// (binding_data_class, kept distinct from the resolved handle data_class so a
+// need-mismatch preserves BOTH the claimed and the resolved class). Only these
+// five business-semantic ids are recorded — never topology, connector detail,
+// content or trusted identity. A nil binding records nothing extra and is the
+// ordinary read-deny path; the deny DECISION is unchanged in every case.
+func (s *Service) denyVerificationRead(ctx context.Context, principal runtime.PrincipalContext, req runtime.EvidenceReadRequest, handle Handle, reason string, binding *runtime.VerificationBinding) ReadResult {
 	details := map[string]any{"decision": DecisionDeny, "reason": reason}
 	if handle.DataClass != "" {
 		details["data_class"] = handle.DataClass
 		details["content_hash"] = handle.ContentHash
 		details["source_version"] = handle.SourceVersion
+	}
+	if binding != nil {
+		details["action_ref"] = binding.ActionRef
+		details["parameter_hash"] = binding.ParameterHash
+		details["postcondition_id"] = binding.PostconditionID
+		details["verification_need_id"] = binding.VerificationNeedID
+		details["binding_data_class"] = binding.DataClass
 	}
 	_, _ = s.audit.AppendEvidenceAudit(ctx, AuditEvent{
 		TenantRef:    principal.TenantRef,
