@@ -10,7 +10,7 @@ files:
   - path: api/openapi/gateway-agent.yaml
     sha256: sha256:8ad81f15fe41c7d356bd4e7169c544931a031a16c276d587998a5de5fa87ded7
   - path: api/openapi/gateway-runtime.yaml
-    sha256: sha256:010bbd514e435f21c5aaf65bcc0dca7d0679be38921adb7a38a10f1aaf08df18
+    sha256: sha256:a1bb6dac59bfc1e95739cc80b0768d6ec67f61aaf55db75be3b9be4bb842bcb2
   - path: api/proto/agentnexus/actions/v1/actions.proto
     sha256: sha256:67aa032ccbdcd7cfe7b77e624138dc83fff2cae71639df995cf612e4c67ba099
   - path: api/proto/agentnexus/audit/v1/audit.proto
