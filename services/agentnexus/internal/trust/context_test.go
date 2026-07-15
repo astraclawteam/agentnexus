@@ -151,6 +151,7 @@ func (a *recordingAudit) last() trust.Rejection {
 }
 
 type trustHarness struct {
+	resolver     *trust.Resolver
 	sessions     *fakeSessions
 	accessTokens *fakeAccessTokens
 	tickets      *fakeTickets
@@ -261,6 +262,7 @@ func newTrustHarness(t *testing.T) *trustHarness {
 		writeEcho(w, echo)
 	})
 	h.router = resolver.Middleware(handler)
+	h.resolver = resolver
 	return h
 }
 
@@ -331,6 +333,27 @@ func TestTrustedContextResolvesBrowserAccessTokenOnce(t *testing.T) {
 	}
 	if h.accessTokens.calls != 1 || h.snapshots.callCount() != 1 {
 		t.Fatalf("access token calls=%d snapshot calls=%d", h.accessTokens.calls, h.snapshots.callCount())
+	}
+}
+
+func TestResolveBrowserRequestReturnsOnlyTheVerifiedBrowserCredential(t *testing.T) {
+	t.Parallel()
+	h := newTrustHarness(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/browser-sessions/me", nil)
+	req.Header.Set("Authorization", "bEaReR access-token")
+	ctx, credential, err := h.resolver.ResolveBrowserRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Source != trust.SourceBrowserAccessToken || credential.Source != trust.SourceBrowserAccessToken || credential.Token != "access-token" {
+		t.Fatalf("context=%+v credential=%+v", ctx, credential)
+	}
+
+	conflict := httptest.NewRequest(http.MethodGet, "/v1/browser-sessions/logout", nil)
+	conflict.AddCookie(&http.Cookie{Name: "nexus_browser_session", Value: "session-token"})
+	conflict.Header.Set("Authorization", "Bearer access-token")
+	if _, _, err := h.resolver.ResolveBrowserRequest(conflict); !errors.Is(err, trust.ErrConflictingCredentials) {
+		t.Fatalf("conflicting browser credentials error=%v", err)
 	}
 }
 

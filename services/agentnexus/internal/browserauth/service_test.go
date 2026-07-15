@@ -270,6 +270,42 @@ func TestAccessTokenFailsClosedForWrongBindingAndExpiry(t *testing.T) {
 	}
 }
 
+func TestAccessTokenLogoutCannotRevokeAContradictorySessionBinding(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	sessionToken, _, err := svc.CreateSession(context.Background(), CreateSessionInput{EnterpriseID: "ent-1", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := validIssueInput()
+	input.BrowserSessionToken = sessionToken
+	code, err := svc.IssueCode(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.ExchangeCode(context.Background(), ExchangeCodeInput{Code: code, Verifier: validVerifier, ClientID: "agentatlas", RedirectURI: "https://atlas/auth/callback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.AddEnterpriseUser("ent-2", "user-2")
+	foreignToken, _, err := svc.CreateSession(context.Background(), CreateSessionInput{EnterpriseID: "ent-2", UserID: "user-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessHash := hashHex(result.AccessToken)
+	store.mu.Lock()
+	corrupt := store.accessTokens[accessHash]
+	corrupt.BrowserSessionIDHash = hashHex(foreignToken)
+	store.accessTokens[accessHash] = corrupt
+	store.mu.Unlock()
+
+	if _, err := svc.LogoutAccessTokenSession(context.Background(), result.AccessToken, "agentatlas", "agentatlas", "ent-1"); !errors.Is(err, ErrInvalidAccessToken) {
+		t.Fatalf("contradictory binding logout err=%v", err)
+	}
+	if foreign := store.sessionSnapshot()[hashHex(foreignToken)]; foreign.RevokedAt != nil {
+		t.Fatal("contradictory token binding revoked a foreign session")
+	}
+}
+
 func TestAccessTokenHashCollisionDoesNotConsumeAuthorizationCode(t *testing.T) {
 	svc, store, _ := newTestService(t)
 	firstCode, err := svc.IssueCode(context.Background(), validIssueInput())

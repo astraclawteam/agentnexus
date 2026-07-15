@@ -74,6 +74,8 @@ SELECT t.token_hash, t.browser_session_id_hash, t.enterprise_id, t.enterprise_us
        s.idle_expires_at AS session_idle_expires_at, s.absolute_expires_at AS session_absolute_expires_at
 FROM browser_access_tokens AS t
 JOIN browser_sessions AS s ON s.id_hash = t.browser_session_id_hash
+  AND s.enterprise_id = t.enterprise_id
+  AND s.enterprise_user_id = t.enterprise_user_id
 WHERE t.token_hash = sqlc.arg(token_hash)
   AND t.enterprise_id = sqlc.arg(enterprise_id)
   AND t.client_id = sqlc.arg(client_id)
@@ -91,6 +93,8 @@ FROM browser_access_tokens AS t
 WHERE t.token_hash = sqlc.arg(token_hash)
   AND t.enterprise_id = sqlc.arg(enterprise_id)
   AND t.browser_session_id_hash = s.id_hash
+  AND s.enterprise_id = t.enterprise_id
+  AND s.enterprise_user_id = t.enterprise_user_id
   AND t.client_id = sqlc.arg(client_id)
   AND t.audience = sqlc.arg(audience)
   AND t.revoked_at IS NULL

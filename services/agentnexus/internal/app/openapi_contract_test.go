@@ -82,6 +82,42 @@ func TestOpenAPIGatewayRuntimeContract(t *testing.T) {
 		t.Fatalf("console client security=%v", tokenSecurity)
 	}
 
+	for _, endpoint := range []struct{ path, method string }{
+		{"/v1/browser-sessions/me", "get"},
+		{"/v1/browser-sessions/logout", "post"},
+		{"/v1/authorization/decisions", "post"},
+		{"/v1/runtime/locate", "post"},
+		{"/v1/runtime/read", "post"},
+		{"/v1/runtime/act", "post"},
+		{"/v1/runtime/receipts/{receipt_ref}", "get"},
+		{"/v1/runtime/actions/{action_ref}/receipts", "post"},
+		{"/v1/runtime/actions/{action_ref}/compensations", "post"},
+		{"/v1/approvals/transmissions", "post"},
+		{"/v1/approvals/transmissions/{plan_ref}", "get"},
+		{"/v1/approvals/transmissions/{plan_ref}/revocations", "post"},
+		{"/v1/approvals/evidence", "post"},
+		{"/v1/step-grants", "post"},
+		{"/v1/tickets/verify", "post"},
+	} {
+		operation := nestedMap(t, paths, endpoint.path, endpoint.method)
+		security, ok := operation["security"].([]any)
+		if !ok {
+			t.Fatalf("%s %s must declare browserAccessToken security", endpoint.method, endpoint.path)
+		}
+		found := false
+		for _, item := range security {
+			if schemes, ok := item.(map[string]any); ok {
+				_, found = schemes["browserAccessToken"]
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%s %s accepts a browser BFF token in the runtime but omits it from OpenAPI", endpoint.method, endpoint.path)
+		}
+	}
+
 	t.Run("BrowserSession", func(t *testing.T) {
 		schema := namedSchema(t, schemas, "BrowserSession")
 		assertObjectProperties(t, schema, []string{

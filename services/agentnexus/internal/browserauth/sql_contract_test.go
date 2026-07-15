@@ -137,6 +137,30 @@ func TestMigrationAndQueriesUseHashOnlyAtomicPersistence(t *testing.T) {
 	}
 }
 
+func TestBrowserAccessTokenSessionBindingIsCompositeAndFailClosed(t *testing.T) {
+	_, here, _, _ := runtime.Caller(0)
+	root := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
+	migration := strings.Join(strings.Fields(strings.ToLower(mustRead(t, filepath.Join(root, "db", "migrations", "000013_browser_access_tokens.sql")))), " ")
+	for _, required := range []string{
+		"unique (id_hash, enterprise_id, enterprise_user_id)",
+		"foreign key (browser_session_id_hash, enterprise_id, enterprise_user_id)",
+		"references browser_sessions(id_hash, enterprise_id, enterprise_user_id)",
+	} {
+		if !strings.Contains(migration, required) {
+			t.Errorf("browser access token migration missing identity binding %q", required)
+		}
+	}
+	queries := mustRead(t, filepath.Join(root, "db", "queries", "auth.sql"))
+	for _, name := range []string{"GetActiveBrowserAccessToken", "RevokeAndGetBrowserSessionByAccessToken"} {
+		query := strings.Join(strings.Fields(strings.ToLower(namedQuery(t, queries, name))), " ")
+		for _, required := range []string{"s.enterprise_id = t.enterprise_id", "s.enterprise_user_id = t.enterprise_user_id"} {
+			if !strings.Contains(query, required) {
+				t.Errorf("%s missing fail-closed identity join %q", name, required)
+			}
+		}
+	}
+}
+
 func TestPostgresStoreImplementsStore(t *testing.T) {
 	var _ Store = (*PostgresStore)(nil)
 }

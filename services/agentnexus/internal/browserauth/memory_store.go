@@ -383,7 +383,7 @@ func (s *MemoryStore) RevokeSessionByAccessToken(ctx context.Context, tokenHash,
 	}
 	token, ok := s.accessTokens[tokenHash]
 	session, sessionOK := s.sessions[token.BrowserSessionIDHash]
-	if !ok || !sessionOK || token.ClientID != clientID || token.Audience != audience || token.EnterpriseID != enterpriseID || token.RevokedAt != nil || !now.Before(token.ExpiresAt) || (session.RevokedAt == nil && (!now.Before(session.IdleExpiresAt) || !now.Before(session.AbsoluteExpiresAt))) {
+	if !ok || !sessionOK || token.ClientID != clientID || token.Audience != audience || token.EnterpriseID != enterpriseID || token.EnterpriseID != session.EnterpriseID || token.UserID != session.UserID || token.RevokedAt != nil || !now.Before(token.ExpiresAt) || (session.RevokedAt == nil && (!now.Before(session.IdleExpiresAt) || !now.Before(session.AbsoluteExpiresAt))) {
 		return storedSession{}, errNotFound
 	}
 	if session.RevokedAt == nil {
