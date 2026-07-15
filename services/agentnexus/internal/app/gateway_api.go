@@ -53,7 +53,12 @@ func isBrowserAuthPath(path string) bool {
 func trustProtectedPath(path string) bool {
 	switch path {
 	case "/v1/authorization/decisions", "/v1/step-grants", "/v1/tickets/verify", "/v1/audit/evidence",
-		"/v1/runtime/locate", "/v1/runtime/read":
+		"/v1/runtime/locate", "/v1/runtime/read", "/v1/runtime/act":
+		return true
+	}
+	// The GA Task 0F durable action surface: the receipt-ingestion callback, the
+	// compensation trigger and the receipt fetch.
+	if strings.HasPrefix(path, "/v1/runtime/actions/") || strings.HasPrefix(path, "/v1/runtime/receipts/") {
 		return true
 	}
 	return strings.HasPrefix(path, "/v1/approvals/")

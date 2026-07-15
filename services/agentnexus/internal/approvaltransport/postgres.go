@@ -234,6 +234,51 @@ func (s *PostgresStore) GetEvidence(ctx context.Context, tenantRef, planRef stri
 	return evidenceFromRow(row)
 }
 
+func (s *PostgresStore) ConsumeEvidence(ctx context.Context, tenantRef, planRef string, at time.Time) (ConsumedEvidence, error) {
+	tx, queries, err := s.begin(ctx)
+	if err != nil {
+		return ConsumedEvidence{}, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if err := lockTransmission(ctx, queries, tenantRef, planRef); err != nil {
+		return ConsumedEvidence{}, errors.Join(ErrUnavailable, err)
+	}
+	transmission, err := queries.GetApprovalTransmission(ctx, db.GetApprovalTransmissionParams{TenantRef: tenantRef, PlanRef: planRef})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ConsumedEvidence{}, ErrNotFound
+		}
+		return ConsumedEvidence{}, errors.Join(ErrUnavailable, err)
+	}
+	if TransmissionStatus(transmission.Status) == StatusRevoked {
+		return ConsumedEvidence{}, ErrTransmissionRevoked
+	}
+	row, err := queries.ConsumeApprovalEvidence(ctx, db.ConsumeApprovalEvidenceParams{TenantRef: tenantRef, PlanRef: planRef, ConsumedAt: pgTimestamptz(at)})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No unconsumed record matched: distinguish an absent record from an
+			// already-consumed one so Task 0F fails closed with the right sentinel.
+			if _, getErr := queries.GetApprovalEvidenceByPlan(ctx, db.GetApprovalEvidenceByPlanParams{TenantRef: tenantRef, PlanRef: planRef}); getErr == nil {
+				return ConsumedEvidence{}, ErrEvidenceConsumed
+			} else if errors.Is(getErr, pgx.ErrNoRows) {
+				return ConsumedEvidence{}, ErrNotFound
+			}
+			return ConsumedEvidence{}, errors.Join(ErrUnavailable, err)
+		}
+		return ConsumedEvidence{}, errors.Join(ErrUnavailable, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ConsumedEvidence{}, errors.Join(ErrUnavailable, err)
+	}
+	return ConsumedEvidence{
+		ApprovalRef:   row.ApprovalRef,
+		PlanRef:       row.PlanRef,
+		Capability:    row.Capability,
+		ParameterHash: row.ParameterHash,
+		Decision:      runtime.ApprovalDecision(row.Decision),
+	}, nil
+}
+
 func (s *PostgresStore) Revoke(ctx context.Context, tenantRef, planRef, reason, revocationID string, at time.Time) (Transmission, error) {
 	tx, queries, err := s.begin(ctx)
 	if err != nil {

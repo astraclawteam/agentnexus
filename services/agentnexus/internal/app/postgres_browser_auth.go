@@ -13,6 +13,7 @@ import (
 	"time"
 
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/actions"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approvaltransport"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
@@ -277,6 +278,58 @@ func (s *PostgresBrowserAuditSink) AppendApprovalTransmissionAudit(ctx context.C
 	}
 	sum := sha256.Sum256(details)
 	chained := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: event.TenantRef, ActorUserID: event.PrincipalRef, ResourceType: "approval_transmission", ResourceID: event.PlanRef, Action: event.Action, Decision: event.Decision, InputHash: "sha256:" + hex.EncodeToString(sum[:])}, previous)
+	if _, err := tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: chained.ID, EnterpriseID: chained.EnterpriseID, ActorUserID: textValue(chained.ActorUserID), ResourceType: textValue(chained.ResourceType), ResourceID: textValue(chained.ResourceID), Action: chained.Action, Decision: chained.Decision, InputHash: textValue(chained.InputHash), PrevHash: textValue(chained.PrevHash), EventHash: chained.EventHash}); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// AppendActionTransitionAudit appends one hash-chained action-transition lineage
+// event (GA Task 0F; internal vocabulary: action.requested, action.granted,
+// action.dispatched, action.completed, ...) and returns the audit event id. Like
+// the approval-transmission lineage this is the internal audit ledger, not the
+// public /v1/audit/evidence surface; Task 0G chains and signs the events. The
+// event carries the action_ref, the status_from/status_to transition and a
+// bounded details hash; it never carries a business Outcome.
+func (s *PostgresBrowserAuditSink) AppendActionTransitionAudit(ctx context.Context, event actions.AuditEvent) (id string, resultErr error) {
+	if s == nil || s.evidenceDB == nil || s.random == nil || event.TenantRef == "" || event.PrincipalRef == "" || event.Action == "" || event.ActionRef == "" || event.StatusTo == "" {
+		return "", errors.New("invalid action transition audit event")
+	}
+	tx, err := s.evidenceDB.BeginAuditEvidenceTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
+		defer cancel()
+		if rollbackErr := tx.Rollback(cleanupCtx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			resultErr = errors.Join(resultErr, rollbackErr)
+		}
+	}()
+	if _, err := tx.AcquireEnterpriseAuditLock(ctx, event.TenantRef); err != nil {
+		return "", err
+	}
+	previous, err := tx.GetLatestEnterpriseAuditHash(ctx, event.TenantRef)
+	if err != nil {
+		return "", err
+	}
+	id, err = randomAuditID(s.random)
+	if err != nil {
+		return "", err
+	}
+	detail := map[string]any{"status_from": string(event.StatusFrom), "status_to": string(event.StatusTo)}
+	for key, value := range event.Details {
+		detail[key] = value
+	}
+	details, err := json.Marshal(detail)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(details)
+	chained := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: event.TenantRef, ActorUserID: event.PrincipalRef, ResourceType: "action", ResourceID: event.ActionRef, Action: event.Action, Decision: string(event.StatusTo), InputHash: "sha256:" + hex.EncodeToString(sum[:])}, previous)
 	if _, err := tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: chained.ID, EnterpriseID: chained.EnterpriseID, ActorUserID: textValue(chained.ActorUserID), ResourceType: textValue(chained.ResourceType), ResourceID: textValue(chained.ResourceID), Action: chained.Action, Decision: chained.Decision, InputHash: textValue(chained.InputHash), PrevHash: textValue(chained.PrevHash), EventHash: chained.EventHash}); err != nil {
 		return "", err
 	}

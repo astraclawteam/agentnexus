@@ -8,6 +8,82 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Action struct {
+	TenantRef             string
+	ActionRef             string
+	Status                string
+	BusinessContextRef    string
+	Capability            string
+	ParameterHash         string
+	IdempotencyKey        string
+	RiskAuthority         string
+	RiskLevel             string
+	ApprovalPlanRef       string
+	GrantRef              string
+	ApprovalEvidenceRef   string
+	ReceiptRef            string
+	CompensationRef       string
+	CompensationOf        string
+	ExpectedReceiptSchema string
+	Postconditions        []byte
+	VerificationNeeds     []byte
+	ExpiresAt             pgtype.Timestamptz
+	FailureReason         string
+	AuditRefID            string
+	CreatedAt             pgtype.Timestamptz
+	UpdatedAt             pgtype.Timestamptz
+}
+
+type ActionGrant struct {
+	TenantRef          string
+	GrantRef           string
+	ActionRef          string
+	BusinessContextRef string
+	Capability         string
+	ParameterHash      string
+	OneUse             bool
+	IssuedAt           pgtype.Timestamptz
+	ExpiresAt          pgtype.Timestamptz
+	ConsumedAt         pgtype.Timestamptz
+}
+
+type ActionInbox struct {
+	TenantRef  string
+	ResultID   string
+	ActionRef  string
+	ReceiptRef string
+	AppliedAt  pgtype.Timestamptz
+}
+
+type ActionOutbox struct {
+	TenantRef     string
+	DispatchRef   string
+	ActionRef     string
+	Capability    string
+	ParameterHash string
+	GrantRef      string
+	Kind          string
+	Published     bool
+	Attempts      int32
+	CreatedAt     pgtype.Timestamptz
+	PublishedAt   pgtype.Timestamptz
+}
+
+type ActionReceipt struct {
+	TenantRef     string
+	ReceiptRef    string
+	ActionRef     string
+	Status        string
+	Capability    string
+	ParameterHash string
+	ReceiptSchema string
+	Result        []byte
+	ResultHash    string
+	IssuedAt      pgtype.Timestamptz
+	Signature     []byte
+	CreatedAt     pgtype.Timestamptz
+}
+
 // Immutable Agent-client certification revisions (GA Task 0C).
 type AgentCertification struct {
 	TenantRef                 string

@@ -63,6 +63,10 @@ var (
 	ErrEvidenceExpired = errors.New("approval evidence expired")
 	// ErrTransmissionRevoked marks operations against a revoked transmission.
 	ErrTransmissionRevoked = errors.New("approval transmission revoked")
+	// ErrEvidenceConsumed marks a second attempt to consume a validated evidence
+	// record (the consumed_at one-shot replay gate). Task 0F surfaces this as a
+	// double-consumption rejection.
+	ErrEvidenceConsumed = errors.New("approval evidence already consumed")
 )
 
 // TransmissionStatus is the frozen transport lifecycle vocabulary. It carries
@@ -153,6 +157,18 @@ type EvidenceRecord struct {
 	ConsumedAt   time.Time
 }
 
+// ConsumedEvidence is the exact-operation binding returned when Task 0F
+// consumes a validated approval evidence record one-shot. It carries only the
+// decision binding the action lifecycle needs; no attestation value or approver
+// identity.
+type ConsumedEvidence struct {
+	ApprovalRef   string
+	PlanRef       string
+	Capability    string
+	ParameterHash string
+	Decision      runtime.ApprovalDecision
+}
+
 // CanonicalEvidenceHash is the deterministic content digest used for
 // duplicate-delivery vs replay discrimination: identical resubmissions are
 // idempotent, mutated ones are rejected.
@@ -222,6 +238,12 @@ type Store interface {
 	// ErrEvidenceReplay; a revoked transmission fails ErrTransmissionRevoked.
 	RecordEvidence(ctx context.Context, record EvidenceRecord) (EvidenceRecord, bool, error)
 	GetEvidence(ctx context.Context, tenantRef, planRef string) (EvidenceRecord, error)
+	// ConsumeEvidence stamps consumed_at on the validated evidence record for
+	// (tenant, plan_ref) EXACTLY ONCE and returns the exact operation binding it
+	// approved (the GA Task 0F grant-consumption seam). A second consume fails
+	// ErrEvidenceConsumed; an absent record fails ErrNotFound; a revoked
+	// transmission fails ErrTransmissionRevoked. 0E never sets consumed_at.
+	ConsumeEvidence(ctx context.Context, tenantRef, planRef string, at time.Time) (ConsumedEvidence, error)
 	// Revoke marks the transmission revoked (terminal, idempotent) and
 	// appends the revocation record.
 	Revoke(ctx context.Context, tenantRef, planRef, reason, revocationID string, at time.Time) (Transmission, error)
@@ -353,6 +375,32 @@ func (s *MemoryStore) GetEvidence(_ context.Context, tenantRef, planRef string) 
 		return EvidenceRecord{}, ErrNotFound
 	}
 	return record, nil
+}
+
+func (s *MemoryStore) ConsumeEvidence(_ context.Context, tenantRef, planRef string, at time.Time) (ConsumedEvidence, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	planKey := storeKey(tenantRef, planRef)
+	transmission, ok := s.transmissions[planKey]
+	if ok && transmission.Status == StatusRevoked {
+		return ConsumedEvidence{}, ErrTransmissionRevoked
+	}
+	record, ok := s.evidence[planKey]
+	if !ok {
+		return ConsumedEvidence{}, ErrNotFound
+	}
+	if !record.ConsumedAt.IsZero() {
+		return ConsumedEvidence{}, ErrEvidenceConsumed
+	}
+	record.ConsumedAt = at.UTC()
+	s.evidence[planKey] = record
+	return ConsumedEvidence{
+		ApprovalRef:   record.Evidence.ApprovalRef,
+		PlanRef:       record.Evidence.PlanRef,
+		Capability:    record.Evidence.Capability,
+		ParameterHash: record.Evidence.ParameterHash,
+		Decision:      record.Evidence.Decision,
+	}, nil
 }
 
 func (s *MemoryStore) Revoke(_ context.Context, tenantRef, planRef, reason, revocationID string, at time.Time) (Transmission, error) {

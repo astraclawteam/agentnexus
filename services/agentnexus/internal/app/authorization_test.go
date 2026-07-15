@@ -274,6 +274,7 @@ func TestTrustProtectedPathsAreAllRegistered(t *testing.T) {
 		"/v1/audit/evidence",
 		"/v1/runtime/locate",
 		"/v1/runtime/read",
+		"/v1/runtime/act",
 	} {
 		if !trustProtectedPath(path) {
 			t.Errorf("%s must be trust-protected", path)
@@ -286,7 +287,7 @@ func TestTrustProtectedPathsAreAllRegistered(t *testing.T) {
 			t.Errorf("%s is trust-protected but not registered (404) — the guard would be skipped", path)
 		}
 	}
-	for _, path := range []string{"/healthz", "/oauth2/token", "/v1/browser-sessions/me", "/v1/runtime/act"} {
+	for _, path := range []string{"/healthz", "/oauth2/token", "/v1/browser-sessions/me", "/v1/runtime/tickets/anything"} {
 		if trustProtectedPath(path) {
 			t.Errorf("%s must not be classified as a trust-protected runtime path", path)
 		}

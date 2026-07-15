@@ -40,6 +40,46 @@ func (q *Queries) AcquireApprovalTransmissionLock(ctx context.Context, arg Acqui
 	return pg_advisory_xact_lock, err
 }
 
+const consumeApprovalEvidence = `-- name: ConsumeApprovalEvidence :one
+UPDATE approval_evidence_records
+SET consumed_at = $3
+WHERE tenant_ref = $1 AND plan_ref = $2 AND consumed_at IS NULL
+RETURNING approval_ref, plan_ref, capability, parameter_hash, decision
+`
+
+type ConsumeApprovalEvidenceParams struct {
+	TenantRef  string
+	PlanRef    string
+	ConsumedAt pgtype.Timestamptz
+}
+
+type ConsumeApprovalEvidenceRow struct {
+	ApprovalRef   string
+	PlanRef       string
+	Capability    string
+	ParameterHash string
+	Decision      string
+}
+
+// GA Task 0F one-shot grant-consumption seam: stamp consumed_at exactly once
+// (NULL->NOT-NULL; the 000009 guard_approval_evidence_record_immutable trigger
+// permits precisely this update and every other mutation is rejected) and
+// return the exact operation binding the authority approved. A second consume,
+// or a plan with no validated record, matches no row (pgx.ErrNoRows) and fails
+// closed. Recording evidence (0E) never sets consumed_at; only 0F does.
+func (q *Queries) ConsumeApprovalEvidence(ctx context.Context, arg ConsumeApprovalEvidenceParams) (ConsumeApprovalEvidenceRow, error) {
+	row := q.db.QueryRow(ctx, consumeApprovalEvidence, arg.TenantRef, arg.PlanRef, arg.ConsumedAt)
+	var i ConsumeApprovalEvidenceRow
+	err := row.Scan(
+		&i.ApprovalRef,
+		&i.PlanRef,
+		&i.Capability,
+		&i.ParameterHash,
+		&i.Decision,
+	)
+	return i, err
+}
+
 const getApprovalEvidenceByPlan = `-- name: GetApprovalEvidenceByPlan :one
 SELECT tenant_ref, approval_ref, plan_ref, plan_hash, capability, parameter_hash,
        decision, approver_authority, decided_at, evidence_hash, attestation,

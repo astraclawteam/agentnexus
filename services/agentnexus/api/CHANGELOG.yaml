@@ -5,6 +5,28 @@
 #  `make contracts-verify` together with the contract parity tests).
 protocol: agentnexus-public-contract
 entries:
+  - version: "1.6.0"
+    date: "2026-07-14"
+    breaking: false
+    title: "Add durable controlled execution (GA Task 0F)"
+    summary: >-
+      Additive, backward-compatible evolution of the frozen contract: the
+      durable Action lifecycle gains its two missing runtime operations — a
+      connector-to-gateway execution-result ingestion callback and a
+      compensation trigger. No existing schema, field, operation or enum
+      changes; the frozen Action, ActionReceipt, ActionStatus, RiskDecision,
+      StepGrant and ObservationReceipt shapes are byte-stable. Identity-out-of-
+      request, opaque-handle and connector-topology boundaries are preserved,
+      and the authority boundary stays frozen: an Action `succeeded` records
+      declared TECHNICAL execution only — AgentNexus never asserts a business
+      Outcome, and no operation, response or receipt carries one.
+    changes:
+      - "New POST /v1/runtime/actions/{action_ref}/receipts (ingestRuntimeActionReceipt): the connector host reports one execution result. Only a receipt binding the exact action (action_ref + parameter_hash + capability) and matching the declared expected_receipt_schema completes the action to its TECHNICAL succeeded/failed status; a redelivered result carrying the same result_id is deduplicated by the inbox and applied exactly once. Request body ActionReceiptIngestRequest = RequestEnvelope + result_id + the frozen ActionReceipt; response is the frozen Action."
+      - "New POST /v1/runtime/actions/{action_ref}/compensations (triggerRuntimeActionCompensation): compensation is another governed Action — it mints a NEW action for the declared compensation capability with its own grant, dispatch and receipts (never a magic rollback). Idempotent per original action_ref; an action that declared no compensation reference is rejected (422). Request body RequestEnvelope; response is the frozen Action (the new compensation)."
+      - "New schemas ActionRefHandle (opaque act_ handle) and ActionReceiptIngestRequest. Both reuse the frozen opaque handles and the frozen ActionReceipt; no trusted-identity, connector-topology or business-outcome name is introduced."
+      - "Semantics activated behind the frozen shapes: one logical Action per (tenant, idempotency_key); requested -> awaiting_approval (approval plan) or -> granted; approval evidence consumed one-shot to mint the one-use grant; granted -> dispatched persists Action + transactional outbox atomically before dispatch; a connector timeout after possible execution becomes result_unknown (blind retry forbidden) and resolves through reconciliation; compensation is separately authorized. Trusted callers only: an untrusted or uncertified decision can never reach a side effect."
+    artifacts:
+      - "api/openapi/gateway-runtime.yaml"
   - version: "1.5.0"
     date: "2026-07-14"
     breaking: true

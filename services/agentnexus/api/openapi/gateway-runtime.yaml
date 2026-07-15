@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AgentNexus Gateway Runtime API
-  version: 1.5.0
+  version: 1.6.0
   description: >-
     Vendor-neutral Agent runtime contract v1 (ELC-NEXUS-1 candidate).
     Trusted identity — tenant, actor, organization snapshot, trust class,
@@ -200,6 +200,77 @@ paths:
               schema:
                 $ref: '#/components/schemas/ActionReceipt'
         '404': {description: No receipt exists under this handle for the verified principal.}
+  /v1/runtime/actions/{action_ref}/receipts:
+    post:
+      operationId: ingestRuntimeActionReceipt
+      summary: Ingest one connector-reported execution result for an action (idempotent by result_id).
+      description: >-
+        GA Task 0F durable controlled execution: the connector host reports the
+        execution result of a dispatched action. Only a receipt that binds the
+        exact action (action_ref + parameter_hash + capability) and matches the
+        declared expected_receipt_schema completes the action to its declared
+        TECHNICAL succeeded/failed status — never a business Outcome. A
+        redelivered or duplicate result carrying the same result_id is
+        deduplicated by the inbox and applied exactly once.
+      security: [{trustedServiceSecret: []}, {browserSession: []}, {caseTicket: []}]
+      parameters:
+        - name: action_ref
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ActionRefHandle'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionReceiptIngestRequest'
+      responses:
+        '200':
+          description: The action after the result was applied (idempotent for a redelivered result_id).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Action'
+        '400': {description: Malformed request, unknown member or trusted-identity field.}
+        '403': {description: The receipt does not bind the exact action or fails verification.}
+        '404': {description: No action exists under this action_ref for the verified tenant.}
+        '409': {description: The action is not in an executable state for this result.}
+        '503': {description: Persistence or audit unavailable.}
+  /v1/runtime/actions/{action_ref}/compensations:
+    post:
+      operationId: triggerRuntimeActionCompensation
+      summary: Trigger the separately authorized compensation of an action.
+      description: >-
+        GA Task 0F: compensation is another governed Action — it mints a NEW
+        action for the declared compensation capability, which flows through its
+        own grant, dispatch and execution/observation receipts (it is not a magic
+        rollback). Idempotent per original action_ref; an action that declared no
+        compensation reference is rejected.
+      security: [{browserSession: []}, {caseTicket: []}]
+      parameters:
+        - name: action_ref
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ActionRefHandle'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestEnvelope'
+      responses:
+        '200':
+          description: The new compensation Action (returned again for a repeated trigger).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Action'
+        '404': {description: No action exists under this action_ref for the verified tenant.}
+        '409': {description: The action is not in a compensable state.}
+        '422': {description: The action declared no compensation reference.}
+        '503': {description: Persistence or audit unavailable.}
   /v1/approvals/transmissions:
     post:
       operationId: transmitApprovalPlan
@@ -516,6 +587,22 @@ components:
       type: string
       pattern: '^rcp_[A-Za-z0-9_-]{16,128}$'
       description: Opaque Action receipt handle.
+    ActionRefHandle:
+      type: string
+      pattern: '^act_[A-Za-z0-9_-]{16,128}$'
+      description: Opaque Action handle.
+    ActionReceiptIngestRequest:
+      allOf:
+        - $ref: '#/components/schemas/RequestEnvelope'
+        - type: object
+          required: [result_id, receipt]
+          properties:
+            result_id:
+              type: string
+              minLength: 1
+              maxLength: 256
+              description: The connector result id; a redelivered result with the same id is applied exactly once (inbox dedup).
+            receipt: {$ref: '#/components/schemas/ActionReceipt'}
     ObservationRef:
       type: string
       pattern: '^obs_[A-Za-z0-9_-]{16,128}$'

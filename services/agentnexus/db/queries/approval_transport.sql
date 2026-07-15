@@ -90,3 +90,15 @@ SET status = 'revoked',
     revocation_reason = $4,
     updated_at = $3
 WHERE tenant_ref = $1 AND plan_ref = $2 AND status <> 'revoked';
+
+-- name: ConsumeApprovalEvidence :one
+-- GA Task 0F one-shot grant-consumption seam: stamp consumed_at exactly once
+-- (NULL->NOT-NULL; the 000009 guard_approval_evidence_record_immutable trigger
+-- permits precisely this update and every other mutation is rejected) and
+-- return the exact operation binding the authority approved. A second consume,
+-- or a plan with no validated record, matches no row (pgx.ErrNoRows) and fails
+-- closed. Recording evidence (0E) never sets consumed_at; only 0F does.
+UPDATE approval_evidence_records
+SET consumed_at = $3
+WHERE tenant_ref = $1 AND plan_ref = $2 AND consumed_at IS NULL
+RETURNING approval_ref, plan_ref, capability, parameter_hash, decision;

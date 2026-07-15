@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/actions"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -932,7 +933,11 @@ func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfil
 	}}
 	harnessPolicy := authorizationPolicySource()
 	evidenceRuntime, _ := newGatewayEvidenceService(t, harnessPolicy, nil)
-	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrappedSessions, Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver, AuthorizationPolicy: harnessPolicy, TicketActors: RejectTicketActorAuthenticator{}, StepGrants: stepGrants, Evidence: evidenceRuntime})
+	actionsRuntime, err := actions.NewService(actions.NewMemoryStore(), actions.NewMemoryAuditSink())
+	if err != nil {
+		t.Fatal(err)
+	}
+	router, err := NewGatewayAPIRouterWithDependencies("gateway-api", "test", BrowserAuthDependencies{Config: config, Sessions: wrappedSessions, Upstream: upstreamWrap(upstream), Identities: identities, Profiles: profiles, Audit: audit, TokenIssuer: issuer, RequestTimeout: requestTimeout, AuthorizeRateLimiter: limiter, AuthorizeSourceResolver: sourceResolver, AuthorizationPolicy: harnessPolicy, TicketActors: RejectTicketActorAuthenticator{}, StepGrants: stepGrants, Evidence: evidenceRuntime, Actions: actionsRuntime})
 	if err != nil {
 		t.Fatal(err)
 	}

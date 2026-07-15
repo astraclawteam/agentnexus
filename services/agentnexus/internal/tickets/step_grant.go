@@ -6,9 +6,85 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/astraclawteam/agentnexus/sdk/go/runtime"
 )
 
 const MaxStepGrantTTL = 5 * time.Minute
+
+// MaxActionGrantTTL caps the lifetime of a GA Task 0F Action one-use grant.
+// An Action grant is short-lived by contract, like a Step Grant.
+const MaxActionGrantTTL = 5 * time.Minute
+
+// Errors of the GA Task 0F Action one-use grant primitive.
+var (
+	// ErrInvalidActionGrant marks an Action grant that is not bound to one exact
+	// operation, not one-use, or expired.
+	ErrInvalidActionGrant = errors.New("invalid action grant")
+	// ErrActionGrantConsumed marks a second attempt to consume a one-use Action
+	// grant.
+	ErrActionGrantConsumed = errors.New("action grant already consumed")
+)
+
+// ActionGrantInput binds one exact side-effecting operation for a one-use
+// Action grant: a business-semantic CAPABILITY (never a resource selector), the
+// exact parameter hash and the business context. This is deliberately a
+// DIFFERENT shape from the legacy resource-scoped StepGrant above
+// (dream_evidence:read); the two grant mechanisms are not conflated.
+type ActionGrantInput struct {
+	GrantRef           string
+	BusinessContextRef string
+	Capability         string
+	ParameterHash      string
+	TTL                time.Duration
+}
+
+// MintActionGrant builds the one-use runtime.StepGrant an Action is dispatched
+// under (GA Task 0F). It binds capability + parameter_hash + business_context,
+// is one-use by contract and is TTL-capped at MaxActionGrantTTL. The returned
+// grant is canonically valid (runtime.StepGrant.Validate rejects a non-one-use
+// or unbound grant). The durable persistence and atomic consumption live in
+// internal/actions; this is the shared minting authority.
+func MintActionGrant(input ActionGrantInput, issuedAt time.Time) (runtime.StepGrant, error) {
+	ttl := input.TTL
+	if ttl <= 0 || ttl > MaxActionGrantTTL {
+		ttl = MaxActionGrantTTL
+	}
+	issued := issuedAt.UTC()
+	grant := runtime.StepGrant{
+		GrantRef:           input.GrantRef,
+		BusinessContextRef: input.BusinessContextRef,
+		Capability:         input.Capability,
+		ParameterHash:      input.ParameterHash,
+		OneUse:             true,
+		IssuedAt:           issued,
+		ExpiresAt:          issued.Add(ttl),
+	}
+	if err := grant.Validate(); err != nil {
+		return runtime.StepGrant{}, errors.Join(ErrInvalidActionGrant, err)
+	}
+	return grant, nil
+}
+
+// ConsumeActionGrant is the one-use consumption rule of an Action grant: a grant
+// may transition unconsumed -> consumed EXACTLY once, and only while unexpired.
+// A grant already consumed fails ErrActionGrantConsumed; an expired or non-
+// one-use grant fails ErrInvalidActionGrant. The durable store additionally
+// enforces the single NULL->NOT-NULL consumed_at update by trigger — this
+// primitive is the in-process authority the memory store and the actions
+// service share so the one-use rule is expressed in exactly one place.
+func ConsumeActionGrant(grant runtime.StepGrant, consumedAt time.Time, alreadyConsumed bool) error {
+	if !grant.OneUse {
+		return ErrInvalidActionGrant
+	}
+	if alreadyConsumed {
+		return ErrActionGrantConsumed
+	}
+	if !consumedAt.UTC().Before(grant.ExpiresAt) {
+		return errors.Join(ErrInvalidActionGrant, errors.New("action grant expired"))
+	}
+	return nil
+}
 
 type GrantRecordStage string
 
