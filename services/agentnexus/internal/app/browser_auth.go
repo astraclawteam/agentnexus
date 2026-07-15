@@ -136,12 +136,16 @@ type browserAccessTokenTrustVerifier struct {
 }
 
 func newBrowserAccessTokenTrustVerifier(sessions browserAccessTokenResolver, config browserauth.OIDCConfig) browserAccessTokenTrustVerifier {
+	return browserAccessTokenTrustVerifier{sessions: sessions, enterpriseID: config.EnterpriseID, clientIDs: configuredConsoleClientIDs(config)}
+}
+
+func configuredConsoleClientIDs(config browserauth.OIDCConfig) []string {
 	clientIDs := make([]string, 0, len(config.ConsoleClients))
 	for clientID := range config.ConsoleClients {
 		clientIDs = append(clientIDs, clientID)
 	}
 	sort.Strings(clientIDs)
-	return browserAccessTokenTrustVerifier{sessions: sessions, enterpriseID: config.EnterpriseID, clientIDs: clientIDs}
+	return clientIDs
 }
 
 func (v browserAccessTokenTrustVerifier) VerifyBrowserAccessToken(ctx context.Context, token string) (trust.SessionIdentity, error) {
@@ -728,6 +732,9 @@ func (h *browserAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
 			writeOAuthError(w, http.StatusServiceUnavailable)
 			return
 		}
+		if errors.Is(resolveErr, trust.ErrInvalidCredential) && credential.Source == trust.SourceBrowserAccessToken && h.retryRejectedAccessTokenLogout(w, r, credential.Token) {
+			return
+		}
 		if _, cookieErr := r.Cookie(browserSessionCookie); cookieErr == nil {
 			clearSessionCookie(w)
 		}
@@ -772,6 +779,34 @@ func (h *browserAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// retryRejectedAccessTokenLogout handles the narrow fail-closed retry case:
+// a prior logout revoked the browser session but audit persistence failed.
+// The trust resolver returns only a syntax-checked single Bearer envelope;
+// every attempt below is still bound by the server-side token row's tenant,
+// configured client_id and audience before it can mutate or append audit.
+func (h *browserAuthHandler) retryRejectedAccessTokenLogout(w http.ResponseWriter, r *http.Request, token string) bool {
+	tokenAudit, ok := h.audit.(browserAccessTokenLogoutSink)
+	if !ok {
+		writeOAuthError(w, http.StatusServiceUnavailable)
+		return true
+	}
+	logoutCtx, cancel := boundedCleanupContext(r.Context())
+	defer cancel()
+	for _, clientID := range configuredConsoleClientIDs(h.config) {
+		session, err := tokenAudit.LogoutBrowserAccessToken(logoutCtx, token, BrowserAuditEvent{EnterpriseID: h.config.EnterpriseID, ClientID: clientID, Action: "browser_session.logout", Decision: "allow"})
+		if errors.Is(err, browserauth.ErrInvalidAccessToken) || errors.Is(err, browserauth.ErrInvalidSession) {
+			continue
+		}
+		if err != nil || session.EnterpriseID != h.config.EnterpriseID || session.UserID == "" {
+			writeOAuthError(w, http.StatusServiceUnavailable)
+			return true
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+	return false
 }
 
 func boundedCleanupContext(parent context.Context) (context.Context, context.CancelFunc) {

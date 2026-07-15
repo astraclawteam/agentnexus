@@ -450,6 +450,24 @@ func TestBrowserAccessTokenVerifierAcceptsEveryConfiguredConsoleClient(t *testin
 	}
 }
 
+func TestRejectedBearerLogoutRetriesAfterFailClosedRevocation(t *testing.T) {
+	h := newBrowserHarness(t)
+	accessToken := issueHarnessAccessToken(t, h)
+	h.audit.err = errors.New("audit unavailable")
+	failed := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", nil, "Authorization", "Bearer "+accessToken)
+	if failed.Code != http.StatusServiceUnavailable {
+		t.Fatalf("failed logout=%d body=%s", failed.Code, failed.Body.String())
+	}
+	if got := perform(h.router, http.MethodGet, "/v1/browser-sessions/me", "", nil, "Authorization", "Bearer "+accessToken).Code; got != http.StatusUnauthorized {
+		t.Fatalf("revoked token me=%d", got)
+	}
+	h.audit.err = nil
+	retried := perform(h.router, http.MethodPost, "/v1/browser-sessions/logout", "", nil, "Authorization", "Bearer "+accessToken)
+	if retried.Code != http.StatusNoContent {
+		t.Fatalf("retried logout=%d body=%s", retried.Code, retried.Body.String())
+	}
+}
+
 func TestConsoleServiceCredentialVerifierAcceptsEveryConfiguredClient(t *testing.T) {
 	credentials, err := browserauth.NewConsoleClientCredentials(map[string][]string{
 		"agentatlas":       {testConsoleClientSecret},
@@ -995,6 +1013,30 @@ func newBrowserHarnessRuntimeWithIdentities(t *testing.T, profiles BrowserProfil
 
 func (h *browserHarness) authorizeQuery(state, nonce string) url.Values {
 	return url.Values{"client_id": {"agentatlas"}, "redirect_uri": {"https://atlas.example.com/auth/callback"}, "state": {state}, "nonce": {nonce}, "code_challenge": {testS256(testVerifier)}, "code_challenge_method": {"S256"}, "response_type": {"code"}, "scope": {"openid"}}
+}
+
+func issueHarnessAccessToken(t *testing.T, h *browserHarness) string {
+	t.Helper()
+	authorize := perform(h.router, http.MethodGet, "/oauth2/authorize?"+h.authorizeQuery("retry-state", "retry-nonce").Encode(), "", nil)
+	upstream, err := url.Parse(authorize.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.idp.setNonce(upstream.Query().Get("nonce"))
+	callback := perform(h.router, http.MethodGet, "/oauth2/idp/callback?code=good&state="+url.QueryEscape(upstream.Query().Get("state")), "", loginBindingCookie(t, authorize))
+	location, err := url.Parse(callback.Header().Get("Location"))
+	if err != nil || location.Query().Get("code") == "" {
+		t.Fatalf("callback=%d location=%q err=%v", callback.Code, callback.Header().Get("Location"), err)
+	}
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {location.Query().Get("code")}, "code_verifier": {testVerifier}, "redirect_uri": {"https://atlas.example.com/auth/callback"}}
+	token := perform(h.router, http.MethodPost, "/oauth2/token", form.Encode(), nil, "Content-Type", "application/x-www-form-urlencoded")
+	var payload struct {
+		AccessToken string `json:"access_token"`
+	}
+	if token.Code != http.StatusOK || json.Unmarshal(token.Body.Bytes(), &payload) != nil || payload.AccessToken == "" {
+		t.Fatalf("token=%d body=%s", token.Code, token.Body.String())
+	}
+	return payload.AccessToken
 }
 
 type testIdentities struct{}

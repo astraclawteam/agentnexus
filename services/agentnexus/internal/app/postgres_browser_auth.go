@@ -519,25 +519,13 @@ func (s *PostgresBrowserAuditSink) LogoutBrowserSession(ctx context.Context, tok
 	return browserauth.BrowserSession{EnterpriseID: record.EnterpriseID, UserID: record.EnterpriseUserID, CreatedAt: record.CreatedAt.Time, LastSeenAt: record.LastSeenAt.Time, IdleExpiresAt: record.IdleExpiresAt.Time, AbsoluteExpiresAt: record.AbsoluteExpiresAt.Time}, nil
 }
 
-func (s *PostgresBrowserAuditSink) LogoutBrowserAccessToken(ctx context.Context, token string, input BrowserAuditEvent) (result browserauth.BrowserSession, resultErr error) {
+func (s *PostgresBrowserAuditSink) LogoutBrowserAccessToken(ctx context.Context, token string, input BrowserAuditEvent) (browserauth.BrowserSession, error) {
 	tokenHash := browserauth.HashBrowserAccessToken(token)
 	if s == nil || s.pool == nil || tokenHash == "" || input.EnterpriseID == "" || !browserauth.ValidConsoleClientID(input.ClientID) || input.Action != "browser_session.logout" || input.Decision != "allow" {
 		return browserauth.BrowserSession{}, browserauth.ErrInvalidAccessToken
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
-	}
-	defer func() {
-		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
-		defer cancel()
-		if rollbackErr := tx.Rollback(cleanup); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) && resultErr != nil {
-			resultErr = errors.Join(resultErr, rollbackErr)
-		}
-	}()
-	queries := db.New(tx)
 	now := time.Now().UTC()
-	record, err := queries.RevokeAndGetBrowserSessionByAccessToken(ctx, db.RevokeAndGetBrowserSessionByAccessTokenParams{TokenHash: tokenHash, EnterpriseID: input.EnterpriseID, ClientID: input.ClientID, Audience: input.ClientID, RevokedAt: pgtype.Timestamptz{Time: now, Valid: true}})
+	record, err := db.New(s.pool).RevokeAndGetBrowserSessionByAccessToken(ctx, db.RevokeAndGetBrowserSessionByAccessTokenParams{TokenHash: tokenHash, EnterpriseID: input.EnterpriseID, ClientID: input.ClientID, Audience: input.ClientID, RevokedAt: pgtype.Timestamptz{Time: now, Valid: true}})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return browserauth.BrowserSession{}, browserauth.ErrInvalidAccessToken
 	}
@@ -546,35 +534,43 @@ func (s *PostgresBrowserAuditSink) LogoutBrowserAccessToken(ctx context.Context,
 	}
 	session := browserauth.BrowserSession{EnterpriseID: record.EnterpriseID, UserID: record.EnterpriseUserID, CreatedAt: record.CreatedAt.Time, LastSeenAt: record.LastSeenAt.Time, IdleExpiresAt: record.IdleExpiresAt.Time, AbsoluteExpiresAt: record.AbsoluteExpiresAt.Time}
 	eventID := "browserlogout_" + tokenHash[:32]
-	if _, err = queries.AcquireEnterpriseAuditLock(ctx, session.EnterpriseID); err != nil {
-		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+	if err := s.appendIdempotentAccessLogoutAudit(ctx, eventID, session, input); err != nil {
+		return browserauth.BrowserSession{}, err
 	}
-	previous, err := queries.GetLatestEnterpriseAuditHash(ctx, session.EnterpriseID)
+	return session, nil
+}
+
+func (s *PostgresBrowserAuditSink) appendIdempotentAccessLogoutAudit(ctx context.Context, eventID string, session browserauth.BrowserSession, input BrowserAuditEvent) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
-		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+		return browserauth.ErrSessionUnavailable
 	}
-	event := audit.NewEvent(audit.EventInput{ID: eventID, EnterpriseID: session.EnterpriseID, ActorUserID: session.UserID, ResourceType: "browser_session", ResourceID: session.UserID, Action: input.Action, Decision: input.Decision}, previous)
-	if _, err = queries.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, PrevHash: textValue(event.PrevHash), EventHash: event.EventHash}); err == nil {
-		if err = tx.Commit(ctx); err != nil {
-			return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+	queries := db.New(tx)
+	if _, err = queries.AcquireEnterpriseAuditLock(ctx, session.EnterpriseID); err == nil {
+		var previous string
+		previous, err = queries.GetLatestEnterpriseAuditHash(ctx, session.EnterpriseID)
+		if err == nil {
+			event := audit.NewEvent(audit.EventInput{ID: eventID, EnterpriseID: session.EnterpriseID, ActorUserID: session.UserID, ResourceType: "browser_session", ResourceID: session.UserID, Action: input.Action, Decision: input.Decision}, previous)
+			_, err = queries.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: event.ID, EnterpriseID: event.EnterpriseID, ActorUserID: textValue(event.ActorUserID), ResourceType: textValue(event.ResourceType), ResourceID: textValue(event.ResourceID), Action: event.Action, Decision: event.Decision, PrevHash: textValue(event.PrevHash), EventHash: event.EventHash})
 		}
-		return session, nil
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	} else {
+		_ = tx.Rollback(ctx)
+	}
+	if err == nil {
+		return nil
 	}
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
-		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
-	}
-	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
-	rollbackErr := tx.Rollback(cleanup)
-	cancel()
-	if rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
-		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+		return browserauth.ErrSessionUnavailable
 	}
 	existing, lookupErr := db.New(s.pool).GetAuditEventByID(ctx, db.GetAuditEventByIDParams{EnterpriseID: session.EnterpriseID, ID: eventID})
 	if lookupErr != nil || !existing.ActorUserID.Valid || existing.ActorUserID.String != session.UserID || !existing.ResourceType.Valid || existing.ResourceType.String != "browser_session" || !existing.ResourceID.Valid || existing.ResourceID.String != session.UserID || existing.Action != input.Action || existing.Decision != input.Decision {
-		return browserauth.BrowserSession{}, browserauth.ErrSessionUnavailable
+		return browserauth.ErrSessionUnavailable
 	}
-	return session, nil
+	return nil
 }
 
 func randomAuditID(source io.Reader) (string, error) {

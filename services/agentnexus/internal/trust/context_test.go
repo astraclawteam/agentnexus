@@ -357,6 +357,20 @@ func TestResolveBrowserRequestReturnsOnlyTheVerifiedBrowserCredential(t *testing
 	}
 }
 
+func TestResolveBrowserRequestReturnsRejectedBearerOnlyForSafeLogoutRetry(t *testing.T) {
+	t.Parallel()
+	h := newTrustHarness(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/browser-sessions/logout", nil)
+	req.Header.Set("Authorization", "Bearer revoked-access-token")
+	ctx, credential, err := h.resolver.ResolveBrowserRequest(req)
+	if !errors.Is(err, trust.ErrInvalidCredential) {
+		t.Fatalf("err=%v want invalid credential", err)
+	}
+	if ctx != (trust.Context{}) || credential.Source != trust.SourceBrowserAccessToken || credential.Token != "revoked-access-token" {
+		t.Fatalf("context=%+v credential=%+v", ctx, credential)
+	}
+}
+
 func TestTrustedContextBrowserAccessTokenFailuresFailClosed(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

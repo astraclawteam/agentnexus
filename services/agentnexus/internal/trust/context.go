@@ -460,6 +460,13 @@ func (r *Resolver) ResolveBrowserRequest(req *http.Request) (Context, BrowserCre
 	}
 	resolved, err := r.resolve(req, origin)
 	if err != nil {
+		// Logout is a capability-reducing operation and must be retryable after
+		// a previous attempt revoked the session but failed to append audit.
+		// Return only a canonical single Bearer envelope; the caller must still
+		// validate it against the server-side token binding before mutation.
+		if credential, ok := browserCredentialValue(req, r.cfg.SessionCookieName, SourceBrowserAccessToken); ok {
+			return Context{}, credential, err
+		}
 		return Context{}, BrowserCredential{}, err
 	}
 	credential, ok := browserCredentialValue(req, r.cfg.SessionCookieName, resolved.Source)
