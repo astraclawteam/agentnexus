@@ -1,9 +1,11 @@
 package actions
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 )
 
@@ -19,6 +21,24 @@ type DispatchMessage struct {
 	ParameterHash string       `json:"parameter_hash"`
 	GrantRef      string       `json:"grant_ref"`
 	Kind          DispatchKind `json:"kind"`
+}
+
+// DecodeDispatchMessage strictly decodes one durable dispatch intent delivered on
+// SubjectActionDispatch (the central Connector Worker consumes these). Unknown
+// members and trailing data are rejected so a malformed or hostile transport
+// payload never silently decodes into a partially-populated intent that could be
+// misread as a legitimate dispatch.
+func DecodeDispatchMessage(data []byte) (DispatchMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var message DispatchMessage
+	if err := decoder.Decode(&message); err != nil {
+		return DispatchMessage{}, err
+	}
+	if decoder.More() {
+		return DispatchMessage{}, errors.New("trailing data after dispatch message")
+	}
+	return message, nil
 }
 
 // Publisher is the outbox dispatch transport port. The transactional outbox row

@@ -460,8 +460,11 @@ func TestVectorMalformedRPCIsBounded(t *testing.T) {
 		}}
 		sup := newSupervisor(t, adapter)
 		res := sup.Run(context.Background(), readOperation())
-		if res.Status != StatusFailed {
-			t.Fatalf("status = %v, want StatusFailed for a malformed connector response", res.Status)
+		// The connector was dispatched but gave no parseable verdict: the side
+		// effect may have committed, so this is execution-uncertain, not a clean
+		// failed (C1 provenance fix).
+		if res.Status != StatusExecutionUncertain {
+			t.Fatalf("status = %v, want StatusExecutionUncertain for a malformed connector response after dispatch", res.Status)
 		}
 	})
 }
@@ -538,11 +541,13 @@ func TestSupervisorRecoversConnectorPanicAndStaysAlive(t *testing.T) {
 	}}
 	sup := newSupervisor(t, adapter)
 
-	// First operation panics inside the connector: the supervisor recovers it
-	// into a bounded failed result and does not crash.
+	// First operation panics inside the connector: the supervisor recovers it into
+	// a bounded result and does not crash. The panic is POST-dispatch (inside the
+	// adapter), so the side effect may have committed: execution-uncertain, not a
+	// clean failed (C1 provenance fix).
 	res := sup.Run(context.Background(), readOperation())
-	if res.Status != StatusFailed {
-		t.Fatalf("panicking connector status = %v, want StatusFailed", res.Status)
+	if res.Status != StatusExecutionUncertain {
+		t.Fatalf("panicking connector status = %v, want StatusExecutionUncertain", res.Status)
 	}
 	if strings.Contains(strings.ToLower(res.Reason), "panic") == false {
 		t.Fatalf("reason = %q, want it to record the recovered panic", res.Reason)
@@ -553,6 +558,97 @@ func TestSupervisorRecoversConnectorPanicAndStaysAlive(t *testing.T) {
 	if res.Status != StatusSucceeded {
 		t.Fatalf("post-panic status = %v, want StatusSucceeded (supervisor stayed alive)", res.Status)
 	}
+}
+
+// TestSupervisorFailureProvenance pins the C1 provenance distinction: a
+// PRE-dispatch failure (definite, no side effect) is StatusFailed; a POST-dispatch
+// abnormal outcome (the side effect may already have committed) is
+// StatusExecutionUncertain; and a connector-REPORTED failure verdict stays
+// StatusFailed (the connector ran and returned its own answer).
+func TestSupervisorFailureProvenance(t *testing.T) {
+	t.Run("pre-dispatch invalid request -> failed", func(t *testing.T) {
+		adapter := &stubAdapter{fn: func(_ context.Context, _ Policy, req *HostRequest) (*HostResponse, error) {
+			return okResponse(req), nil
+		}}
+		sup := newSupervisor(t, adapter)
+		op := readOperation()
+		op.RequestID = "" // the built HostRequest fails Validate before dispatch
+		res := sup.Run(context.Background(), op)
+		if res.Status != StatusFailed {
+			t.Fatalf("status = %v, want StatusFailed (pre-dispatch invalid request, no side effect)", res.Status)
+		}
+		if adapter.lastRequest() != nil {
+			t.Fatal("adapter was dispatched despite an invalid request; a pre-dispatch failure never dispatches")
+		}
+	})
+
+	t.Run("pre-dispatch secret acquire failure -> failed", func(t *testing.T) {
+		adapter := &stubAdapter{fn: func(_ context.Context, _ Policy, req *HostRequest) (*HostResponse, error) {
+			return okResponse(req), nil
+		}}
+		pack := testPack()
+		sup, err := NewSupervisor(Config{Pack: pack, Binding: testBinding(pack), Adapter: adapter, Secrets: failingBroker{}})
+		if err != nil {
+			t.Fatalf("NewSupervisor: %v", err)
+		}
+		op := readOperation()
+		op.CredentialRef = "secret:acme:erp-token"
+		res := sup.Run(context.Background(), op)
+		if res.Status != StatusFailed {
+			t.Fatalf("status = %v, want StatusFailed (secret acquire fails before dispatch)", res.Status)
+		}
+		if adapter.lastRequest() != nil {
+			t.Fatal("adapter dispatched though the secret could not be acquired; must fail closed pre-dispatch")
+		}
+	})
+
+	t.Run("post-dispatch adapter panic -> execution_uncertain", func(t *testing.T) {
+		adapter := &stubAdapter{fn: func(_ context.Context, _ Policy, _ *HostRequest) (*HostResponse, error) {
+			panic("blew up mid-operation")
+		}}
+		res := newSupervisor(t, adapter).Run(context.Background(), readOperation())
+		if res.Status != StatusExecutionUncertain {
+			t.Fatalf("status = %v, want StatusExecutionUncertain (post-dispatch panic; side effect may have committed)", res.Status)
+		}
+	})
+
+	t.Run("post-dispatch transport error -> execution_uncertain", func(t *testing.T) {
+		adapter := &stubAdapter{fn: func(_ context.Context, _ Policy, _ *HostRequest) (*HostResponse, error) {
+			return nil, errors.New("connection reset after the request was sent")
+		}}
+		res := newSupervisor(t, adapter).Run(context.Background(), readOperation())
+		if res.Status != StatusExecutionUncertain {
+			t.Fatalf("status = %v, want StatusExecutionUncertain (post-dispatch transport error)", res.Status)
+		}
+	})
+
+	t.Run("post-dispatch malformed response -> execution_uncertain", func(t *testing.T) {
+		adapter := &stubAdapter{fn: func(_ context.Context, _ Policy, _ *HostRequest) (*HostResponse, error) {
+			return &HostResponse{ProtocolVersion: "bogus/v0", Status: StatusSucceeded}, nil
+		}}
+		res := newSupervisor(t, adapter).Run(context.Background(), readOperation())
+		if res.Status != StatusExecutionUncertain {
+			t.Fatalf("status = %v, want StatusExecutionUncertain (post-dispatch malformed response)", res.Status)
+		}
+	})
+
+	t.Run("connector-reported failure verdict -> failed", func(t *testing.T) {
+		adapter := &stubAdapter{fn: func(_ context.Context, _ Policy, req *HostRequest) (*HostResponse, error) {
+			return &HostResponse{ProtocolVersion: ProtocolVersion, RequestID: req.RequestID, Status: StatusFailed, Error: "connector rejected the write"}, nil
+		}}
+		res := newSupervisor(t, adapter).Run(context.Background(), readOperation())
+		if res.Status != StatusFailed {
+			t.Fatalf("status = %v, want StatusFailed (the connector ran and returned its own failed verdict)", res.Status)
+		}
+	})
+}
+
+// failingBroker is a SecretBroker whose handle acquisition always fails, so a
+// credential-bearing operation fails closed BEFORE dispatch.
+type failingBroker struct{}
+
+func (failingBroker) AcquireHandle(context.Context, secretprovider.Scope, string) (secretprovider.Handle, error) {
+	return secretprovider.Handle{}, errors.New("secret provider unavailable")
 }
 
 func TestSupervisorRunNeverReturnsSecretsInResult(t *testing.T) {
@@ -645,15 +741,17 @@ func TestContainerAdapterDispatchFailsClosedWithoutRuntime(t *testing.T) {
 		t.Fatalf("Dispatch err = %v, want ErrContainerRuntimeUnavailable (no runtime on this box)", derr)
 	}
 
-	// Under the supervisor, the same unavailable runtime is a bounded failure,
-	// never a crash.
+	// Under the supervisor, the same unavailable runtime is a bounded result, never
+	// a crash. The failure surfaces from s.dispatch after dispatch was attempted,
+	// and the supervisor cannot prove the connector never ran, so it is
+	// execution-uncertain rather than a clean failed (C1 provenance fix).
 	sup, err := NewSupervisor(Config{Pack: pack, Binding: testBinding(pack), Adapter: adapter, Options: []DeriveOption{WithSandboxRoots(t.TempDir())}})
 	if err != nil {
 		t.Fatalf("NewSupervisor: %v", err)
 	}
 	res := sup.Run(context.Background(), readOperation())
-	if res.Status != StatusFailed {
-		t.Fatalf("container-runtime-unavailable status = %v, want StatusFailed", res.Status)
+	if res.Status != StatusExecutionUncertain {
+		t.Fatalf("container-runtime-unavailable status = %v, want StatusExecutionUncertain", res.Status)
 	}
 }
 

@@ -7,6 +7,16 @@ import (
 	"github.com/astraclawteam/agentnexus/sdk/go/runtime"
 )
 
+// AwaitingReconciliation reports whether an action's status means its TRUE
+// outcome is being (or must be) determined out of band by reconciliation
+// (result_unknown or reconciling). It is the single source of truth for "a side
+// effect may already have run and the result is not yet known": the central
+// Connector Worker consults it so a redelivered dispatch for such an action is
+// never blindly re-executed — the only safe path forward is reconciliation.
+func AwaitingReconciliation(status runtime.ActionStatus) bool {
+	return status == StatusResultUnknown || status == StatusReconciling
+}
+
 // BeginReconciliation advances result_unknown -> reconciling. Reconciliation
 // queries the connector/inbox for the TRUE outcome of a side effect whose result
 // was lost; it never guesses and never blindly re-dispatches.

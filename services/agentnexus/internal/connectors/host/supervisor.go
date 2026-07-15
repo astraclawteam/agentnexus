@@ -134,11 +134,24 @@ func (s *Supervisor) Run(ctx context.Context, op Operation) (result Result) {
 		adapterName = s.adapter.Name()
 	}
 
+	// dispatched records whether the connector has been dispatched (or dispatch
+	// attempted): once true, the external side effect MAY have committed, so an
+	// abnormal outcome from here on is StatusExecutionUncertain (reconcile), never
+	// a clean StatusFailed. Before dispatch, an abnormal outcome is a definite
+	// pre-side-effect failure.
+	dispatched := false
+
 	// Panic firewall: nothing — not even a bug in the supervisor itself — escapes
-	// Run as a panic. This is the core crash-isolation invariant.
+	// Run as a panic. This is the core crash-isolation invariant. A panic BEFORE
+	// dispatch is a definite failure (no side effect); a panic AFTER dispatch is
+	// execution-uncertain (the side effect may already have committed).
 	defer func() {
 		if r := recover(); r != nil {
-			result = bounded(StatusFailed, "supervisor recovered panic: "+fmt.Sprint(r), adapterName, audit)
+			if dispatched {
+				result = bounded(StatusExecutionUncertain, "supervisor recovered panic after dispatch: "+fmt.Sprint(r), adapterName, audit)
+			} else {
+				result = bounded(StatusFailed, "supervisor recovered panic before dispatch: "+fmt.Sprint(r), adapterName, audit)
+			}
 		}
 	}()
 
@@ -200,20 +213,30 @@ func (s *Supervisor) Run(ctx context.Context, op Operation) (result Result) {
 
 	// 4. Dispatch under a wall-clock timeout with an adapter-panic firewall. The
 	// supervisor selects on the deadline itself, so even an adapter that ignores
-	// cancellation can never make Run hang.
+	// cancellation can never make Run hang. From the instant of dispatch the
+	// external side effect may commit, so every abnormal outcome below is
+	// execution-uncertain rather than a clean failure.
+	dispatched = true
 	resp, err := s.dispatch(ctx, req)
 	if err != nil {
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
+			// A wall-clock cutoff: the adapter was left running past the deadline,
+			// so the side effect may have committed (execution-uncertain family).
 			return bounded(StatusResourceExhausted, "wall-clock budget exceeded", adapterName, audit)
 		case errors.Is(err, context.Canceled):
-			return bounded(StatusFailed, "operation cancelled by caller", adapterName, audit)
+			// Cancelled after dispatch: the request was already handed off, so the
+			// side effect may have committed.
+			return bounded(StatusExecutionUncertain, "operation cancelled after dispatch", adapterName, audit)
 		case errors.Is(err, errOutputOverflow):
 			return boundedTruncated(nil, "connector output exceeded the policy ceiling", adapterName, audit)
 		case errors.Is(err, errAdapterPanic):
-			return bounded(StatusFailed, "connector panicked: "+err.Error(), adapterName, audit)
+			// The connector panicked mid-operation: no verdict, side effect unknown.
+			return bounded(StatusExecutionUncertain, "connector panicked after dispatch: "+err.Error(), adapterName, audit)
 		default:
-			return bounded(StatusFailed, "connector dispatch failed: "+err.Error(), adapterName, audit)
+			// A transport/dispatch error after hand-off: the request may have
+			// reached the connector and committed even though the response was lost.
+			return bounded(StatusExecutionUncertain, "connector dispatch failed after dispatch: "+err.Error(), adapterName, audit)
 		}
 	}
 
@@ -221,7 +244,9 @@ func (s *Supervisor) Run(ctx context.Context, op Operation) (result Result) {
 	// oversized output is truncated and reported as a bounded resource failure —
 	// never buffered whole or returned as success.
 	if err := resp.Validate(); err != nil {
-		return bounded(StatusFailed, "malformed connector response: "+err.Error(), adapterName, audit)
+		// A malformed response after a successful dispatch: the connector ran but
+		// gave no parseable verdict, so the side effect is uncertain.
+		return bounded(StatusExecutionUncertain, "malformed connector response: "+err.Error(), adapterName, audit)
 	}
 	output := []byte(resp.Output)
 	if s.policy.MaxOutputBytes > 0 && len(output) > s.policy.MaxOutputBytes {

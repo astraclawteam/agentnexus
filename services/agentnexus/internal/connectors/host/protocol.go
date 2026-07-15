@@ -46,9 +46,11 @@ var (
 )
 
 // Status is the bounded connector-operation status. It mirrors the
-// connectors/v1 ConnectorStatus enum and extends it with two host-enforced
-// bounded signals (DeniedPolicy, ResourceExhausted) while keeping the existing
-// values stable.
+// connectors/v1 ConnectorStatus enum and extends it with host-enforced bounded
+// signals (DeniedPolicy, ResourceExhausted, ExecutionUncertain) while keeping the
+// existing values stable. The host-enforced signals are host-authored and never
+// connector-reportable; they are Go-only and are NOT part of the connectors/v1
+// wire enum, so adding one is not a public-contract change.
 type Status int
 
 const (
@@ -58,8 +60,13 @@ const (
 	StatusSucceeded
 	// StatusDenied is a connector-reported denial (authorization/precondition).
 	StatusDenied
-	// StatusFailed is a bounded failure (connector error, panic, malformed RPC,
-	// unresolved credential, unavailable adapter runtime).
+	// StatusFailed is a DEFINITE technical failure with no committed side effect:
+	// either a connector-REPORTED failure verdict (the connector ran and returned
+	// Failed in its response), or a host-detected PRE-dispatch failure evaluated
+	// BEFORE the connector was dispatched (a required credential could not be
+	// acquired, or the request envelope was invalid). A POST-dispatch abnormal
+	// outcome, where the side effect may already have committed, is
+	// StatusExecutionUncertain — never this.
 	StatusFailed
 	// StatusWaitingExternalReceipt mirrors the connectors/v1 value: a write is
 	// pending an external receipt.
@@ -70,6 +77,14 @@ const (
 	// StatusResourceExhausted is a host-enforced resource bound (wall-clock or
 	// CPU budget exceeded, memory ceiling, oversized output).
 	StatusResourceExhausted
+	// StatusExecutionUncertain is a host-enforced signal that the connector was
+	// dispatched (or dispatch was attempted) but the host obtained no bounded
+	// verdict: an adapter panic, a transport/dispatch failure, a post-dispatch
+	// cancellation, or a malformed response. The external side effect MAY have
+	// committed, so this is NOT a failure — the caller must reconcile and must
+	// never assume either success or failure. Like DeniedPolicy/ResourceExhausted
+	// it is host-authored and never connector-reportable.
+	StatusExecutionUncertain
 )
 
 // String renders a stable, non-secret label for audit and logs.
@@ -87,6 +102,8 @@ func (s Status) String() string {
 		return "denied_policy"
 	case StatusResourceExhausted:
 		return "resource_exhausted"
+	case StatusExecutionUncertain:
+		return "execution_uncertain"
 	default:
 		return "unspecified"
 	}
