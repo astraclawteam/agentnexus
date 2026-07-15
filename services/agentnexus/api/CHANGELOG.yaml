@@ -5,6 +5,59 @@
 #  `make contracts-verify` together with the contract parity tests).
 protocol: agentnexus-public-contract
 entries:
+  - version: "1.7.0"
+    date: "2026-07-15"
+    breaking: false
+    title: "Sign and independently verify the audit evidence chain (GA Task 0G)"
+    summary: >-
+      Additive, backward-compatible evolution of the frozen contract: the
+      vendor-neutral audit plane gains its signing and independent-verification
+      surface. New rows on the high-risk action-transition sub-chain carry a
+      per-tenant monotonic sequence (tenant_seq, starting at 1), a detached
+      ed25519 signature (algorithm/key_id/value) and signed_at, canonicalized at
+      microsecond precision. A registered signing-key registry (active|revoked)
+      supports revoked-key detection, and a signed batch Merkle root with a
+      signer-asserted timestamp backs a portable WORM/SIEM verification package that
+      re-verifies offline with stdlib crypto only. The frozen AuditEvent and
+      AuditChain messages are UNCHANGED (fields 1-24 byte-stable); only NEW
+      messages are added. Audit integrity failure blocks new high-risk Actions
+      while preserving diagnostics and export. The authority boundary is
+      unchanged: audit records prove WHAT happened and that the chain is
+      untampered - never a business Outcome (the verifier rejects any event
+      asserting outcome/goal_achieved/result-graph, mirroring the Task 0A ban).
+      Carry-over: the evidence-request single-purpose rule and the per-request
+      data-need cap are untouched by this entry. This entry also consumes the
+      signer-error-logging seam deferred from the 0D amendment - the audit
+      signer path preserves and logs the underlying signer cause for diagnostics
+      while still failing closed, never leaking key material.
+      AUTHENTICITY: offline verification is against a caller-supplied PINNED
+      trusted signing key; the bundle's embedded keys supply revocation metadata
+      only and can never be the trust root, so a fabricated self-signed bundle is
+      rejected (bundle self-consistency is not authenticity). The runtime signer
+      requires a STABLE configured key (no silent ephemeral key). Receipt
+      completion FAILS CLOSED without a wired verifier. The batch-root timestamp
+      is honestly labelled signer-asserted (an external RFC-3161/TSA anchor is
+      downstream), and the business-Outcome control is the constrained internal
+      audit vocabulary with the substring lint as defense-in-depth. Binding
+      NARROWING (documented, so the pinned artifacts stay literally true): the
+      action-transition event binds status_from, capability, parameter_hash,
+      grant_ref, approval_evidence_ref, receipt_ref, risk_authority and the
+      verified agent_client_ref/agent_release_ref/org_snapshot_ref as first-class
+      recoverable signed columns; the specific risk DECISION id and the
+      observation receipt are not persisted at this append site and are recorded
+      as narrowings (the risk authority is bound; the observation receipt is the
+      separate 0D signed artifact). gateway-runtime.yaml is intentionally NOT
+      modified: 0G adds no Agent-facing HTTP operation (verification and export
+      are offline/operator surfaces). Audit-signing and connector-receipt keys
+      currently share one signing-key registry; a per-key purpose discriminator
+      is a documented downstream refinement.
+    changes:
+      - "New audit/v1 messages (additive, new field numbers; AuditEvent and AuditChain unchanged): AuditSignature, SignedAuditEvent, AuditSigningKey, MerkleSibling, MerkleWitness, AuditBatchRoot, AuditVerificationPackage. They describe the signed per-tenant chain, the signing public keys with their revocation state, the batch Merkle root with its signer-asserted timestamp, and per-event inclusion witnesses. No trusted-identity, connector-topology or business-outcome name is introduced."
+      - "Signing plane behind the frozen shapes: the high-risk action-transition audit sub-chain allocates a per-tenant monotonic tenant_seq under the per-enterprise advisory lock, links signed->signed by prev_hash, and carries an ed25519 signature over the canonical event pre-image (signature slot and event_hash zeroed, timestamps UTC at microsecond precision). The existing per-enterprise SHA-256 hash chain is retained as the hash-only layer; a missing signer fails the high-risk append CLOSED. A partial unique index on (enterprise, tenant_seq) rejects a duplicate sequence at the database."
+      - "Independent verification: a shared dependency-free verification core (sdk/go/audit) canonicalizes, hash-chains and ed25519-verifies a per-tenant chain and re-verifies the offline WORM/SIEM package (signatures, hash chain, monotonic single-tenant sequence, batch Merkle roots and witnesses, revoked-key detection, raw-payload and business-Outcome rejection). The existing UNSIGNED chain fails the signed verifier. The runtime and the standalone enterprise offline verifier consume this SAME core, so they cannot diverge."
+      - "Receipt verification activated: the GA Task 0F ReceiptVerifier seam (left nil) is now filled and wired in the composition root with a live signing-key resolver; only a receipt whose ed25519 signature verifies against a registered, non-revoked connector key completes an Action (unsigned, forged, wrong-key and revoked-key receipts are rejected). The local structural checks remain the floor and are never weakened."
+    artifacts:
+      - "api/proto/agentnexus/audit/v1/audit.proto"
   - version: "1.6.0"
     date: "2026-07-14"
     breaking: false

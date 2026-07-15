@@ -22,6 +22,23 @@ func (q *Queries) AcquireEnterpriseAuditLock(ctx context.Context, hashtextextend
 	return pg_advisory_xact_lock, err
 }
 
+const allocateNextTenantSeq = `-- name: AllocateNextTenantSeq :one
+SELECT (COALESCE(MAX(tenant_seq), 0) + 1)::BIGINT AS next_seq
+FROM audit_events
+WHERE enterprise_id = $1
+`
+
+// AllocateNextTenantSeq returns the next per-tenant monotonic sequence value
+// (starts at 1). It MUST run under the per-enterprise advisory lock
+// (AcquireEnterpriseAuditLock) so concurrent appends serialize and never
+// allocate a duplicate; the partial unique index is the database backstop.
+func (q *Queries) AllocateNextTenantSeq(ctx context.Context, enterpriseID string) (int64, error) {
+	row := q.db.QueryRow(ctx, allocateNextTenantSeq, enterpriseID)
+	var next_seq int64
+	err := row.Scan(&next_seq)
+	return next_seq, err
+}
+
 const appendAuditEvent = `-- name: AppendAuditEvent :one
 INSERT INTO audit_events (
     id,
@@ -48,7 +65,7 @@ VALUES (
         COALESCE((SELECT MAX(created_at) + INTERVAL '1 microsecond' FROM audit_events WHERE enterprise_id = $2), clock_timestamp())
     )
 )
-RETURNING id, enterprise_id, case_ticket_id, step_grant_id, actor_user_id, connector_instance_id, resource_type, resource_id, action, decision, input_hash, output_hash, evidence_pointer, prev_hash, event_hash, created_at
+RETURNING id, enterprise_id, case_ticket_id, step_grant_id, actor_user_id, connector_instance_id, resource_type, resource_id, action, decision, input_hash, output_hash, evidence_pointer, prev_hash, event_hash, created_at, tenant_seq, signature_algorithm, signature_key_id, signature_value, signed_at, status_from, capability, parameter_hash, grant_ref, approval_evidence_ref, receipt_ref, risk_authority, agent_client_ref, agent_release_ref, org_snapshot_ref
 `
 
 type AppendAuditEventParams struct {
@@ -105,6 +122,239 @@ func (q *Queries) AppendAuditEvent(ctx context.Context, arg AppendAuditEventPara
 		&i.PrevHash,
 		&i.EventHash,
 		&i.CreatedAt,
+		&i.TenantSeq,
+		&i.SignatureAlgorithm,
+		&i.SignatureKeyID,
+		&i.SignatureValue,
+		&i.SignedAt,
+		&i.StatusFrom,
+		&i.Capability,
+		&i.ParameterHash,
+		&i.GrantRef,
+		&i.ApprovalEvidenceRef,
+		&i.ReceiptRef,
+		&i.RiskAuthority,
+		&i.AgentClientRef,
+		&i.AgentReleaseRef,
+		&i.OrgSnapshotRef,
+	)
+	return i, err
+}
+
+const appendSignedAuditEvent = `-- name: AppendSignedAuditEvent :one
+INSERT INTO audit_events (
+    id,
+    enterprise_id,
+    case_ticket_id,
+    step_grant_id,
+    actor_user_id,
+    connector_instance_id,
+    resource_type,
+    resource_id,
+    action,
+    decision,
+    input_hash,
+    output_hash,
+    evidence_pointer,
+    prev_hash,
+    event_hash,
+    tenant_seq,
+    signature_algorithm,
+    signature_key_id,
+    signature_value,
+    signed_at,
+    status_from,
+    capability,
+    parameter_hash,
+    grant_ref,
+    approval_evidence_ref,
+    receipt_ref,
+    risk_authority,
+    agent_client_ref,
+    agent_release_ref,
+    org_snapshot_ref,
+    created_at
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+    $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+    GREATEST(
+        clock_timestamp(),
+        COALESCE((SELECT MAX(created_at) + INTERVAL '1 microsecond' FROM audit_events WHERE enterprise_id = $2), clock_timestamp())
+    )
+)
+RETURNING id, enterprise_id, case_ticket_id, step_grant_id, actor_user_id, connector_instance_id, resource_type, resource_id, action, decision, input_hash, output_hash, evidence_pointer, prev_hash, event_hash, created_at, tenant_seq, signature_algorithm, signature_key_id, signature_value, signed_at, status_from, capability, parameter_hash, grant_ref, approval_evidence_ref, receipt_ref, risk_authority, agent_client_ref, agent_release_ref, org_snapshot_ref
+`
+
+type AppendSignedAuditEventParams struct {
+	ID                  string
+	EnterpriseID        string
+	CaseTicketID        pgtype.Text
+	StepGrantID         pgtype.Text
+	ActorUserID         pgtype.Text
+	ConnectorInstanceID pgtype.Text
+	ResourceType        pgtype.Text
+	ResourceID          pgtype.Text
+	Action              string
+	Decision            string
+	InputHash           pgtype.Text
+	OutputHash          pgtype.Text
+	EvidencePointer     pgtype.Text
+	PrevHash            pgtype.Text
+	EventHash           string
+	TenantSeq           pgtype.Int8
+	SignatureAlgorithm  pgtype.Text
+	SignatureKeyID      pgtype.Text
+	SignatureValue      pgtype.Text
+	SignedAt            pgtype.Timestamptz
+	StatusFrom          pgtype.Text
+	Capability          pgtype.Text
+	ParameterHash       pgtype.Text
+	GrantRef            pgtype.Text
+	ApprovalEvidenceRef pgtype.Text
+	ReceiptRef          pgtype.Text
+	RiskAuthority       pgtype.Text
+	AgentClientRef      pgtype.Text
+	AgentReleaseRef     pgtype.Text
+	OrgSnapshotRef      pgtype.Text
+}
+
+// AppendSignedAuditEvent appends one SIGNED, tenant-sequenced audit event with
+// its first-class binding refs (GA Task 0G). The created_at monotonicity mirrors
+// AppendAuditEvent; tenant_seq, the ed25519 signature triple, signed_at and the
+// recoverable binding columns are supplied by the signing writer.
+func (q *Queries) AppendSignedAuditEvent(ctx context.Context, arg AppendSignedAuditEventParams) (AuditEvent, error) {
+	row := q.db.QueryRow(ctx, appendSignedAuditEvent,
+		arg.ID,
+		arg.EnterpriseID,
+		arg.CaseTicketID,
+		arg.StepGrantID,
+		arg.ActorUserID,
+		arg.ConnectorInstanceID,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.Action,
+		arg.Decision,
+		arg.InputHash,
+		arg.OutputHash,
+		arg.EvidencePointer,
+		arg.PrevHash,
+		arg.EventHash,
+		arg.TenantSeq,
+		arg.SignatureAlgorithm,
+		arg.SignatureKeyID,
+		arg.SignatureValue,
+		arg.SignedAt,
+		arg.StatusFrom,
+		arg.Capability,
+		arg.ParameterHash,
+		arg.GrantRef,
+		arg.ApprovalEvidenceRef,
+		arg.ReceiptRef,
+		arg.RiskAuthority,
+		arg.AgentClientRef,
+		arg.AgentReleaseRef,
+		arg.OrgSnapshotRef,
+	)
+	var i AuditEvent
+	err := row.Scan(
+		&i.ID,
+		&i.EnterpriseID,
+		&i.CaseTicketID,
+		&i.StepGrantID,
+		&i.ActorUserID,
+		&i.ConnectorInstanceID,
+		&i.ResourceType,
+		&i.ResourceID,
+		&i.Action,
+		&i.Decision,
+		&i.InputHash,
+		&i.OutputHash,
+		&i.EvidencePointer,
+		&i.PrevHash,
+		&i.EventHash,
+		&i.CreatedAt,
+		&i.TenantSeq,
+		&i.SignatureAlgorithm,
+		&i.SignatureKeyID,
+		&i.SignatureValue,
+		&i.SignedAt,
+		&i.StatusFrom,
+		&i.Capability,
+		&i.ParameterHash,
+		&i.GrantRef,
+		&i.ApprovalEvidenceRef,
+		&i.ReceiptRef,
+		&i.RiskAuthority,
+		&i.AgentClientRef,
+		&i.AgentReleaseRef,
+		&i.OrgSnapshotRef,
+	)
+	return i, err
+}
+
+const countSignedAuditEventsForTenant = `-- name: CountSignedAuditEventsForTenant :one
+SELECT COUNT(*)::BIGINT AS signed_count
+FROM audit_events
+WHERE enterprise_id = $1 AND tenant_seq IS NOT NULL
+`
+
+// CountSignedAuditEventsForTenant reports how many signed events a tenant chain
+// holds; a chain read that returns fewer than a persisted checkpoint's last_seq
+// has been truncated.
+func (q *Queries) CountSignedAuditEventsForTenant(ctx context.Context, enterpriseID string) (int64, error) {
+	row := q.db.QueryRow(ctx, countSignedAuditEventsForTenant, enterpriseID)
+	var signed_count int64
+	err := row.Scan(&signed_count)
+	return signed_count, err
+}
+
+const getAuditSigningKey = `-- name: GetAuditSigningKey :one
+SELECT key_id, algorithm, public_key, status, created_at, revoked_at
+FROM audit_signing_keys
+WHERE key_id = $1
+`
+
+func (q *Queries) GetAuditSigningKey(ctx context.Context, keyID string) (AuditSigningKey, error) {
+	row := q.db.QueryRow(ctx, getAuditSigningKey, keyID)
+	var i AuditSigningKey
+	err := row.Scan(
+		&i.KeyID,
+		&i.Algorithm,
+		&i.PublicKey,
+		&i.Status,
+		&i.CreatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const getLatestAuditBatchRoot = `-- name: GetLatestAuditBatchRoot :one
+SELECT id, enterprise_id, root_hash, first_seq, last_seq, event_count, signed_at, signature_algorithm, signature_key_id, signature_value, created_at
+FROM audit_batch_roots
+WHERE enterprise_id = $1
+ORDER BY last_seq DESC
+LIMIT 1
+`
+
+// GetLatestAuditBatchRoot returns the most recent persisted batch-root
+// checkpoint for a tenant (highest last_seq), or no row when none exists. The
+// truncation check compares the live signed-chain head against last_seq.
+func (q *Queries) GetLatestAuditBatchRoot(ctx context.Context, enterpriseID string) (AuditBatchRoot, error) {
+	row := q.db.QueryRow(ctx, getLatestAuditBatchRoot, enterpriseID)
+	var i AuditBatchRoot
+	err := row.Scan(
+		&i.ID,
+		&i.EnterpriseID,
+		&i.RootHash,
+		&i.FirstSeq,
+		&i.LastSeq,
+		&i.EventCount,
+		&i.SignedAt,
+		&i.SignatureAlgorithm,
+		&i.SignatureKeyID,
+		&i.SignatureValue,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -125,8 +375,120 @@ func (q *Queries) GetLatestEnterpriseAuditHash(ctx context.Context, enterpriseID
 	return event_hash, err
 }
 
+const getLatestSignedEnterpriseAuditHash = `-- name: GetLatestSignedEnterpriseAuditHash :one
+SELECT COALESCE((
+    SELECT event_hash FROM audit_events
+    WHERE enterprise_id = $1 AND tenant_seq IS NOT NULL
+    ORDER BY tenant_seq DESC
+    LIMIT 1
+), '')::TEXT AS event_hash
+`
+
+// GetLatestSignedEnterpriseAuditHash returns the head of the SIGNED sub-chain
+// (highest tenant_seq). The signed action-lineage chain links signed->signed so
+// ListSignedAuditEventsForTenant is a self-contained, gap-free verifiable chain
+// independent of interleaved legacy (unsigned) lineage rows. It MUST run under
+// the per-enterprise advisory lock together with AllocateNextTenantSeq.
+func (q *Queries) GetLatestSignedEnterpriseAuditHash(ctx context.Context, enterpriseID string) (string, error) {
+	row := q.db.QueryRow(ctx, getLatestSignedEnterpriseAuditHash, enterpriseID)
+	var event_hash string
+	err := row.Scan(&event_hash)
+	return event_hash, err
+}
+
+const insertAuditBatchRoot = `-- name: InsertAuditBatchRoot :one
+INSERT INTO audit_batch_roots (
+    id, enterprise_id, root_hash, first_seq, last_seq, event_count,
+    signed_at, signature_algorithm, signature_key_id, signature_value
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, enterprise_id, root_hash, first_seq, last_seq, event_count, signed_at, signature_algorithm, signature_key_id, signature_value, created_at
+`
+
+type InsertAuditBatchRootParams struct {
+	ID                 string
+	EnterpriseID       string
+	RootHash           string
+	FirstSeq           int64
+	LastSeq            int64
+	EventCount         int64
+	SignedAt           pgtype.Timestamptz
+	SignatureAlgorithm string
+	SignatureKeyID     string
+	SignatureValue     string
+}
+
+func (q *Queries) InsertAuditBatchRoot(ctx context.Context, arg InsertAuditBatchRootParams) (AuditBatchRoot, error) {
+	row := q.db.QueryRow(ctx, insertAuditBatchRoot,
+		arg.ID,
+		arg.EnterpriseID,
+		arg.RootHash,
+		arg.FirstSeq,
+		arg.LastSeq,
+		arg.EventCount,
+		arg.SignedAt,
+		arg.SignatureAlgorithm,
+		arg.SignatureKeyID,
+		arg.SignatureValue,
+	)
+	var i AuditBatchRoot
+	err := row.Scan(
+		&i.ID,
+		&i.EnterpriseID,
+		&i.RootHash,
+		&i.FirstSeq,
+		&i.LastSeq,
+		&i.EventCount,
+		&i.SignedAt,
+		&i.SignatureAlgorithm,
+		&i.SignatureKeyID,
+		&i.SignatureValue,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listAuditBatchRoots = `-- name: ListAuditBatchRoots :many
+SELECT id, enterprise_id, root_hash, first_seq, last_seq, event_count, signed_at, signature_algorithm, signature_key_id, signature_value, created_at
+FROM audit_batch_roots
+WHERE enterprise_id = $1
+ORDER BY first_seq ASC
+`
+
+func (q *Queries) ListAuditBatchRoots(ctx context.Context, enterpriseID string) ([]AuditBatchRoot, error) {
+	rows, err := q.db.Query(ctx, listAuditBatchRoots, enterpriseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AuditBatchRoot
+	for rows.Next() {
+		var i AuditBatchRoot
+		if err := rows.Scan(
+			&i.ID,
+			&i.EnterpriseID,
+			&i.RootHash,
+			&i.FirstSeq,
+			&i.LastSeq,
+			&i.EventCount,
+			&i.SignedAt,
+			&i.SignatureAlgorithm,
+			&i.SignatureKeyID,
+			&i.SignatureValue,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAuditEventsForTicket = `-- name: ListAuditEventsForTicket :many
-SELECT id, enterprise_id, case_ticket_id, step_grant_id, actor_user_id, connector_instance_id, resource_type, resource_id, action, decision, input_hash, output_hash, evidence_pointer, prev_hash, event_hash, created_at
+SELECT id, enterprise_id, case_ticket_id, step_grant_id, actor_user_id, connector_instance_id, resource_type, resource_id, action, decision, input_hash, output_hash, evidence_pointer, prev_hash, event_hash, created_at, tenant_seq, signature_algorithm, signature_key_id, signature_value, signed_at, status_from, capability, parameter_hash, grant_ref, approval_evidence_ref, receipt_ref, risk_authority, agent_client_ref, agent_release_ref, org_snapshot_ref
 FROM audit_events
 WHERE enterprise_id = $1 AND case_ticket_id = $2
 ORDER BY created_at ASC
@@ -163,6 +525,21 @@ func (q *Queries) ListAuditEventsForTicket(ctx context.Context, arg ListAuditEve
 			&i.PrevHash,
 			&i.EventHash,
 			&i.CreatedAt,
+			&i.TenantSeq,
+			&i.SignatureAlgorithm,
+			&i.SignatureKeyID,
+			&i.SignatureValue,
+			&i.SignedAt,
+			&i.StatusFrom,
+			&i.Capability,
+			&i.ParameterHash,
+			&i.GrantRef,
+			&i.ApprovalEvidenceRef,
+			&i.ReceiptRef,
+			&i.RiskAuthority,
+			&i.AgentClientRef,
+			&i.AgentReleaseRef,
+			&i.OrgSnapshotRef,
 		); err != nil {
 			return nil, err
 		}
@@ -172,4 +549,154 @@ func (q *Queries) ListAuditEventsForTicket(ctx context.Context, arg ListAuditEve
 		return nil, err
 	}
 	return items, nil
+}
+
+const listAuditSigningKeys = `-- name: ListAuditSigningKeys :many
+SELECT key_id, algorithm, public_key, status, created_at, revoked_at
+FROM audit_signing_keys
+ORDER BY key_id ASC
+`
+
+func (q *Queries) ListAuditSigningKeys(ctx context.Context) ([]AuditSigningKey, error) {
+	rows, err := q.db.Query(ctx, listAuditSigningKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AuditSigningKey
+	for rows.Next() {
+		var i AuditSigningKey
+		if err := rows.Scan(
+			&i.KeyID,
+			&i.Algorithm,
+			&i.PublicKey,
+			&i.Status,
+			&i.CreatedAt,
+			&i.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSignedAuditEventsForTenant = `-- name: ListSignedAuditEventsForTenant :many
+SELECT id, enterprise_id, case_ticket_id, step_grant_id, actor_user_id, connector_instance_id, resource_type, resource_id, action, decision, input_hash, output_hash, evidence_pointer, prev_hash, event_hash, created_at, tenant_seq, signature_algorithm, signature_key_id, signature_value, signed_at, status_from, capability, parameter_hash, grant_ref, approval_evidence_ref, receipt_ref, risk_authority, agent_client_ref, agent_release_ref, org_snapshot_ref
+FROM audit_events
+WHERE enterprise_id = $1 AND tenant_seq IS NOT NULL
+ORDER BY tenant_seq ASC
+`
+
+// ListSignedAuditEventsForTenant returns the FULL signed per-tenant chain in
+// sequence order (the verify/export read path). Legacy unsigned rows (NULL
+// tenant_seq) are excluded.
+func (q *Queries) ListSignedAuditEventsForTenant(ctx context.Context, enterpriseID string) ([]AuditEvent, error) {
+	rows, err := q.db.Query(ctx, listSignedAuditEventsForTenant, enterpriseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AuditEvent
+	for rows.Next() {
+		var i AuditEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.EnterpriseID,
+			&i.CaseTicketID,
+			&i.StepGrantID,
+			&i.ActorUserID,
+			&i.ConnectorInstanceID,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.Action,
+			&i.Decision,
+			&i.InputHash,
+			&i.OutputHash,
+			&i.EvidencePointer,
+			&i.PrevHash,
+			&i.EventHash,
+			&i.CreatedAt,
+			&i.TenantSeq,
+			&i.SignatureAlgorithm,
+			&i.SignatureKeyID,
+			&i.SignatureValue,
+			&i.SignedAt,
+			&i.StatusFrom,
+			&i.Capability,
+			&i.ParameterHash,
+			&i.GrantRef,
+			&i.ApprovalEvidenceRef,
+			&i.ReceiptRef,
+			&i.RiskAuthority,
+			&i.AgentClientRef,
+			&i.AgentReleaseRef,
+			&i.OrgSnapshotRef,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revokeAuditSigningKey = `-- name: RevokeAuditSigningKey :one
+UPDATE audit_signing_keys
+SET status = 'revoked', revoked_at = $2
+WHERE key_id = $1
+RETURNING key_id, algorithm, public_key, status, created_at, revoked_at
+`
+
+type RevokeAuditSigningKeyParams struct {
+	KeyID     string
+	RevokedAt pgtype.Timestamptz
+}
+
+func (q *Queries) RevokeAuditSigningKey(ctx context.Context, arg RevokeAuditSigningKeyParams) (AuditSigningKey, error) {
+	row := q.db.QueryRow(ctx, revokeAuditSigningKey, arg.KeyID, arg.RevokedAt)
+	var i AuditSigningKey
+	err := row.Scan(
+		&i.KeyID,
+		&i.Algorithm,
+		&i.PublicKey,
+		&i.Status,
+		&i.CreatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const upsertAuditSigningKey = `-- name: UpsertAuditSigningKey :one
+INSERT INTO audit_signing_keys (key_id, algorithm, public_key)
+VALUES ($1, $2, $3)
+ON CONFLICT (key_id) DO UPDATE
+    SET algorithm = EXCLUDED.algorithm,
+        public_key = EXCLUDED.public_key
+RETURNING key_id, algorithm, public_key, status, created_at, revoked_at
+`
+
+type UpsertAuditSigningKeyParams struct {
+	KeyID     string
+	Algorithm string
+	PublicKey []byte
+}
+
+func (q *Queries) UpsertAuditSigningKey(ctx context.Context, arg UpsertAuditSigningKeyParams) (AuditSigningKey, error) {
+	row := q.db.QueryRow(ctx, upsertAuditSigningKey, arg.KeyID, arg.Algorithm, arg.PublicKey)
+	var i AuditSigningKey
+	err := row.Scan(
+		&i.KeyID,
+		&i.Algorithm,
+		&i.PublicKey,
+		&i.Status,
+		&i.CreatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
 }

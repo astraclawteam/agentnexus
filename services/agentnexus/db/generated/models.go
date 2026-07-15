@@ -200,6 +200,20 @@ type Artifact struct {
 	CreatedAt    pgtype.Timestamptz
 }
 
+type AuditBatchRoot struct {
+	ID                 string
+	EnterpriseID       string
+	RootHash           string
+	FirstSeq           int64
+	LastSeq            int64
+	EventCount         int64
+	SignedAt           pgtype.Timestamptz
+	SignatureAlgorithm string
+	SignatureKeyID     string
+	SignatureValue     string
+	CreatedAt          pgtype.Timestamptz
+}
+
 type AuditEvent struct {
 	ID                  string
 	EnterpriseID        string
@@ -217,6 +231,30 @@ type AuditEvent struct {
 	PrevHash            pgtype.Text
 	EventHash           string
 	CreatedAt           pgtype.Timestamptz
+	TenantSeq           pgtype.Int8
+	SignatureAlgorithm  pgtype.Text
+	SignatureKeyID      pgtype.Text
+	SignatureValue      pgtype.Text
+	SignedAt            pgtype.Timestamptz
+	StatusFrom          pgtype.Text
+	Capability          pgtype.Text
+	ParameterHash       pgtype.Text
+	GrantRef            pgtype.Text
+	ApprovalEvidenceRef pgtype.Text
+	ReceiptRef          pgtype.Text
+	RiskAuthority       pgtype.Text
+	AgentClientRef      pgtype.Text
+	AgentReleaseRef     pgtype.Text
+	OrgSnapshotRef      pgtype.Text
+}
+
+type AuditSigningKey struct {
+	KeyID     string
+	Algorithm string
+	PublicKey []byte
+	Status    string
+	CreatedAt pgtype.Timestamptz
+	RevokedAt pgtype.Timestamptz
 }
 
 type BrowserSession struct {

@@ -1,49 +1,30 @@
 package audit
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
+
+	sdkaudit "github.com/astraclawteam/agentnexus/sdk/go/audit"
 )
 
+// ComputeHash returns the sha256:<hex> event hash of an event, computed over the
+// shared canonical pre-image (canonical.go). This is the hash-only layer: it
+// links the tamper-evident chain and is independent of whether the event is
+// signed (the canonical pre-image zeroes the signature slot).
 func ComputeHash(event Event) string {
-	payload := struct {
-		ID                  string `json:"id"`
-		EnterpriseID        string `json:"enterprise_id"`
-		CaseTicketID        string `json:"case_ticket_id,omitempty"`
-		StepGrantID         string `json:"step_grant_id,omitempty"`
-		ActorUserID         string `json:"actor_user_id,omitempty"`
-		ConnectorInstanceID string `json:"connector_instance_id,omitempty"`
-		ResourceType        string `json:"resource_type,omitempty"`
-		ResourceID          string `json:"resource_id,omitempty"`
-		Action              string `json:"action"`
-		Decision            string `json:"decision"`
-		InputHash           string `json:"input_hash,omitempty"`
-		OutputHash          string `json:"output_hash,omitempty"`
-		EvidencePointer     string `json:"evidence_pointer,omitempty"`
-		PrevHash            string `json:"prev_hash,omitempty"`
-	}{
-		ID:                  event.ID,
-		EnterpriseID:        event.EnterpriseID,
-		CaseTicketID:        event.CaseTicketID,
-		StepGrantID:         event.StepGrantID,
-		ActorUserID:         event.ActorUserID,
-		ConnectorInstanceID: event.ConnectorInstanceID,
-		ResourceType:        event.ResourceType,
-		ResourceID:          event.ResourceID,
-		Action:              event.Action,
-		Decision:            event.Decision,
-		InputHash:           event.InputHash,
-		OutputHash:          event.OutputHash,
-		EvidencePointer:     event.EvidencePointer,
-		PrevHash:            event.PrevHash,
+	hash, err := sdkaudit.EventHash(toSDK(event))
+	if err != nil {
+		// The pre-image is a fixed struct of strings, ints and times; json
+		// marshaling never fails. An empty hash here would fail every downstream
+		// verify, so surface the impossibility loudly rather than silently.
+		panic(fmt.Sprintf("audit: canonical hash failed: %v", err))
 	}
-	bytes, _ := json.Marshal(payload)
-	sum := sha256.Sum256(bytes)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return hash
 }
 
+// VerifyHashChain checks ONLY the hash-chain layer: each event's prev_hash links
+// to the previous event's event_hash and its event_hash equals the recomputed
+// canonical hash. It says nothing about signatures — the GA Task 0G signed
+// verifier (Verify) adds signature, sequence and key-revocation checks on top.
 func VerifyHashChain(events []Event) error {
 	var prev string
 	for _, event := range events {

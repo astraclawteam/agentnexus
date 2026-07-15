@@ -3,6 +3,7 @@ module github.com/astraclawteam/agentnexus/services/agentnexus
 go 1.25.0
 
 require (
+	github.com/astraclawteam/agentnexus/sdk/go/audit v0.0.0
 	github.com/astraclawteam/agentnexus/sdk/go/connector v0.0.0
 	github.com/astraclawteam/agentnexus/sdk/go/runtime v0.0.0
 	github.com/astraclawteam/agentnexus/sdk/go/secretprovider v0.0.0
@@ -17,6 +18,8 @@ require (
 	google.golang.org/genai v1.57.0
 	gopkg.in/yaml.v3 v3.0.1
 )
+
+replace github.com/astraclawteam/agentnexus/sdk/go/audit => ../../sdk/go/audit
 
 replace github.com/astraclawteam/agentnexus/sdk/go/connector => ../../sdk/go/connector
 

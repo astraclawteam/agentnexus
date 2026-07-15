@@ -138,7 +138,9 @@ func newPostgresService(t *testing.T, pool *pgxpool.Pool, opts ...Option) *Servi
 func newPostgresServiceWithAudit(t *testing.T, pool *pgxpool.Pool, opts ...Option) (*Service, *MemoryAuditSink) {
 	t.Helper()
 	audit := NewMemoryAuditSink()
-	base := []Option{WithIDGenerator(sequentialIDs())}
+	// Default accepting receipt verifier so completion succeeds for tests that
+	// are not about receipt authenticity; overridable via opts (later wins).
+	base := []Option{WithIDGenerator(sequentialIDs()), WithReceiptVerifier(&fakeReceiptVerifier{})}
 	svc, err := NewService(NewPostgresStore(pool), audit, append(base, opts...)...)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)

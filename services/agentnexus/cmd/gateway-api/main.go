@@ -91,6 +91,10 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		ServiceName: cfg.ServiceName, Version: cfg.Version, OIDC: browserConfig.OIDC,
 		LoginAttemptLimits: browserConfig.LoginAttemptLimits, AuthorizeRateLimitPerMinute: browserConfig.AuthorizeRateLimitPerMinute,
 		TrustedProxyCIDRs: browserConfig.TrustedProxyCIDRs,
+		// Dev binary: no stable audit key wired yet, so allow a dev-only ephemeral
+		// signing key. A production deployment supplies AuditSigningKey (KMS) and
+		// pins its public half as the offline verifier's trust anchor.
+		AllowEphemeralAuditKey: true,
 	})
 	if err != nil {
 		cleanup()

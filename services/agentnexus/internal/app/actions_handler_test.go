@@ -2,13 +2,15 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	sdkaudit "github.com/astraclawteam/agentnexus/sdk/go/audit"
 	"github.com/astraclawteam/agentnexus/sdk/go/runtime"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/actions"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
@@ -110,7 +112,14 @@ func TestActionsPathsAreTrustProtected(t *testing.T) {
 func TestActionsRequestAndReceiptFlowThroughGateway(t *testing.T) {
 	t.Parallel()
 	store := actions.NewMemoryStore()
-	service, err := actions.NewService(store, actions.NewMemoryAuditSink())
+	// GA Task 0G: completion fails closed without a verifier, so wire a real
+	// signed-receipt verifier and sign the connector receipt below.
+	connectorPub, connectorPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectorKeys := sdkaudit.NewKeySet(sdkaudit.SigningKey{KeyID: "connector-1", Algorithm: runtime.SignatureAlgorithmEd25519, PublicKey: connectorPub, Status: sdkaudit.KeyActive})
+	service, err := actions.NewService(store, actions.NewMemoryAuditSink(), actions.WithReceiptVerifier(actions.NewSignedReceiptVerifier(connectorKeys)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,8 +158,25 @@ func TestActionsRequestAndReceiptFlowThroughGateway(t *testing.T) {
 
 	result, _, _ := runtime.BuildParameters(map[string]any{"po_id": "po-1"})
 	resultHash := runtime.HashParameters(result)
-	receiptBody := fmt.Sprintf(`{"request_id":"req-ingest-1","result_id":"connector-1","receipt":{"receipt_ref":"rcp_actionhandler0001","action_ref":%q,"status":"succeeded","capability":"erp.purchase_order.approve","parameter_hash":%q,"receipt_schema":"erp.receipt.v1","result":%s,"result_hash":%q,"issued_at":%q}}`,
-		action.ActionRef, hash, string(result), resultHash, time.Now().UTC().Format(time.RFC3339))
+	receipt := runtime.ActionReceipt{
+		ReceiptRef: "rcp_actionhandler0001", ActionRef: action.ActionRef, Status: runtime.StatusSucceeded,
+		Capability: "erp.purchase_order.approve", ParameterHash: hash, ReceiptSchema: "erp.receipt.v1",
+		Result: result, ResultHash: resultHash, IssuedAt: time.Now().UTC(),
+	}
+	canonical, err := actions.CanonicalActionReceipt(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.Signature = &runtime.Signature{Algorithm: runtime.SignatureAlgorithmEd25519, KeyID: "connector-1", Value: base64.StdEncoding.EncodeToString(ed25519.Sign(connectorPriv, canonical))}
+	ingestReq, err := json.Marshal(struct {
+		RequestID string                `json:"request_id"`
+		ResultID  string                `json:"result_id"`
+		Receipt   runtime.ActionReceipt `json:"receipt"`
+	}{"req-ingest-1", "connector-1", receipt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptBody := string(ingestReq)
 	ingested := transportRequest(t, router, http.MethodPost, "/v1/runtime/actions/"+action.ActionRef+"/receipts", receiptBody, withTransportSessionCookie)
 	if ingested.Code != http.StatusOK || !strings.Contains(ingested.Body.String(), `"succeeded"`) {
 		t.Fatalf("ingest status=%d body=%s", ingested.Code, ingested.Body.String())

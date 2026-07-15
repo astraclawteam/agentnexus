@@ -46,7 +46,7 @@ func (s *Service) Compensate(ctx context.Context, principal runtime.PrincipalCon
 	if runtime.ValidateHandle(compRef, runtime.HandleAction) != nil {
 		return Action{}, ErrUnavailable
 	}
-	auditRef, err := s.appendAudit(ctx, principal, auditActionRequested, compRef, "", StatusRequested, map[string]any{"capability": original.CompensationRef, "compensation_of": original.ActionRef})
+	auditRef, err := s.appendAudit(ctx, principal, auditBinding{Capability: original.CompensationRef, RiskAuthority: original.RiskAuthority}, auditActionRequested, compRef, "", StatusRequested, map[string]any{"capability": original.CompensationRef, "compensation_of": original.ActionRef})
 	if err != nil {
 		return Action{}, err
 	}
@@ -72,7 +72,7 @@ func (s *Service) Compensate(ctx context.Context, principal runtime.PrincipalCon
 		return Action{}, mapTransitionErr(err)
 	}
 	if created && original.Status != StatusCompensating {
-		if _, err := s.appendAudit(ctx, principal, auditActionCompensating, original.ActionRef, original.Status, StatusCompensating, map[string]any{"compensation_ref": compRef}); err != nil {
+		if _, err := s.appendAudit(ctx, principal, bindingOf(original), auditActionCompensating, original.ActionRef, original.Status, StatusCompensating, map[string]any{"compensation_ref": compRef}); err != nil {
 			return Action{}, err
 		}
 		if _, err := s.store.Transition(ctx, principal.TenantRef, original.ActionRef, original.Status, StatusCompensating, "compensation initiated", now); err != nil {

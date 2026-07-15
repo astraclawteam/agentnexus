@@ -104,7 +104,10 @@ func newTestService(t *testing.T, opts ...Option) (*Service, *MemoryStore, *Memo
 	t.Helper()
 	store := NewMemoryStore()
 	audit := NewMemoryAuditSink()
-	base := []Option{WithIDGenerator(sequentialIDs())}
+	// The completion gate fails closed without a verifier, so tests that are not
+	// about receipt authenticity wire a default accepting verifier; receipt-
+	// security tests override it via opts (later options win).
+	base := []Option{WithIDGenerator(sequentialIDs()), WithReceiptVerifier(&fakeReceiptVerifier{})}
 	svc, err := NewService(store, audit, append(base, opts...)...)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)

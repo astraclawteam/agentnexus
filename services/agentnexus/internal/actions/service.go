@@ -118,17 +118,53 @@ func (s *Service) guard(ctx context.Context) error {
 	return nil
 }
 
+// auditBinding is the set of first-class, recoverable operation bindings the
+// action-transition audit records alongside the transition. The values are
+// loaded from the Action record (and, for the request, the ActionRequest) so
+// every binding is individually signed and inspectable - not folded
+// non-recoverably into a single details hash.
+type auditBinding struct {
+	Capability          string
+	ParameterHash       string
+	GrantRef            string
+	ApprovalEvidenceRef string
+	ReceiptRef          string
+	RiskAuthority       string
+}
+
+// bindingOf projects an Action onto its audit binding.
+func bindingOf(a Action) auditBinding {
+	return auditBinding{
+		Capability:          a.Capability,
+		ParameterHash:       a.ParameterHash,
+		GrantRef:            a.GrantRef,
+		ApprovalEvidenceRef: a.ApprovalEvidenceRef,
+		ReceiptRef:          a.ReceiptRef,
+		RiskAuthority:       a.RiskAuthority,
+	}
+}
+
 // appendAudit appends one mandatory action-transition lineage event. A failed
-// append fails the transition closed.
-func (s *Service) appendAudit(ctx context.Context, principal runtime.PrincipalContext, action, actionRef string, from, to runtime.ActionStatus, details map[string]any) (string, error) {
+// append fails the transition closed. The binding refs (from the Action) and the
+// verified principal's Agent/org context are bound as first-class signed fields.
+func (s *Service) appendAudit(ctx context.Context, principal runtime.PrincipalContext, binding auditBinding, action, actionRef string, from, to runtime.ActionStatus, details map[string]any) (string, error) {
 	ref, err := s.audit.AppendActionAudit(ctx, AuditEvent{
-		TenantRef:    principal.TenantRef,
-		PrincipalRef: principal.PrincipalRef,
-		Action:       action,
-		ActionRef:    actionRef,
-		StatusFrom:   from,
-		StatusTo:     to,
-		Details:      details,
+		TenantRef:           principal.TenantRef,
+		PrincipalRef:        principal.PrincipalRef,
+		Action:              action,
+		ActionRef:           actionRef,
+		StatusFrom:          from,
+		StatusTo:            to,
+		Details:             details,
+		Capability:          binding.Capability,
+		ParameterHash:       binding.ParameterHash,
+		GrantRef:            binding.GrantRef,
+		ApprovalEvidenceRef: binding.ApprovalEvidenceRef,
+		ReceiptRef:          binding.ReceiptRef,
+		RiskAuthority:       binding.RiskAuthority,
+		AgentClientRef:      principal.AgentClientRef,
+		AgentReleaseRef:     principal.AgentReleaseRef,
+		OrgSnapshotRef:      principal.OrgSnapshotRef,
 	})
 	if err != nil || ref == "" {
 		return "", errors.Join(ErrUnavailable, errors.New("action audit append failed"), err)
@@ -197,7 +233,7 @@ func (s *Service) RequestAction(ctx context.Context, principal runtime.Principal
 		status = StatusAwaitingApproval
 		planRef = req.ApprovalPlanRef.PlanRef
 	}
-	auditRef, err := s.appendAudit(ctx, principal, auditActionRequested, actionRef, "", status, map[string]any{"capability": req.Capability, "parameter_hash": req.ParameterHash})
+	auditRef, err := s.appendAudit(ctx, principal, auditBinding{Capability: req.Capability, ParameterHash: req.ParameterHash, RiskAuthority: req.RiskDecision.Authority}, auditActionRequested, actionRef, "", status, map[string]any{"capability": req.Capability, "parameter_hash": req.ParameterHash})
 	if err != nil {
 		return Action{}, err
 	}
@@ -288,7 +324,10 @@ func (s *Service) Grant(ctx context.Context, principal runtime.PrincipalContext,
 	if err != nil {
 		return Action{}, errors.Join(ErrUnavailable, err)
 	}
-	if _, err := s.appendAudit(ctx, principal, auditActionGranted, actionRef, action.Status, StatusGranted, map[string]any{"grant_ref": grantRef}); err != nil {
+	grantBinding := bindingOf(action)
+	grantBinding.GrantRef = grantRef
+	grantBinding.ApprovalEvidenceRef = approvalEvidenceRef
+	if _, err := s.appendAudit(ctx, principal, grantBinding, auditActionGranted, actionRef, action.Status, StatusGranted, map[string]any{"grant_ref": grantRef}); err != nil {
 		return Action{}, err
 	}
 	action.ApprovalEvidenceRef = approvalEvidenceRef
@@ -333,7 +372,7 @@ func (s *Service) Dispatch(ctx context.Context, principal runtime.PrincipalConte
 	}
 	now := s.now().UTC()
 	dispatchRef := s.newID("dsp_")
-	if _, err := s.appendAudit(ctx, principal, auditActionDispatched, actionRef, StatusGranted, StatusDispatched, map[string]any{"grant_ref": action.GrantRef, "dispatch_ref": dispatchRef}); err != nil {
+	if _, err := s.appendAudit(ctx, principal, bindingOf(action), auditActionDispatched, actionRef, StatusGranted, StatusDispatched, map[string]any{"grant_ref": action.GrantRef, "dispatch_ref": dispatchRef}); err != nil {
 		return Action{}, err
 	}
 	dispatch := Dispatch{
@@ -416,7 +455,9 @@ func (s *Service) IngestReceipt(ctx context.Context, principal runtime.Principal
 // store's inbox (ok=false) — the same at-most-one-spurious-audit-under-store-
 // contention window every other 0F transition (Grant/Dispatch) already has.
 func (s *Service) completeFromReceipt(ctx context.Context, principal runtime.PrincipalContext, resultID string, receipt runtime.ActionReceipt, to runtime.ActionStatus, action Action) (Action, error) {
-	if _, err := s.appendAudit(ctx, principal, auditActionCompleted, action.ActionRef, action.Status, to, map[string]any{"receipt_ref": receipt.ReceiptRef, "result_id": resultID}); err != nil {
+	completeBinding := bindingOf(action)
+	completeBinding.ReceiptRef = receipt.ReceiptRef
+	if _, err := s.appendAudit(ctx, principal, completeBinding, auditActionCompleted, action.ActionRef, action.Status, to, map[string]any{"receipt_ref": receipt.ReceiptRef, "result_id": resultID}); err != nil {
 		return Action{}, err
 	}
 	result := Result{TenantRef: principal.TenantRef, ResultID: resultID, ActionRef: receipt.ActionRef, Receipt: receipt}
@@ -446,10 +487,15 @@ func (s *Service) verifyReceipt(ctx context.Context, tenantRef string, action Ac
 	if !ok {
 		return "", errors.Join(ErrReceiptRejected, errors.New("only a technical succeeded/failed receipt completes an action; the runtime never asserts a business outcome"))
 	}
-	if s.receipts != nil {
-		if err := s.receipts.VerifyReceipt(ctx, tenantRef, receipt); err != nil {
-			return "", errors.Join(ErrReceiptRejected, err)
-		}
+	// Fail CLOSED: only a VERIFIED signed receipt completes an Action. With no
+	// verifier wired the signature cannot be checked, so an unverifiable receipt
+	// never completes (mirroring the audit path's hard failure) - the local
+	// structural checks are the floor, never a substitute for authenticity.
+	if s.receipts == nil {
+		return "", errors.Join(ErrReceiptRejected, errors.New("no receipt verifier wired; an unverifiable receipt cannot complete an action"))
+	}
+	if err := s.receipts.VerifyReceipt(ctx, tenantRef, receipt); err != nil {
+		return "", errors.Join(ErrReceiptRejected, err)
 	}
 	return to, nil
 }
@@ -471,7 +517,7 @@ func (s *Service) MarkResultUnknown(ctx context.Context, principal runtime.Princ
 	if action.Status != StatusExecuting && action.Status != StatusDispatched {
 		return Action{}, ErrForbiddenTransition
 	}
-	return s.transition(ctx, principal, action.ActionRef, action.Status, StatusResultUnknown, auditActionResultUnknown, "connector timeout after possible execution")
+	return s.transition(ctx, principal, bindingOf(action), action.ActionRef, action.Status, StatusResultUnknown, auditActionResultUnknown, "connector timeout after possible execution")
 }
 
 // HumanTakeover escalates any live action to human_takeover.
@@ -489,7 +535,7 @@ func (s *Service) HumanTakeover(ctx context.Context, principal runtime.Principal
 	if !canTransition(action.Status, StatusHumanTakeover) {
 		return Action{}, ErrForbiddenTransition
 	}
-	return s.transition(ctx, principal, action.ActionRef, action.Status, StatusHumanTakeover, auditActionHumanTakeover, reason)
+	return s.transition(ctx, principal, bindingOf(action), action.ActionRef, action.Status, StatusHumanTakeover, auditActionHumanTakeover, reason)
 }
 
 // Cancel handles cancellation deterministically: before dispatch (no side effect
@@ -508,9 +554,9 @@ func (s *Service) Cancel(ctx context.Context, principal runtime.PrincipalContext
 	}
 	switch action.Status {
 	case StatusRequested, StatusAwaitingApproval, StatusGranted:
-		return s.transition(ctx, principal, action.ActionRef, action.Status, StatusFailed, auditActionCancelled, "cancelled before dispatch")
+		return s.transition(ctx, principal, bindingOf(action), action.ActionRef, action.Status, StatusFailed, auditActionCancelled, "cancelled before dispatch")
 	case StatusDispatched, StatusExecuting, StatusResultUnknown, StatusReconciling:
-		return s.transition(ctx, principal, action.ActionRef, action.Status, StatusHumanTakeover, auditActionCancelled, "cancelled after dispatch; escalated to human takeover")
+		return s.transition(ctx, principal, bindingOf(action), action.ActionRef, action.Status, StatusHumanTakeover, auditActionCancelled, "cancelled after dispatch; escalated to human takeover")
 	}
 	return Action{}, ErrForbiddenTransition
 }
@@ -560,15 +606,15 @@ func (s *Service) simpleTransition(ctx context.Context, principal runtime.Princi
 	if action.Status != from {
 		return Action{}, ErrForbiddenTransition
 	}
-	return s.transition(ctx, principal, actionRef, from, to, auditAction, reason)
+	return s.transition(ctx, principal, bindingOf(action), actionRef, from, to, auditAction, reason)
 }
 
 // transition audits then applies one allowed edge with no side rows.
-func (s *Service) transition(ctx context.Context, principal runtime.PrincipalContext, actionRef string, from, to runtime.ActionStatus, auditAction, reason string) (Action, error) {
+func (s *Service) transition(ctx context.Context, principal runtime.PrincipalContext, binding auditBinding, actionRef string, from, to runtime.ActionStatus, auditAction, reason string) (Action, error) {
 	if !canTransition(from, to) {
 		return Action{}, ErrForbiddenTransition
 	}
-	if _, err := s.appendAudit(ctx, principal, auditAction, actionRef, from, to, map[string]any{"reason": reason}); err != nil {
+	if _, err := s.appendAudit(ctx, principal, binding, auditAction, actionRef, from, to, map[string]any{"reason": reason}); err != nil {
 		return Action{}, err
 	}
 	updated, err := s.store.Transition(ctx, principal.TenantRef, actionRef, from, to, reason, s.now().UTC())

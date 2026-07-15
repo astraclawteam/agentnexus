@@ -70,6 +70,24 @@ func (f *fakeAuditEvidenceTx) AppendAuditEvent(_ context.Context, params db.Appe
 	return db.AuditEvent{}, f.appendErr
 }
 
+// The following three satisfy the signed-append surface of auditEvidenceTx; the
+// evidence-lineage tests exercise the UNSIGNED legacy path and never call them.
+func (f *fakeAuditEvidenceTx) GetLatestSignedEnterpriseAuditHash(context.Context, string) (string, error) {
+	f.order = append(f.order, "previous_signed")
+	return f.database.latest, f.latestErr
+}
+
+func (f *fakeAuditEvidenceTx) AllocateNextTenantSeq(context.Context, string) (int64, error) {
+	f.order = append(f.order, "allocate_seq")
+	return 1, nil
+}
+
+func (f *fakeAuditEvidenceTx) AppendSignedAuditEvent(_ context.Context, params db.AppendSignedAuditEventParams) (db.AuditEvent, error) {
+	f.order = append(f.order, "append_signed")
+	f.params = db.AppendAuditEventParams{ID: params.ID, EnterpriseID: params.EnterpriseID, EventHash: params.EventHash}
+	return db.AuditEvent{}, f.appendErr
+}
+
 func (f *fakeAuditEvidenceTx) Commit(context.Context) error {
 	f.order = append(f.order, "commit")
 	if f.commitErr == nil {

@@ -52,7 +52,8 @@ func TestTrustedContextCutover(t *testing.T) {
 			SigningKeyID:       "gateway-e2e", SigningPrivateKey: key, HTTPTimeout: 5 * time.Second,
 		},
 		LoginAttemptLimits: browserauth.DefaultLoginAttemptLimits(), AuthorizeRateLimitPerMinute: browserauth.DefaultAuthorizeRateLimitPerMinute,
-		RequestTimeout: 10 * time.Second,
+		RequestTimeout:         10 * time.Second,
+		AllowEphemeralAuditKey: true,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -46,7 +46,9 @@ func (s *Service) ResolveReconciliation(ctx context.Context, principal runtime.P
 		if to != StatusSucceeded {
 			return Action{}, errors.Join(ErrReceiptRejected, errors.New("recovered receipt does not attest a succeeded execution"))
 		}
-		if _, err := s.appendAudit(ctx, principal, auditActionReconciled, actionRef, StatusReconciling, StatusSucceeded, map[string]any{"receipt_ref": receipt.ReceiptRef}); err != nil {
+		reconcileBinding := bindingOf(action)
+		reconcileBinding.ReceiptRef = receipt.ReceiptRef
+		if _, err := s.appendAudit(ctx, principal, reconcileBinding, auditActionReconciled, actionRef, StatusReconciling, StatusSucceeded, map[string]any{"receipt_ref": receipt.ReceiptRef}); err != nil {
 			return Action{}, err
 		}
 		result := Result{TenantRef: principal.TenantRef, ResultID: "reconcile:" + actionRef, ActionRef: actionRef, Receipt: *receipt}
@@ -56,5 +58,5 @@ func (s *Service) ResolveReconciliation(ctx context.Context, principal runtime.P
 		}
 		return resolved, nil
 	}
-	return s.transition(ctx, principal, actionRef, StatusReconciling, StatusFailed, auditActionReconciled, "reconciliation determined a failed outcome")
+	return s.transition(ctx, principal, bindingOf(action), actionRef, StatusReconciling, StatusFailed, auditActionReconciled, "reconciliation determined a failed technical result")
 }

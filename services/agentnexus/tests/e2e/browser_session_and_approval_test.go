@@ -77,6 +77,7 @@ func TestBrowserSessionAndApproval(t *testing.T) {
 		},
 		LoginAttemptLimits: browserauth.DefaultLoginAttemptLimits(), AuthorizeRateLimitPerMinute: browserauth.DefaultAuthorizeRateLimitPerMinute,
 		ApprovalChannel: approvalChannel, RequestTimeout: 10 * time.Second,
+		AllowEphemeralAuditKey: true,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -76,3 +76,78 @@ message EvidencePointer {
   string content_type = 2;
   string sha256 = 3;
 }
+
+// GA Task 0G signed audit verification surface (ADDITIVE — new messages only;
+// the frozen AuditEvent and AuditChain above are unchanged). These messages
+// describe the offline WORM/SIEM verification package: the signed per-tenant
+// chain, the signing public keys with their revocation state, the batch Merkle
+// root with its signer-asserted timestamp, and per-event inclusion witnesses. The
+// authority boundary is unchanged: these records prove WHAT happened and that
+// the chain is untampered; none asserts a business Outcome.
+
+// AuditSignature is a detached ed25519 signature over a canonical pre-image.
+message AuditSignature {
+  string algorithm = 1; // "ed25519"
+  string key_id = 2;
+  string value = 3;     // base64-encoded signature bytes
+}
+
+// SignedAuditEvent wraps one frozen AuditEvent with its GA Task 0G signature and
+// the app-signed instant bound into the canonical pre-image. The frozen event
+// carries tenant_seq, prev_hash and event_hash; the signature binds them.
+message SignedAuditEvent {
+  AuditEvent event = 1;
+  AuditSignature signature = 2;
+  string signed_at = 3; // RFC 3339 (microsecond canonical precision)
+}
+
+// AuditSigningKey is a registered signing public key and its append-only
+// lifecycle, so an offline verifier can resolve signatures and reject a
+// signature by a revoked key.
+message AuditSigningKey {
+  string key_id = 1;
+  string algorithm = 2;  // "ed25519"
+  bytes public_key = 3;  // 32-byte ed25519 public key
+  string status = 4;     // "active" | "revoked"
+  string created_at = 5; // RFC 3339
+  string revoked_at = 6; // RFC 3339; empty unless revoked
+}
+
+// MerkleSibling is one step of an inclusion proof: the sibling digest and
+// whether it sits to the right of the running hash.
+message MerkleSibling {
+  string hash = 1;
+  bool right = 2;
+}
+
+// MerkleWitness is an inclusion proof for one event, leaf to root.
+message MerkleWitness {
+  uint64 leaf_index = 1;
+  repeated MerkleSibling siblings = 2;
+}
+
+// AuditBatchRoot is the signed WORM/SIEM manifest of one exported chain segment:
+// the batch Merkle root over the event hashes, the covered sequence window, the
+// event count and the signer-asserted timestamp, all bound by one signature.
+message AuditBatchRoot {
+  string tenant_ref = 1;
+  uint64 first_seq = 2;
+  uint64 last_seq = 3;
+  uint64 event_count = 4;
+  string root_hash = 5;  // sha256:<64 hex>
+  string signed_at = 6;  // RFC 3339 signer-asserted timestamp
+  AuditSignature signature = 7;
+}
+
+// AuditVerificationPackage is the portable offline verification bundle: the
+// ordered signed events, the signing keys with revocation state, the signed
+// batch Merkle root and per-event inclusion witnesses. It re-verifies with
+// stdlib crypto only, independent of any live service.
+message AuditVerificationPackage {
+  string version = 1;
+  string tenant_ref = 2;
+  repeated SignedAuditEvent events = 3;
+  repeated AuditSigningKey keys = 4;
+  AuditBatchRoot batch = 5;
+  repeated MerkleWitness witnesses = 6;
+}

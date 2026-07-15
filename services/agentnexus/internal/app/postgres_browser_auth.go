@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -156,12 +157,20 @@ type PostgresBrowserAuditSink struct {
 	pool       *pgxpool.Pool
 	evidenceDB auditEvidenceTxBeginner
 	random     io.Reader
+	// signer, when wired, signs the high-risk action-transition sub-chain (GA
+	// Task 0G). Nil ⇒ that path fails CLOSED (no unsigned high-risk audit).
+	signer audit.AuditSigner
+	logger *slog.Logger
+	now    func() time.Time
 }
 
 type auditEvidenceTx interface {
 	AcquireEnterpriseAuditLock(context.Context, string) (interface{}, error)
 	GetLatestEnterpriseAuditHash(context.Context, string) (string, error)
+	GetLatestSignedEnterpriseAuditHash(context.Context, string) (string, error)
+	AllocateNextTenantSeq(context.Context, string) (int64, error)
 	AppendAuditEvent(context.Context, db.AppendAuditEventParams) (db.AuditEvent, error)
+	AppendSignedAuditEvent(context.Context, db.AppendSignedAuditEventParams) (db.AuditEvent, error)
 	Commit(context.Context) error
 	Rollback(context.Context) error
 }
@@ -184,12 +193,39 @@ type postgresAuditEvidenceTx struct {
 	*db.Queries
 }
 
-func NewPostgresBrowserAuditSink(pool *pgxpool.Pool) *PostgresBrowserAuditSink {
-	return &PostgresBrowserAuditSink{pool: pool, evidenceDB: postgresAuditEvidenceDB{pool: pool}, random: rand.Reader}
+// AuditSinkOption configures the durable audit sink.
+type AuditSinkOption func(*PostgresBrowserAuditSink)
+
+// WithAuditSigner wires the GA Task 0G audit signer. When set, the high-risk
+// action-transition sub-chain is signed and sequenced; when absent, that path
+// fails closed (a nil signer never yields an unsigned high-risk audit record).
+func WithAuditSigner(signer audit.AuditSigner) AuditSinkOption {
+	return func(s *PostgresBrowserAuditSink) { s.signer = signer }
 }
 
-func newPostgresAuditEvidenceSinkWithDB(database auditEvidenceTxBeginner, random io.Reader) *PostgresBrowserAuditSink {
-	return &PostgresBrowserAuditSink{evidenceDB: database, random: random}
+// WithAuditLogger wires the diagnostics logger for the signer-error seam.
+func WithAuditLogger(logger *slog.Logger) AuditSinkOption {
+	return func(s *PostgresBrowserAuditSink) {
+		if logger != nil {
+			s.logger = logger
+		}
+	}
+}
+
+func NewPostgresBrowserAuditSink(pool *pgxpool.Pool, opts ...AuditSinkOption) *PostgresBrowserAuditSink {
+	sink := &PostgresBrowserAuditSink{pool: pool, evidenceDB: postgresAuditEvidenceDB{pool: pool}, random: rand.Reader, now: time.Now}
+	for _, opt := range opts {
+		opt(sink)
+	}
+	return sink
+}
+
+func newPostgresAuditEvidenceSinkWithDB(database auditEvidenceTxBeginner, random io.Reader, opts ...AuditSinkOption) *PostgresBrowserAuditSink {
+	sink := &PostgresBrowserAuditSink{evidenceDB: database, random: random, now: time.Now}
+	for _, opt := range opts {
+		opt(sink)
+	}
+	return sink
 }
 
 func (s *PostgresBrowserAuditSink) AppendAuditEvidence(ctx context.Context, input AuditEvidenceInput) (id string, resultErr error) {
@@ -298,6 +334,12 @@ func (s *PostgresBrowserAuditSink) AppendActionTransitionAudit(ctx context.Conte
 	if s == nil || s.evidenceDB == nil || s.random == nil || event.TenantRef == "" || event.PrincipalRef == "" || event.Action == "" || event.ActionRef == "" || event.StatusTo == "" {
 		return "", errors.New("invalid action transition audit event")
 	}
+	// High-risk audit integrity: the action-transition lineage gates side
+	// effects, so a missing signer fails CLOSED. A nil signer never yields an
+	// unsigned high-risk audit record (the observation.go doctrine).
+	if s.signer == nil {
+		return "", errors.Join(audit.ErrUnavailable, errors.New("action-transition audit requires a wired audit signer"))
+	}
 	tx, err := s.evidenceDB.BeginAuditEvidenceTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return "", err
@@ -312,7 +354,13 @@ func (s *PostgresBrowserAuditSink) AppendActionTransitionAudit(ctx context.Conte
 	if _, err := tx.AcquireEnterpriseAuditLock(ctx, event.TenantRef); err != nil {
 		return "", err
 	}
-	previous, err := tx.GetLatestEnterpriseAuditHash(ctx, event.TenantRef)
+	// The signed sub-chain links signed->signed (its own prev_hash head) and
+	// carries a per-tenant monotonic sequence allocated under this same lock.
+	previous, err := tx.GetLatestSignedEnterpriseAuditHash(ctx, event.TenantRef)
+	if err != nil {
+		return "", err
+	}
+	seq, err := tx.AllocateNextTenantSeq(ctx, event.TenantRef)
 	if err != nil {
 		return "", err
 	}
@@ -329,8 +377,33 @@ func (s *PostgresBrowserAuditSink) AppendActionTransitionAudit(ctx context.Conte
 		return "", err
 	}
 	sum := sha256.Sum256(details)
-	chained := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: event.TenantRef, ActorUserID: event.PrincipalRef, ResourceType: "action", ResourceID: event.ActionRef, Action: event.Action, Decision: string(event.StatusTo), InputHash: "sha256:" + hex.EncodeToString(sum[:])}, previous)
-	if _, err := tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: chained.ID, EnterpriseID: chained.EnterpriseID, ActorUserID: textValue(chained.ActorUserID), ResourceType: textValue(chained.ResourceType), ResourceID: textValue(chained.ResourceID), Action: chained.Action, Decision: chained.Decision, InputHash: textValue(chained.InputHash), PrevHash: textValue(chained.PrevHash), EventHash: chained.EventHash}); err != nil {
+	unsigned := audit.NewSignedEvent(audit.EventInput{
+		ID: id, EnterpriseID: event.TenantRef, ActorUserID: event.PrincipalRef,
+		ResourceType: "action", ResourceID: event.ActionRef, Action: event.Action,
+		Decision: string(event.StatusTo), InputHash: "sha256:" + hex.EncodeToString(sum[:]),
+		// GA Task 0G first-class binding refs (recoverable, individually signed).
+		StatusFrom: string(event.StatusFrom), Capability: event.Capability, ParameterHash: event.ParameterHash,
+		GrantRef: event.GrantRef, ApprovalEvidenceRef: event.ApprovalEvidenceRef, ReceiptRef: event.ReceiptRef,
+		RiskAuthority: event.RiskAuthority, AgentClientRef: event.AgentClientRef,
+		AgentReleaseRef: event.AgentReleaseRef, OrgSnapshotRef: event.OrgSnapshotRef,
+	}, previous, uint64(seq), s.now())
+	signed, err := audit.SignEvent(ctx, s.signer, s.logger, unsigned)
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.AppendSignedAuditEvent(ctx, db.AppendSignedAuditEventParams{
+		ID: signed.ID, EnterpriseID: signed.EnterpriseID, ActorUserID: textValue(signed.ActorUserID),
+		ResourceType: textValue(signed.ResourceType), ResourceID: textValue(signed.ResourceID),
+		Action: signed.Action, Decision: signed.Decision, InputHash: textValue(signed.InputHash),
+		PrevHash: textValue(signed.PrevHash), EventHash: signed.EventHash,
+		TenantSeq:          pgtype.Int8{Int64: seq, Valid: true},
+		SignatureAlgorithm: textValue(signed.Signature.Algorithm), SignatureKeyID: textValue(signed.Signature.KeyID),
+		SignatureValue: textValue(signed.Signature.Value), SignedAt: pgtype.Timestamptz{Time: signed.SignedAt, Valid: true},
+		StatusFrom: textValue(signed.StatusFrom), Capability: textValue(signed.Capability), ParameterHash: textValue(signed.ParameterHash),
+		GrantRef: textValue(signed.GrantRef), ApprovalEvidenceRef: textValue(signed.ApprovalEvidenceRef), ReceiptRef: textValue(signed.ReceiptRef),
+		RiskAuthority: textValue(signed.RiskAuthority), AgentClientRef: textValue(signed.AgentClientRef),
+		AgentReleaseRef: textValue(signed.AgentReleaseRef), OrgSnapshotRef: textValue(signed.OrgSnapshotRef),
+	}); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(ctx); err != nil {

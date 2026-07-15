@@ -316,6 +316,18 @@ type AuditEvent struct {
 	StatusFrom   runtime.ActionStatus
 	StatusTo     runtime.ActionStatus
 	Details      map[string]any
+	// GA Task 0G first-class binding refs (recoverable, individually signed):
+	// the exact operation, the grant, the approval evidence, the receipt, the
+	// risk authority and the verified Agent-client/release/org-snapshot context.
+	Capability          string
+	ParameterHash       string
+	GrantRef            string
+	ApprovalEvidenceRef string
+	ReceiptRef          string
+	RiskAuthority       string
+	AgentClientRef      string
+	AgentReleaseRef     string
+	OrgSnapshotRef      string
 }
 
 // AuditSink appends action-transition lineage. Appends are MANDATORY: a failed
