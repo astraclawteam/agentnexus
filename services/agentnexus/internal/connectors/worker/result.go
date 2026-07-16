@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/astraclawteam/agentnexus/sdk/go/runtime"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/actions"
@@ -85,12 +86,16 @@ type ObservationProducer interface {
 	Observe(ctx context.Context, tenantRef string, binding runtime.VerificationBinding) (runtime.ObservationReceipt, error)
 }
 
-// classifyHostResult maps a bounded host Result status onto the technical
+// ClassifyHostResult maps a bounded host Result status onto the technical
 // terminal action status. uncertain=true marks an outcome whose side-effect
 // success cannot be authoritatively determined — those become result_unknown,
 // NEVER a fabricated terminal receipt, leaving reconciliation as the only path
 // forward (result_unknown -> reconciling is a legal state-machine edge; failed ->
 // reconciling is NOT, so a mis-classified timeout would foreclose recovery).
+//
+// It is EXPORTED as the single provenance source of truth: the edge Connector
+// Agent (Task 6) classifies host outcomes through this exact function so the
+// outbound durable-execution plane can never fork the C1 provenance rules.
 //
 // The distinction is PROVENANCE, decided by the host: failed / denied /
 // denied_policy are DEFINITE technical failures with no committed side effect — a
@@ -106,7 +111,7 @@ type ObservationProducer interface {
 // have committed. Asserting a definite verdict there could be false AND would
 // foreclose reconciliation (failed -> reconciling is not a legal edge), so they
 // fail closed to result_unknown — never a fabricated verdict, never a blind retry.
-func classifyHostResult(status host.Status) (runtime.ActionStatus, bool) {
+func ClassifyHostResult(status host.Status) (runtime.ActionStatus, bool) {
 	switch status {
 	case host.StatusSucceeded:
 		return runtime.StatusSucceeded, false
@@ -118,20 +123,34 @@ func classifyHostResult(status host.Status) (runtime.ActionStatus, bool) {
 }
 
 // buildSignedReceipt builds and signs the authoritative ActionReceipt for one
-// technically-completed execution. The connector output is HASH-BOUND, never
+// technically-completed execution. It delegates to the exported
+// BuildSignedActionReceipt so the central Worker and the edge Connector Agent
+// (Task 6) share ONE receipt-production path.
+func (w *Worker) buildSignedReceipt(ctx context.Context, action actions.Action, status runtime.ActionStatus, result host.Result) (runtime.ActionReceipt, error) {
+	return BuildSignedActionReceipt(ctx, w.signer, w.newID, w.now, action, status, result)
+}
+
+// BuildSignedActionReceipt builds and signs the authoritative ActionReceipt for
+// one technically-completed execution. The connector output is HASH-BOUND, never
 // embedded, so the Agent-facing receipt attests the exact result bytes without
 // carrying the payload (or its shape, or any connector topology). It binds the
 // exact action operation (action_ref + capability + parameter_hash) and the
 // declared receipt schema, so the actions ReceiptVerifier accepts it.
-func (w *Worker) buildSignedReceipt(ctx context.Context, action actions.Action, status runtime.ActionStatus, result host.Result) (runtime.ActionReceipt, error) {
+//
+// It is EXPORTED as the single receipt-production source of truth: the outbound
+// Connector Agent (Task 6) mints its edge-journaled ActionReceipt through this
+// exact function (with a real ed25519 signer registered in the central
+// ReceiptVerifier) so a receipt produced at the customer edge verifies centrally
+// and never diverges from the central Worker's receipt shape.
+func BuildSignedActionReceipt(ctx context.Context, signer ReceiptSigner, newID func(prefix string) string, now func() time.Time, action actions.Action, status runtime.ActionStatus, result host.Result) (runtime.ActionReceipt, error) {
 	receipt := runtime.ActionReceipt{
-		ReceiptRef:    w.newID("rcp_"),
+		ReceiptRef:    newID("rcp_"),
 		ActionRef:     action.ActionRef,
 		Status:        status,
 		Capability:    action.Capability,
 		ParameterHash: action.ParameterHash,
 		ReceiptSchema: action.ExpectedReceiptSchema,
-		IssuedAt:      w.now().UTC(),
+		IssuedAt:      now().UTC(),
 	}
 	if len(result.Output) > 0 {
 		sum := sha256.Sum256(result.Output)
@@ -144,7 +163,7 @@ func (w *Worker) buildSignedReceipt(ctx context.Context, action actions.Action, 
 	if err != nil {
 		return runtime.ActionReceipt{}, errors.Join(ErrReceiptProduction, err)
 	}
-	signature, err := w.signer.Sign(ctx, canonical)
+	signature, err := signer.Sign(ctx, canonical)
 	if err != nil {
 		return runtime.ActionReceipt{}, errors.Join(ErrReceiptProduction, err)
 	}
@@ -179,23 +198,11 @@ func (w *Worker) produceObservations(ctx context.Context, tenantRef string, acti
 		if seen[need.NeedID] {
 			continue // dedup to the exact declared set
 		}
-		// Defense in depth: only a need bound to a DECLARED postcondition may be
-		// verified; a detached need is never produced.
-		if !postconditionDeclared(action, need.PostconditionID) {
-			record(errors.Join(ErrObservationRejected, errors.New("verification need does not bind a declared postcondition")))
-			continue
-		}
-		binding := runtime.VerificationBinding{
-			ActionRef:          action.ActionRef,
-			ParameterHash:      action.ParameterHash,
-			PostconditionID:    need.PostconditionID,
-			VerificationNeedID: need.NeedID,
-			DataClass:          need.DataClass,
-		}
-		receipt, err := w.observations.Observe(ctx, tenantRef, binding)
+		receipt, err := ProduceObservation(ctx, w.observations, tenantRef, action, need)
 		if err != nil {
 			// Fail closed: never fabricate a receipt for a need that could not be
-			// authoritatively observed (a deny, a detached/rebinding mismatch).
+			// authoritatively observed (a deny, a detached/rebinding mismatch, or a
+			// receipt that does not bind the declared need).
 			w.logger.WarnContext(ctx, "worker.observation_failed",
 				slog.String("action_ref", action.ActionRef),
 				slog.String("verification_need_id", need.NeedID),
@@ -203,20 +210,49 @@ func (w *Worker) produceObservations(ctx context.Context, tenantRef string, acti
 			record(err)
 			continue
 		}
-		// Integrity: the produced receipt must bind exactly this need and action.
-		if receipt.ActionRef != action.ActionRef || receipt.ParameterHash != action.ParameterHash ||
-			receipt.PostconditionID != need.PostconditionID || receipt.VerificationNeedID != need.NeedID {
-			record(errors.Join(ErrObservationRejected, errors.New("observation receipt does not bind the declared need")))
-			continue
-		}
-		if err := receipt.Validate(); err != nil {
-			record(errors.Join(ErrObservationRejected, err))
-			continue
-		}
 		seen[need.NeedID] = true
 		receipts = append(receipts, receipt)
 	}
 	return receipts, firstErr
+}
+
+// ProduceObservation performs ONE declared postcondition probe and returns the
+// bound, valid ObservationReceipt for it. It enforces the same integrity rules
+// the central Worker owns: only a need bound to a DECLARED postcondition may be
+// verified (a detached need is rejected before Observe, never produced), the
+// producer's returned receipt MUST bind exactly this action + need, and the
+// receipt must validate. A failure is surfaced, NEVER fabricated.
+//
+// It is EXPORTED as the single observation-integrity source of truth: the
+// outbound Connector Agent (Task 6) drives each declared VerificationNeed
+// through this exact function so an edge-produced ObservationReceipt set is
+// bound and deduplicated by the identical rules and never forks the guards.
+func ProduceObservation(ctx context.Context, producer ObservationProducer, tenantRef string, action actions.Action, need runtime.VerificationNeed) (runtime.ObservationReceipt, error) {
+	// Defense in depth: only a need bound to a DECLARED postcondition may be
+	// verified; a detached need is never produced (the producer is not invoked).
+	if !postconditionDeclared(action, need.PostconditionID) {
+		return runtime.ObservationReceipt{}, errors.Join(ErrObservationRejected, errors.New("verification need does not bind a declared postcondition"))
+	}
+	binding := runtime.VerificationBinding{
+		ActionRef:          action.ActionRef,
+		ParameterHash:      action.ParameterHash,
+		PostconditionID:    need.PostconditionID,
+		VerificationNeedID: need.NeedID,
+		DataClass:          need.DataClass,
+	}
+	receipt, err := producer.Observe(ctx, tenantRef, binding)
+	if err != nil {
+		return runtime.ObservationReceipt{}, err
+	}
+	// Integrity: the produced receipt must bind exactly this need and action.
+	if receipt.ActionRef != action.ActionRef || receipt.ParameterHash != action.ParameterHash ||
+		receipt.PostconditionID != need.PostconditionID || receipt.VerificationNeedID != need.NeedID {
+		return runtime.ObservationReceipt{}, errors.Join(ErrObservationRejected, errors.New("observation receipt does not bind the declared need"))
+	}
+	if err := receipt.Validate(); err != nil {
+		return runtime.ObservationReceipt{}, errors.Join(ErrObservationRejected, err)
+	}
+	return receipt, nil
 }
 
 // postconditionDeclared reports whether id is a declared postcondition of the

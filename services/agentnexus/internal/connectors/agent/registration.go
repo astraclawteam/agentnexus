@@ -1,54 +1,56 @@
 package agent
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"strings"
-	"time"
+	"errors"
+	"fmt"
+
+	sdk "github.com/astraclawteam/agentnexus/sdk/go/transportsecurity"
 )
 
-type Identity struct {
-	AgentID      string
-	EnterpriseID string
-	DisplayName  string
+// ServiceName is the connector agent's mTLS service identity segment.
+const ServiceName = "connector-agent"
+
+// ErrIdentityNotCertDerived marks an identity that is not a valid, cert-derived
+// connector-agent installation identity.
+var ErrIdentityNotCertDerived = errors.New("connector agent identity is not cert-derived")
+
+// AgentIdentity is the GA cert-derived identity of a Connector Agent. It is
+// asserted by the mTLS certificate URI SAN (enterprise + installation), issued
+// by the PKI — NEVER by caller-supplied JSON authenticated with a shared HMAC
+// key (the retired pre-GA model, which let a caller assert its own trusted
+// enterprise/actor, forbidden by the GA identity contract, Task 0B). The
+// legacy Identity{AgentID, EnterpriseID, DisplayName} + NewRegistrationRequest /
+// VerifyRegistrationRequest HMAC surface is removed.
+type AgentIdentity struct {
+	Enterprise   string
+	Installation string
+	URI          string
 }
 
-type RegistrationRequest struct {
-	AgentID      string    `json:"agent_id"`
-	EnterpriseID string    `json:"enterprise_id"`
-	DisplayName  string    `json:"display_name"`
-	IssuedAt     time.Time `json:"issued_at"`
-	Signature    string    `json:"signature"`
+// IdentityProvider yields the bound mTLS identity URI. *transportsecurity.Manager
+// satisfies it via manager.IdentityURI().
+type IdentityProvider interface {
+	IdentityURI() string
 }
 
-func NewRegistrationRequest(identity Identity, signingKey string) (RegistrationRequest, error) {
-	req := RegistrationRequest{
-		AgentID:      identity.AgentID,
-		EnterpriseID: identity.EnterpriseID,
-		DisplayName:  identity.DisplayName,
-		IssuedAt:     time.Now().UTC(),
+// CertDerivedIdentity parses the manager's bound identity URI into the agent's
+// cert-derived identity, asserting it is a connector-agent installation. The
+// enterprise and installation come from the certificate the PKI issued, never
+// from caller input.
+func CertDerivedIdentity(p IdentityProvider) (AgentIdentity, error) {
+	if p == nil {
+		return AgentIdentity{}, errors.Join(ErrIdentityNotCertDerived, errors.New("no identity provider"))
 	}
-	req.Signature = signRegistration(req, signingKey)
-	return req, nil
-}
-
-func VerifyRegistrationRequest(req RegistrationRequest, signingKey string) bool {
-	expected := signRegistration(req, signingKey)
-	return hmac.Equal([]byte(expected), []byte(req.Signature))
-}
-
-func signRegistration(req RegistrationRequest, signingKey string) string {
-	mac := hmac.New(sha256.New, []byte(signingKey))
-	mac.Write([]byte(registrationPayload(req)))
-	return "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil))
-}
-
-func registrationPayload(req RegistrationRequest) string {
-	return strings.Join([]string{
-		req.AgentID,
-		req.EnterpriseID,
-		req.DisplayName,
-		req.IssuedAt.Format(time.RFC3339Nano),
-	}, "\n")
+	uri := p.IdentityURI()
+	id, err := sdk.ParseIdentityURI(uri)
+	if err != nil {
+		return AgentIdentity{}, errors.Join(ErrIdentityNotCertDerived, err)
+	}
+	if id.Service != ServiceName {
+		return AgentIdentity{}, errors.Join(ErrIdentityNotCertDerived, fmt.Errorf("certificate service %q is not %q", id.Service, ServiceName))
+	}
+	if id.Installation == "" {
+		return AgentIdentity{}, errors.Join(ErrIdentityNotCertDerived, errors.New("certificate carries no installation; a GA connector agent identity binds a registered installation"))
+	}
+	return AgentIdentity{Enterprise: id.Enterprise, Installation: id.Installation, URI: uri}, nil
 }

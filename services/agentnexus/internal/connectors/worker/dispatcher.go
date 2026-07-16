@@ -55,12 +55,17 @@ type BindingResolver interface {
 	Resolve(ctx context.Context, tenantRef, capability string) (ResolvedBinding, error)
 }
 
-// validateBinding enforces the exact digest/binding + grant checks of a dispatch
+// ValidateBinding enforces the exact digest/binding + grant checks of a dispatch
 // intent against the stored Action. A mismatch is ErrBindingRejected — the
 // worker never executes it. It binds capability, parameter hash and the one-use
 // grant; the connector topology is deliberately absent from the message and is
 // resolved privately, so there is nothing agent-supplied to trust here.
-func validateBinding(msg actions.DispatchMessage, action actions.Action) error {
+//
+// It is EXPORTED as the single binding-validation source of truth: the outbound
+// Connector Agent (Task 6) enforces the SAME exact-binding + one-use-grant rules
+// on every intake so a dispatch that does not bind the stored Action is rejected
+// and never executed, identically at the edge and at the center.
+func ValidateBinding(msg actions.DispatchMessage, action actions.Action) error {
 	switch {
 	case msg.ActionRef != action.ActionRef:
 		return errors.Join(ErrBindingRejected, errors.New("dispatch action_ref does not match the stored action"))
@@ -100,8 +105,8 @@ func (w *Worker) executeAndComplete(ctx context.Context, principal runtime.Princ
 		return ProcessResult{}, err // transient -> nak
 	}
 
-	result := rb.Host.Run(ctx, w.hostOperation(action, msg, rb))
-	status, uncertain := classifyHostResult(result.Status)
+	result := rb.Host.Run(ctx, BuildHostOperation(action, msg, rb))
+	status, uncertain := ClassifyHostResult(result.Status)
 	if uncertain {
 		// A pending external receipt or an unspecified outcome: the side effect's
 		// success cannot be authoritatively determined, so it is result_unknown.

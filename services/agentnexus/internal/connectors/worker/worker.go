@@ -324,7 +324,7 @@ func (w *Worker) ProcessDispatch(ctx context.Context, msg actions.DispatchMessag
 	}
 	// Exact digest/binding + grant validation. A mismatch is a poison intent that
 	// must never execute.
-	if err := validateBinding(msg, action); err != nil {
+	if err := ValidateBinding(msg, action); err != nil {
 		w.logger.WarnContext(ctx, "worker.dispatch_binding_rejected",
 			slog.String("action_ref", msg.ActionRef), slog.String("error", err.Error()))
 		return ProcessResult{Outcome: OutcomeRejected}, nil
@@ -463,12 +463,17 @@ func (d *natsDelivery) Message() actions.DispatchMessage { return d.decoded }
 func (d *natsDelivery) Ack() error                       { return d.msg.Ack() }
 func (d *natsDelivery) Nak() error                       { return d.msg.Nak() }
 
-// hostOperation assembles the isolated-host operation from the resolved PRIVATE
-// binding and the stored Action. The parameter payload is not persisted by 0F
-// (only its hash is), so Input is empty; the connector reads what it needs from
-// the resolved resource under the operation-scoped Secret Handle the host
+// BuildHostOperation assembles the isolated-host operation from the resolved
+// PRIVATE binding and the stored Action. The parameter payload is not persisted
+// by 0F (only its hash is), so Input is empty; the connector reads what it needs
+// from the resolved resource under the operation-scoped Secret Handle the host
 // acquires. No Agent-supplied value reaches this operation.
-func (w *Worker) hostOperation(action actions.Action, msg actions.DispatchMessage, rb ResolvedBinding) host.Operation {
+//
+// It is EXPORTED as the single operation-assembly source of truth: the outbound
+// Connector Agent (Task 6) builds its host.Operation through this exact function
+// so the edge and the center dispatch the identical operation to the shared
+// isolated host, never a forked assembly.
+func BuildHostOperation(action actions.Action, msg actions.DispatchMessage, rb ResolvedBinding) host.Operation {
 	return host.Operation{
 		RequestID:     msg.DispatchRef,
 		Capability:    action.Capability,
