@@ -1,0 +1,49 @@
+# Product Pack v1 (development) — generic read-only database connector family.
+# The family is strictly READ-ONLY: it declares only read capabilities and the
+# runtime-backed adapter refuses any write/DDL/DML intent. Customer-agnostic.
+schema_version: connector.product/v1
+product_key: db.ledger.readonly
+version: 1.0.0
+title: Generic read-only database reader
+development: true
+capabilities:
+  - name: db.ledger.read
+    title: Read ledger rows
+    description: Reads ledger rows via a keyset-paginated read-only query.
+    effect: read
+    input:
+      ref: schema.db.ledger.read.input
+      digest: sha256:3af4142af28e6500c7d73beeab923c26893e1e2ccba6b65ebc01c5c4d8290d7f
+    output:
+      ref: schema.db.ledger.read.output
+      digest: sha256:84b38ce25af7d2854a9b7c5f97f15210803823d1bba099715a692df06caa8cf0
+field_policy:
+  classifications:
+    - field: entry_id
+      classification: internal
+    - field: amount
+      classification: internal
+    - field: account_holder
+      classification: confidential
+      redacted: true
+technical_safety_floor:
+  effect_ceiling: read
+  require_approval_for_writes: false
+network:
+  egress:
+    - db.egress
+  isolation: outbound_only
+runtime:
+  runtime: container
+  min_memory_mb: 64
+compatibility:
+  runtime_contract:
+    min: 1.0.0
+  connector_runtime:
+    min: 1.0.0
+migration:
+  from_versions: []
+  notes: initial development pack
+limits:
+  max_concurrency: 4
+  max_requests_per_minute: 120

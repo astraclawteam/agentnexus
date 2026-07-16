@@ -232,13 +232,29 @@ type adapter interface {
 	Execute(context.Context, connector.Resource, Request) (map[string]any, error)
 }
 
+// legacyAdapter is the pre-GA scaffolding adapter used ONLY by the legacy
+// manifest-based Runtime (Runtime.Execute), which validates a generic
+// connector.Manifest resource/operation/field set and resolves a credential for
+// the pre-Product-Pack import path. The GA connector families
+// (http_openapi.go/db_readonly.go/file_storage.go/webhook.go) do NOT run through
+// this legacy path: they run through the isolated host via ConnectorHostAdapter.
+// It records the family name for the audit trail and returns the resolved
+// resource/operation coordinates.
+type legacyAdapter struct{ name string }
+
+func (a legacyAdapter) Name() string { return a.name }
+
+func (legacyAdapter) Execute(_ context.Context, resource connector.Resource, req Request) (map[string]any, error) {
+	return map[string]any{"resource": resource.Name, "operation": req.Operation}, nil
+}
+
 func adapterFor(resource connector.Resource) adapter {
 	switch resource.Type {
 	case connector.ResourceTypeDB:
-		return dbReadonlyAdapter{}
+		return legacyAdapter{name: "db_readonly"}
 	case connector.ResourceTypeFile:
-		return fileStorageAdapter{}
+		return legacyAdapter{name: "file_storage"}
 	default:
-		return httpOpenAPIAdapter{}
+		return legacyAdapter{name: "http_openapi"}
 	}
 }

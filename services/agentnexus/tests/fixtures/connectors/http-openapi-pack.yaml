@@ -1,0 +1,52 @@
+# Product Pack v1 (development) — generic HTTP/OpenAPI read connector family.
+# Customer-agnostic and resellable: it declares only semantic capabilities, IO
+# schema references (by digest), a field policy and the technical-safety floor.
+# It carries NO customer identity, endpoint, credential or raw API path — those
+# live only in a CustomerBinding. Keys are snake_case to match the SDK json tags
+# (the conformance test loads it as map[string]any -> json -> ParseProductPack).
+schema_version: connector.product/v1
+product_key: httpapi.orders.catalog
+version: 1.0.0
+title: Generic HTTP/OpenAPI orders reader
+development: true
+capabilities:
+  - name: httpapi.orders.read
+    title: Read orders
+    description: Reads orders from a paginated OpenAPI collection.
+    effect: read
+    input:
+      ref: schema.httpapi.orders.read.input
+      digest: sha256:6f70d2743fc1eba3080c3e12022adbd9debaaee86035a8a3d87dc7ce57c6e1a4
+    output:
+      ref: schema.httpapi.orders.read.output
+      digest: sha256:bf39912f7146a43d96a1242f2621bfd7e5632f1367b058556d8b10cc7644ef75
+field_policy:
+  classifications:
+    - field: order_id
+      classification: internal
+    - field: total
+      classification: internal
+    - field: customer_email
+      classification: confidential
+      redacted: true
+technical_safety_floor:
+  effect_ceiling: read
+  require_approval_for_writes: false
+network:
+  egress:
+    - httpapi.egress
+  isolation: outbound_only
+runtime:
+  runtime: container
+  min_memory_mb: 64
+compatibility:
+  runtime_contract:
+    min: 1.0.0
+  connector_runtime:
+    min: 1.0.0
+migration:
+  from_versions: []
+  notes: initial development pack
+limits:
+  max_concurrency: 4
+  max_requests_per_minute: 120
