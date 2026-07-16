@@ -1,0 +1,49 @@
+# Product Pack v1 (development) — generic object-store (file/S3) read connector
+# family. The adapter rejects path traversal (../, absolute escape) and surfaces
+# the object version/ETag as the source version. Customer-agnostic.
+schema_version: connector.product/v1
+product_key: filestore.documents.reader
+version: 1.0.0
+title: Generic object-store document reader
+development: true
+capabilities:
+  - name: filestore.documents.read
+    title: Read stored documents
+    description: Reads objects from a paginated object store, surfacing object versions.
+    effect: read
+    input:
+      ref: schema.filestore.documents.read.input
+      digest: sha256:97288f61eaefb564b8a791ccaa6fa4f78a646df3f36c086115e5904ab9d4d76a
+    output:
+      ref: schema.filestore.documents.read.output
+      digest: sha256:8a3843282a78f9a0126d2b20e2affd5025d34ab81c2dbd0880f25d4fa638d588
+field_policy:
+  classifications:
+    - field: object_key
+      classification: internal
+    - field: title
+      classification: internal
+    - field: owner_email
+      classification: confidential
+      redacted: true
+technical_safety_floor:
+  effect_ceiling: read
+  require_approval_for_writes: false
+network:
+  egress:
+    - filestore.egress
+  isolation: outbound_only
+runtime:
+  runtime: container
+  min_memory_mb: 64
+compatibility:
+  runtime_contract:
+    min: 1.0.0
+  connector_runtime:
+    min: 1.0.0
+migration:
+  from_versions: []
+  notes: initial development pack
+limits:
+  max_concurrency: 4
+  max_requests_per_minute: 120

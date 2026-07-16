@@ -1,0 +1,89 @@
+# Product Pack v1 (development) — generic outbound webhook connector family.
+# This is the ONLY write family. The write capability declares side effects,
+# idempotency, an authoritative postcondition probe whose probing capability is
+# the declared READ capability (webhook.notify.read), and execution/observation
+# receipt schemas. The write's verification is a SEPARATE declared READ probe,
+# never a second write. Customer-agnostic (no endpoint URL, credential or path).
+schema_version: connector.product/v1
+product_key: webhook.notify.delivery
+version: 1.0.0
+title: Generic outbound webhook delivery
+development: true
+capabilities:
+  - name: webhook.notify.send
+    title: Send a webhook notification
+    description: Signs and delivers a notification to a declared endpoint, returning a signed execution receipt.
+    effect: write
+    input:
+      ref: schema.webhook.notify.send.input
+      digest: sha256:4523845d371607b95515b05fbfb48df22f513e6e1ede5cb513ecceb09328cd67
+    output:
+      ref: schema.webhook.notify.send.output
+      digest: sha256:875f759b64be15120dc70d04976a50d853d7b3c8128a096dffa48ba62e2ce1bb
+    side_effects:
+      - kind: external_write
+        description: delivers a notification to the customer's declared endpoint
+        reversible: false
+    reconciliation:
+      strategy: verify_then_reconcile
+      verify_capability: webhook.notify.read
+    idempotency:
+      key_scheme: request_digest
+      scope: per_binding
+      on_duplicate: reject
+    postcondition_probes:
+      - probe_id: post_send_state
+        capability: webhook.notify.read
+        source_authority: system_of_record
+        source_version_semantics: monotonic_counter
+        freshness_bound_seconds: 120
+        observation_schema:
+          ref: schema.webhook.notify.observation
+          digest: sha256:c014b17187fa3442629d1dc8c6b04688ac2b27952454625efcd3df37a344ac05
+    execution_receipt_schema:
+      ref: schema.webhook.notify.execution_receipt
+      digest: sha256:9a240cb04006887edec14c534b08d84333e278a89f2a3a94f446a4181a1bcbbf
+    observation_receipt_schema:
+      ref: schema.webhook.notify.observation_receipt
+      digest: sha256:5434d74bf90725230b8b14431c1ded80afae4ae0a05a39a453230e21462284e9
+  - name: webhook.notify.read
+    title: Read delivery status
+    description: Reads the authoritative delivery status (the postcondition probe of a send).
+    effect: read
+    input:
+      ref: schema.webhook.notify.read.input
+      digest: sha256:11ebd60201c2c7aa53e5afe36fc277d8904acdf63e3a2e7d8dd18bf66eef3e8f
+    output:
+      ref: schema.webhook.notify.read.output
+      digest: sha256:d147c1ea1b2a0648b3140d680428c99e0942a16331a7620e12d9f3543b45d7f6
+field_policy:
+  classifications:
+    - field: message_id
+      classification: internal
+    - field: status
+      classification: internal
+    - field: recipient
+      classification: confidential
+      redacted: true
+technical_safety_floor:
+  effect_ceiling: write
+  max_writes_per_minute: 60
+  require_approval_for_writes: true
+network:
+  egress:
+    - webhook.egress
+  isolation: outbound_only
+runtime:
+  runtime: container
+  min_memory_mb: 64
+compatibility:
+  runtime_contract:
+    min: 1.0.0
+  connector_runtime:
+    min: 1.0.0
+migration:
+  from_versions: []
+  notes: initial development pack
+limits:
+  max_concurrency: 4
+  max_requests_per_minute: 120
