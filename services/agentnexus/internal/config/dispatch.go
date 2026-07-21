@@ -22,7 +22,12 @@ type DispatchConfig struct {
 	// RecoveryInterval paces the outbox recovery drain; zero selects the
 	// composition default.
 	RecoveryInterval time.Duration
+	// StreamName is the JetStream stream carrying dispatch intents.
+	StreamName string
 }
+
+// DefaultDispatchStream is the JetStream stream dispatch intents live on.
+const DefaultDispatchStream = "AGENTNEXUS_ACTIONS"
 
 // Enabled reports whether a dispatch transport is configured.
 func (c DispatchConfig) Enabled() bool { return c.NATSURL != "" }
@@ -31,7 +36,13 @@ func (c DispatchConfig) Enabled() bool { return c.NATSURL != "" }
 // an error rather than a silent fallback: a deployment that meant to slow the
 // recovery drain must not get the default without being told.
 func LoadDispatch() (DispatchConfig, error) {
-	cfg := DispatchConfig{NATSURL: strings.TrimSpace(os.Getenv("AGENTNEXUS_NATS_URL"))}
+	cfg := DispatchConfig{
+		NATSURL:    strings.TrimSpace(os.Getenv("AGENTNEXUS_NATS_URL")),
+		StreamName: strings.TrimSpace(os.Getenv("AGENTNEXUS_DISPATCH_STREAM")),
+	}
+	if cfg.StreamName == "" {
+		cfg.StreamName = DefaultDispatchStream
+	}
 	raw := strings.TrimSpace(os.Getenv("AGENTNEXUS_DISPATCH_RECOVERY_SECONDS"))
 	if raw == "" {
 		return cfg, nil
