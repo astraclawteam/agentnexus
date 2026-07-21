@@ -18,7 +18,7 @@ import (
 )
 
 func TestBuildRouterDisabledOmitsBrowserAuthRoutes(t *testing.T) {
-	router, recoveryPump, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{}, config.DispatchConfig{})
+	router, recoveryPump, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{}, config.DispatchConfig{}, config.ApprovalConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestApprovalTransmissionProductionWiringFailsClosed(t *testing.T) {
 }
 
 func TestBuildRouterDoesNotLeakDatabaseCredentialsInStartupError(t *testing.T) {
-	_, _, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{Enabled: true, DatabaseURL: "postgres://user:supersecret@%zz"}, config.DispatchConfig{})
+	_, _, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{Enabled: true, DatabaseURL: "postgres://user:supersecret@%zz"}, config.DispatchConfig{}, config.ApprovalConfig{})
 	cleanup()
 	if err == nil {
 		t.Fatal("invalid database URL accepted")

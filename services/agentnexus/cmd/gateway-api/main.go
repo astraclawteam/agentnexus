@@ -35,9 +35,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	approvalConfig, err := config.LoadApproval()
+	if err != nil {
+		log.Fatal(err)
+	}
 	runCtx, stopRun := context.WithCancel(context.Background())
 	defer stopRun()
-	router, recoveryPump, cleanup, err := buildRouter(runCtx, cfg, browserConfig, dispatchConfig)
+	router, recoveryPump, cleanup, err := buildRouter(runCtx, cfg, browserConfig, dispatchConfig, approvalConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -83,7 +87,7 @@ func main() {
 	}
 }
 
-func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.BrowserAuthConfig, dispatchConfig config.DispatchConfig) (http.Handler, *actions.RecoveryPump, func(), error) {
+func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.BrowserAuthConfig, dispatchConfig config.DispatchConfig, approvalConfig config.ApprovalConfig) (http.Handler, *actions.RecoveryPump, func(), error) {
 	if !browserConfig.Enabled {
 		return app.NewGatewayAPIRouter(cfg.ServiceName, cfg.Version), nil, func() {}, nil
 	}
@@ -118,12 +122,22 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		poolCleanup := cleanup
 		cleanup = func() { conn.Close(); poolCleanup() }
 	}
-	// GA Task 0E: no approval channel is configured in this command yet, so
-	// the approval transmission endpoints stay unregistered (fail closed).
-	// AgentNexus never resolves approvals itself; the deployment-specific
-	// AgentAtlas/OA/BPM channel wiring arrives with Task 0F.
+	// AgentNexus never resolves approvals itself: it transmits a caller-authored
+	// plan to the deployment's approval authority. No outbound integration with
+	// a customer OA/BPM exists yet (task B7), so the only channel this build can
+	// offer is one that correlates plans durably and reports them undelivered.
+	//
+	// Default stays "none" -- endpoints unregistered, historical behaviour. Set
+	// AGENTNEXUS_APPROVAL_CHANNEL=pending-only to register the surface so
+	// AgentAtlas gets a truthful pending transmission instead of a bare 404
+	// that says nothing about why.
+	var approvalChannel approvaltransport.Channel
+	if approvalConfig.Registered() {
+		approvalChannel = approvaltransport.NewPendingDeliveryChannel()
+	}
 	router, recoveryPump, err := app.NewPostgresGatewayRouter(startupCtx, pool, app.PostgresGatewayConfig{
-		ServiceName: cfg.ServiceName, Version: cfg.Version, OIDC: browserConfig.OIDC,
+		ApprovalChannel: approvalChannel,
+		ServiceName:     cfg.ServiceName, Version: cfg.Version, OIDC: browserConfig.OIDC,
 		LoginAttemptLimits: browserConfig.LoginAttemptLimits, AuthorizeRateLimitPerMinute: browserConfig.AuthorizeRateLimitPerMinute,
 		TrustedProxyCIDRs: browserConfig.TrustedProxyCIDRs,
 		// Dev binary: no stable audit key wired yet, so allow a dev-only ephemeral
