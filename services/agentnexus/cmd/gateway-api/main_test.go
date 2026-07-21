@@ -18,11 +18,16 @@ import (
 )
 
 func TestBuildRouterDisabledOmitsBrowserAuthRoutes(t *testing.T) {
-	router, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{})
+	router, recoveryPump, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{}, config.DispatchConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanup()
+	// No dispatch transport is configured here, so there must be no recovery
+	// loop to start: a pump without a publisher could only spin and fail.
+	if recoveryPump != nil {
+		t.Fatal("a gateway without a dispatch publisher must not return a recovery pump")
+	}
 	for path, want := range map[string]int{"/healthz": http.StatusOK, "/.well-known/openid-configuration": http.StatusNotFound} {
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
@@ -60,7 +65,7 @@ func TestBuildRouterWiresAuthorizeRateLimiterAndTrustedSourceResolver(t *testing
 	}
 	text := string(source)
 	for _, required := range []string{
-		"app.NewPostgresGatewayRouter(ctx, pool",
+		"app.NewPostgresGatewayRouter(startupCtx, pool",
 		"AuthorizeRateLimitPerMinute: browserConfig.AuthorizeRateLimitPerMinute",
 		"TrustedProxyCIDRs:",
 		"browserConfig.TrustedProxyCIDRs",
@@ -84,7 +89,7 @@ func TestBuildRouterWiresAuthorizationPolicyAndPostgresTicketActor(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"app.NewPostgresGatewayRouter(ctx, pool", "app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)"} {
+	for _, required := range []string{"app.NewPostgresGatewayRouter(startupCtx, pool", "app.NewPostgresTicketActorAuthenticator(enterpriseID, pool, time.Now)"} {
 		if !strings.Contains(string(raw), required) {
 			t.Errorf("production authorization wiring missing %q", required)
 		}
@@ -120,7 +125,7 @@ func TestApprovalTransmissionProductionWiringFailsClosed(t *testing.T) {
 }
 
 func TestBuildRouterDoesNotLeakDatabaseCredentialsInStartupError(t *testing.T) {
-	_, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{Enabled: true, DatabaseURL: "postgres://user:supersecret@%zz"})
+	_, _, cleanup, err := buildRouter(context.Background(), config.Config{ServiceName: "gateway-api", Version: "test"}, config.BrowserAuthConfig{Enabled: true, DatabaseURL: "postgres://user:supersecret@%zz"}, config.DispatchConfig{})
 	cleanup()
 	if err == nil {
 		t.Fatal("invalid database URL accepted")

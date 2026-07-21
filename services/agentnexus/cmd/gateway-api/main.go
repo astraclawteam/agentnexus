@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/actions"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/app"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approvaltransport"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
@@ -14,6 +15,7 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/transportsecurity"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/trust"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go"
 )
 
 const startupTimeout = 15 * time.Second
@@ -29,11 +31,24 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	router, cleanup, err := buildRouter(context.Background(), cfg, browserConfig)
+	dispatchConfig, err := config.LoadDispatch()
+	if err != nil {
+		log.Fatal(err)
+	}
+	runCtx, stopRun := context.WithCancel(context.Background())
+	defer stopRun()
+	router, recoveryPump, cleanup, err := buildRouter(runCtx, cfg, browserConfig, dispatchConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer cleanup()
+	if recoveryPump != nil {
+		// The outbox commits a dispatch intent before anything publishes it, so
+		// a crash in that window leaves a durable row nothing would ever
+		// deliver. This loop is what closes that window; it owns no state and
+		// stops with the process.
+		go recoveryPump.Run(runCtx)
+	}
 	health := app.NewHealthStatus(cfg.ServiceName, cfg.Version, true)
 	server := newHTTPServer(cfg, router)
 
@@ -68,39 +83,61 @@ func main() {
 	}
 }
 
-func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.BrowserAuthConfig) (http.Handler, func(), error) {
+func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.BrowserAuthConfig, dispatchConfig config.DispatchConfig) (http.Handler, *actions.RecoveryPump, func(), error) {
 	if !browserConfig.Enabled {
-		return app.NewGatewayAPIRouter(cfg.ServiceName, cfg.Version), func() {}, nil
+		return app.NewGatewayAPIRouter(cfg.ServiceName, cfg.Version), nil, func() {}, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, startupTimeout)
+	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, browserConfig.DatabaseURL)
+	pool, err := pgxpool.New(startupCtx, browserConfig.DatabaseURL)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	cleanup := func() { pool.Close() }
-	if err := pool.Ping(ctx); err != nil {
+	if err := pool.Ping(startupCtx); err != nil {
 		cleanup()
-		return nil, func() {}, fmt.Errorf("connect browser auth database: %w", err)
+		return nil, nil, func() {}, fmt.Errorf("connect browser auth database: %w", err)
+	}
+	// The dispatch transport is optional, but a CONFIGURED one that cannot be
+	// reached is a startup failure: silently serving without delivery would
+	// look healthy while every Action stalls at `dispatched`.
+	var dispatchPublisher actions.Publisher
+	if dispatchConfig.Enabled() {
+		conn, err := nats.Connect(dispatchConfig.NATSURL)
+		if err != nil {
+			cleanup()
+			return nil, nil, func() {}, fmt.Errorf("connect dispatch bus: %w", err)
+		}
+		publisher, err := actions.NewNATSPublisher(conn)
+		if err != nil {
+			conn.Close()
+			cleanup()
+			return nil, nil, func() {}, fmt.Errorf("build dispatch publisher: %w", err)
+		}
+		dispatchPublisher = publisher
+		poolCleanup := cleanup
+		cleanup = func() { conn.Close(); poolCleanup() }
 	}
 	// GA Task 0E: no approval channel is configured in this command yet, so
 	// the approval transmission endpoints stay unregistered (fail closed).
 	// AgentNexus never resolves approvals itself; the deployment-specific
 	// AgentAtlas/OA/BPM channel wiring arrives with Task 0F.
-	router, err := app.NewPostgresGatewayRouter(ctx, pool, app.PostgresGatewayConfig{
+	router, recoveryPump, err := app.NewPostgresGatewayRouter(startupCtx, pool, app.PostgresGatewayConfig{
 		ServiceName: cfg.ServiceName, Version: cfg.Version, OIDC: browserConfig.OIDC,
 		LoginAttemptLimits: browserConfig.LoginAttemptLimits, AuthorizeRateLimitPerMinute: browserConfig.AuthorizeRateLimitPerMinute,
 		TrustedProxyCIDRs: browserConfig.TrustedProxyCIDRs,
 		// Dev binary: no stable audit key wired yet, so allow a dev-only ephemeral
 		// signing key. A production deployment supplies AuditSigningKey (KMS) and
 		// pins its public half as the offline verifier's trust anchor.
-		AllowEphemeralAuditKey: true,
+		AllowEphemeralAuditKey:   true,
+		DispatchPublisher:        dispatchPublisher,
+		DispatchRecoveryInterval: dispatchConfig.RecoveryInterval,
 	})
 	if err != nil {
 		cleanup()
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
-	return router, cleanup, nil
+	return router, recoveryPump, cleanup, nil
 }
 
 // Kept as focused wiring seams for the command's fail-closed unit tests.

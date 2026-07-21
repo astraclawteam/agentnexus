@@ -42,7 +42,7 @@ func TestTrustedContextCutover(t *testing.T) {
 		t.Fatal(err)
 	}
 	oidcContext := context.WithValue(context.Background(), oauth2.HTTPClient, idp.server.Client())
-	router, err := app.NewPostgresGatewayRouter(oidcContext, pool, app.PostgresGatewayConfig{
+	router, _, err := app.NewPostgresGatewayRouter(oidcContext, pool, app.PostgresGatewayConfig{
 		ServiceName: "gateway-api", Version: "e2e-cutover",
 		OIDC: browserauth.OIDCConfig{
 			EnterpriseID: e2eEnterprise, EnterpriseIssuerURL: idp.server.URL,

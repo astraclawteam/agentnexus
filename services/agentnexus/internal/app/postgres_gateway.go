@@ -51,20 +51,39 @@ type PostgresGatewayConfig struct {
 	// anchor). Never set this in production - an ephemeral per-process signing
 	// identity cannot be pinned and defeats offline verification authenticity.
 	AllowEphemeralAuditKey bool
+	// DispatchPublisher delivers durable dispatch intents to the connector
+	// host (NATS JetStream). Without it the transactional outbox still commits
+	// every intent, but nothing ever carries one out of the database: Actions
+	// reach `dispatched` and stop there. Optional so a deployment without a
+	// message bus still serves the browser and audit surfaces.
+	DispatchPublisher actions.Publisher
+	// DispatchRecoveryInterval paces the outbox recovery pump. Zero selects
+	// defaultDispatchRecoveryInterval. The pump only runs when a publisher is
+	// configured — there is nothing to recover to otherwise.
+	DispatchRecoveryInterval time.Duration
 }
 
-func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg PostgresGatewayConfig) (http.Handler, error) {
+// defaultDispatchRecoveryInterval paces the outbox recovery drain. It only
+// matters after a crash between the outbox commit and the publish, so it is
+// tuned for bounded recovery latency rather than throughput.
+const defaultDispatchRecoveryInterval = 30 * time.Second
+
+// NewPostgresGatewayRouter composes the browser gateway. It also returns the
+// outbox recovery pump when a dispatch publisher is configured; the caller owns
+// that goroutine. The pump is returned rather than started here so a test or a
+// one-shot command can compose the router without a background loop.
+func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg PostgresGatewayConfig) (http.Handler, *actions.RecoveryPump, error) {
 	if pool == nil || ctx == nil || cfg.ServiceName == "" || cfg.Version == "" {
-		return nil, errors.New("postgres gateway dependencies incomplete")
+		return nil, nil, errors.New("postgres gateway dependencies incomplete")
 	}
 	upstream, err := browserauth.NewEnterpriseOIDC(ctx, cfg.OIDC)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	directory := NewPostgresBrowserDirectory(pool)
 	authorizeRateLimiter, err := browserauth.NewPostgresAuthorizeRateLimiter(pool, cfg.AuthorizeRateLimitPerMinute, time.Now)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	authorizationPolicy := NewPostgresSnapshotSource(pool)
 	orgVersions := NewPostgresOrgVersionSource(pool)
@@ -75,7 +94,7 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 	// register the public key so the offline verifier resolves it.
 	auditSigner, err := buildAuditSigner(ctx, pool, cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	auditSink := NewPostgresBrowserAuditSink(pool, WithAuditSigner(auditSigner))
 	grantService := tickets.NewService(grantStore, tickets.WithGrantAuthorizer(NewScopedGrantAuthorizer(grantStore, policy.NewCapabilityEvaluator(authorizationPolicy, policy.WithSnapshotIntegrityObserver(snapshotIntegrityLogger{})))))
@@ -83,7 +102,7 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 	if cfg.ApprovalChannel != nil {
 		transmissionService, err := approvaltransport.NewService(approvaltransport.NewPostgresStore(pool), cfg.ApprovalChannel, approvalTransportAuditSink{sink: auditSink})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		approvalTransmission = transmissionService
 	}
@@ -97,11 +116,30 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 	// GA Task 0G receipt verification: only a receipt bearing a verified ed25519
 	// signature by a REGISTERED, non-revoked connector key completes an Action.
 	// The resolver reads the signing-key registry live (dynamic revocation).
-	actionService, err := actions.NewService(actionStore, actionAuditSink{sink: auditSink},
+	actionOptions := []actions.Option{
 		actions.WithEvidenceConsumer(actionEvidenceConsumer{store: approvaltransport.NewPostgresStore(pool)}),
-		actions.WithReceiptVerifier(actions.NewSignedReceiptVerifier(postgresSigningKeyResolver{pool: pool})))
+		actions.WithReceiptVerifier(actions.NewSignedReceiptVerifier(postgresSigningKeyResolver{pool: pool})),
+	}
+	if cfg.DispatchPublisher != nil {
+		actionOptions = append(actionOptions, actions.WithPublisher(cfg.DispatchPublisher))
+	}
+	actionService, err := actions.NewService(actionStore, actionAuditSink{sink: auditSink}, actionOptions...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	// The outbox recovery pump exists only when there is somewhere to recover
+	// to. Constructing it without a publisher would give a loop that can never
+	// succeed, so it stays nil and the caller starts nothing.
+	var recoveryPump *actions.RecoveryPump
+	if cfg.DispatchPublisher != nil {
+		interval := cfg.DispatchRecoveryInterval
+		if interval <= 0 {
+			interval = defaultDispatchRecoveryInterval
+		}
+		recoveryPump, err = actions.NewRecoveryPump(actionService, cfg.OIDC.EnterpriseID, interval)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	// The GA Task 0F ActionBindingVerifier implements the evidence
 	// ActionBindingVerifier seam; it type-checks here and is ready to wire into
@@ -109,7 +147,7 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 	// is constructed in production (its object/key/content/decider ports are not
 	// part of PostgresGatewayConfig yet).
 	var _ evidence.ActionBindingVerifier = actions.NewBindingVerifier(actionStore)
-	return NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, BrowserAuthDependencies{
+	router, err := NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, BrowserAuthDependencies{
 		Config:                  cfg.OIDC,
 		Sessions:                browserauth.NewService(browserauth.NewPostgresStore(pool), browserauth.WithLoginAttemptLimits(cfg.LoginAttemptLimits)),
 		Upstream:                upstream,
@@ -132,6 +170,10 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 		OrgEvents:      NewPostgresOrgEventSource(pool),
 		RequestTimeout: cfg.RequestTimeout,
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return router, recoveryPump, nil
 }
 
 // buildAuditSigner constructs the GA Task 0G audit signer and registers its
