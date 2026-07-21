@@ -309,6 +309,54 @@ func (q *Queries) CountSignedAuditEventsForTenant(ctx context.Context, enterpris
 	return signed_count, err
 }
 
+const getAuditEventByID = `-- name: GetAuditEventByID :one
+SELECT id, enterprise_id, case_ticket_id, step_grant_id, actor_user_id, connector_instance_id, resource_type, resource_id, action, decision, input_hash, output_hash, evidence_pointer, prev_hash, event_hash, created_at, tenant_seq, signature_algorithm, signature_key_id, signature_value, signed_at, status_from, capability, parameter_hash, grant_ref, approval_evidence_ref, receipt_ref, risk_authority, agent_client_ref, agent_release_ref, org_snapshot_ref FROM audit_events WHERE enterprise_id=$1 AND id=$2
+`
+
+type GetAuditEventByIDParams struct {
+	EnterpriseID string
+	ID           string
+}
+
+func (q *Queries) GetAuditEventByID(ctx context.Context, arg GetAuditEventByIDParams) (AuditEvent, error) {
+	row := q.db.QueryRow(ctx, getAuditEventByID, arg.EnterpriseID, arg.ID)
+	var i AuditEvent
+	err := row.Scan(
+		&i.ID,
+		&i.EnterpriseID,
+		&i.CaseTicketID,
+		&i.StepGrantID,
+		&i.ActorUserID,
+		&i.ConnectorInstanceID,
+		&i.ResourceType,
+		&i.ResourceID,
+		&i.Action,
+		&i.Decision,
+		&i.InputHash,
+		&i.OutputHash,
+		&i.EvidencePointer,
+		&i.PrevHash,
+		&i.EventHash,
+		&i.CreatedAt,
+		&i.TenantSeq,
+		&i.SignatureAlgorithm,
+		&i.SignatureKeyID,
+		&i.SignatureValue,
+		&i.SignedAt,
+		&i.StatusFrom,
+		&i.Capability,
+		&i.ParameterHash,
+		&i.GrantRef,
+		&i.ApprovalEvidenceRef,
+		&i.ReceiptRef,
+		&i.RiskAuthority,
+		&i.AgentClientRef,
+		&i.AgentReleaseRef,
+		&i.OrgSnapshotRef,
+	)
+	return i, err
+}
+
 const getAuditSigningKey = `-- name: GetAuditSigningKey :one
 SELECT key_id, algorithm, public_key, status, created_at, revoked_at
 FROM audit_signing_keys
@@ -354,39 +402,6 @@ func (q *Queries) GetLatestAuditBatchRoot(ctx context.Context, enterpriseID stri
 		&i.SignatureAlgorithm,
 		&i.SignatureKeyID,
 		&i.SignatureValue,
-		&i.CreatedAt,
-	)
-	return i, err
-}
-
-const getAuditEventByID = `-- name: GetAuditEventByID :one
-SELECT id, enterprise_id, case_ticket_id, step_grant_id, actor_user_id, connector_instance_id, resource_type, resource_id, action, decision, input_hash, output_hash, evidence_pointer, prev_hash, event_hash, created_at FROM audit_events WHERE enterprise_id=$1 AND id=$2
-`
-
-type GetAuditEventByIDParams struct {
-	EnterpriseID string
-	ID           string
-}
-
-func (q *Queries) GetAuditEventByID(ctx context.Context, arg GetAuditEventByIDParams) (AuditEvent, error) {
-	row := q.db.QueryRow(ctx, getAuditEventByID, arg.EnterpriseID, arg.ID)
-	var i AuditEvent
-	err := row.Scan(
-		&i.ID,
-		&i.EnterpriseID,
-		&i.CaseTicketID,
-		&i.StepGrantID,
-		&i.ActorUserID,
-		&i.ConnectorInstanceID,
-		&i.ResourceType,
-		&i.ResourceID,
-		&i.Action,
-		&i.Decision,
-		&i.InputHash,
-		&i.OutputHash,
-		&i.EvidencePointer,
-		&i.PrevHash,
-		&i.EventHash,
 		&i.CreatedAt,
 	)
 	return i, err

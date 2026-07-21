@@ -6,11 +6,11 @@ normalization: lf
 generated_by: go run ./cmd/contract-lock -update
 files:
   - path: api/CHANGELOG.yaml
-    sha256: sha256:a912f42fd14a1d19feb4e39def860a498817fe992e55acada469a216af9601fa
+    sha256: sha256:ef1ded1c4ce330f08005355b52359eafd8c0e1c64795eb528a1ba6993eefb80b
   - path: api/openapi/gateway-agent.yaml
     sha256: sha256:8ad81f15fe41c7d356bd4e7169c544931a031a16c276d587998a5de5fa87ded7
   - path: api/openapi/gateway-runtime.yaml
-    sha256: sha256:a1bb6dac59bfc1e95739cc80b0768d6ec67f61aaf55db75be3b9be4bb842bcb2
+    sha256: sha256:fa3932f3757989c8ff2a8f98db162025d44ded1398eef03129047cab0c1292c0
   - path: api/proto/agentnexus/actions/v1/actions.proto
     sha256: sha256:67aa032ccbdcd7cfe7b77e624138dc83fff2cae71639df995cf612e4c67ba099
   - path: api/proto/agentnexus/audit/v1/audit.proto

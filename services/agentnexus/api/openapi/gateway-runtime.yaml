@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AgentNexus Gateway Runtime API
-  version: 1.6.0
+  version: 1.8.0
   description: >-
     Vendor-neutral Agent runtime contract v1 (ELC-NEXUS-1 candidate).
     Trusted identity — tenant, actor, organization snapshot, trust class,
@@ -110,6 +110,35 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PermissionDecision'
+  /v1/org-events:
+    get:
+      operationId: subscribeOrgEvents
+      summary: Subscribe to the organization change feed of the verified tenant.
+      description: >-
+        Server-Sent Events stream of organization-graph changes. Tenant scope is
+        derived from the verified service credential and never travels as a
+        request parameter. Each event carries the sealed organization version the
+        change produced, so a consumer that reconnects resumes strictly after the
+        last version it durably applied. The feed is a change notification only:
+        organization payloads and source digests are never published here.
+      security: [{trustedServiceSecret: []}]
+      parameters:
+        - name: since_version
+          in: query
+          required: false
+          description: Replay strictly after this sealed organization version. Omitted starts from the first retained event.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        '200':
+          description: Server-Sent Events stream; every data payload is one OrgEvent.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '409': {description: since_version is ahead of this tenant's current sealed organization version.}
   /v1/runtime/locate:
     post:
       operationId: locateRuntimeEvidence
@@ -989,6 +1018,31 @@ components:
           type: string
           format: date-time
         absolute_expires_at:
+          type: string
+          format: date-time
+    OrgEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, event_type, org_version, occurred_at]
+      description: >-
+        One organization-graph change notification. It states THAT the
+        organization changed and which sealed version the change produced -
+        never the organization payload itself. Raw membership, unit and source
+        material stay inside AgentNexus and are reachable only through the
+        evidence surface under an Access Ticket.
+      properties:
+        event_id:
+          type: string
+          description: Opaque identifier of this change event.
+        event_type:
+          type: string
+          description: Vendor-neutral change kind. Consumers must ignore unknown values rather than fail closed on them.
+        org_version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Sealed organization version this change produced; also the resumable cursor.
+        occurred_at:
           type: string
           format: date-time
     AuthorizationDecisionRequest:

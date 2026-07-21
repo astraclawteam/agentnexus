@@ -5,6 +5,37 @@
 #  `make contracts-verify` together with the contract parity tests).
 protocol: agentnexus-public-contract
 entries:
+  - version: "1.8.0"
+    date: "2026-07-21"
+    breaking: false
+    title: "Publish the organization change feed (GA Task 0D org-events)"
+    summary: >-
+      Additive, backward-compatible evolution of the frozen contract: the
+      organization graph gains its missing PUBLIC subscription surface. A new
+      GET /v1/org-events Server-Sent Events stream, authorized by
+      trustedServiceSecret only, emits the new OrgEvent message. AgentNexus has
+      owned the OrgEvent/OrgVersion domain since 1.0.0 but never published a way
+      to observe it, so a consumer that synchronizes from the organization graph
+      had no contract-legal path. Adding the extension point to the public
+      contract - rather than working around its absence in the consumer - is the
+      boundary rule both repositories declare. No existing schema, field,
+      operation or enum changes.
+      Two boundaries are enforced by the new surface rather than documented
+      around it. Tenant scope stays credential-derived (v1.1.0 / Task 0B): the
+      operation declares NO enterprise identifier parameter, so the feed a
+      caller receives is exactly the tenant its verified credential proves.
+      The feed is a change notification, never an evidence channel: OrgEvent
+      carries only event_id, event_type, the sealed org_version the change
+      produced and occurred_at, and the schema forbids payload and source_hash.
+      Organization membership, unit and source material remain reachable only
+      through the evidence surface under an Access Ticket, so subscribing to
+      the feed grants no additional read authority.
+      The stream is resumable by sealed organization version: since_version is
+      OPTIONAL so a first-time consumer starts from the first retained event,
+      and a reconnecting consumer replays strictly after the last version it
+      durably applied. A cursor ahead of the tenant's current sealed version is
+      a 409 rather than a silent empty stream, so consumer state corruption
+      fails loudly.
   - version: "1.7.0"
     date: "2026-07-15"
     breaking: false

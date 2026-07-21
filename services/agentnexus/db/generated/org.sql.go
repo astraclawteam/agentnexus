@@ -382,6 +382,63 @@ func (q *Queries) ListEnterpriseUsers(ctx context.Context, enterpriseID string) 
 	return items, nil
 }
 
+const listSealedOrgEventsSince = `-- name: ListSealedOrgEventsSince :many
+SELECT e.id, e.event_type, v.version_number, e.created_at
+FROM org_events e
+JOIN org_versions v
+  ON v.source_event_id = e.id
+ AND v.enterprise_id = e.enterprise_id
+WHERE e.enterprise_id = $1
+  AND v.policy_snapshot_sealed = true
+  AND v.version_number > $2
+ORDER BY v.version_number ASC
+LIMIT $3
+`
+
+type ListSealedOrgEventsSinceParams struct {
+	EnterpriseID  string
+	VersionNumber int64
+	Limit         int32
+}
+
+type ListSealedOrgEventsSinceRow struct {
+	ID            string
+	EventType     string
+	VersionNumber int64
+	CreatedAt     pgtype.Timestamptz
+}
+
+// Organization change feed (public surface GET /v1/org-events). Only SEALED
+// versions are published: an unsealed row is not yet authoritative, so a
+// consumer must never observe it. The cursor is the sealed version number, and
+// the projection is deliberately narrow -- id, type, version, timestamp. The
+// payload and source_hash columns stay unselected so the feed cannot become a
+// second read path around the evidence surface.
+func (q *Queries) ListSealedOrgEventsSince(ctx context.Context, arg ListSealedOrgEventsSinceParams) ([]ListSealedOrgEventsSinceRow, error) {
+	rows, err := q.db.Query(ctx, listSealedOrgEventsSince, arg.EnterpriseID, arg.VersionNumber, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSealedOrgEventsSinceRow
+	for rows.Next() {
+		var i ListSealedOrgEventsSinceRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventType,
+			&i.VersionNumber,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const sealOrgPolicySnapshot = `-- name: SealOrgPolicySnapshot :one
 UPDATE org_versions
 SET policy_snapshot_sealed = true

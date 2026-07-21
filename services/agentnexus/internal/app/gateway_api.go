@@ -53,7 +53,10 @@ func isBrowserAuthPath(path string) bool {
 func trustProtectedPath(path string) bool {
 	switch path {
 	case "/v1/authorization/decisions", "/v1/step-grants", "/v1/tickets/verify", "/v1/audit/evidence",
-		"/v1/runtime/locate", "/v1/runtime/read", "/v1/runtime/act":
+		"/v1/runtime/locate", "/v1/runtime/read", "/v1/runtime/act",
+		// The organization change feed carries no tenant parameter, so it MUST
+		// resolve a trusted context at ingress or it would serve nobody's data.
+		"/v1/org-events":
 		return true
 	}
 	// The GA Task 0F durable action surface: the receipt-ingestion callback, the

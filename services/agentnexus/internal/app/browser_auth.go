@@ -262,6 +262,9 @@ type BrowserAuthDependencies struct {
 	// /v1/runtime/act, the receipt-ingestion callback and the compensation
 	// trigger (optional; the endpoints register when provided).
 	Actions ActionsService
+	// OrgEvents is the sealed organization change feed behind /v1/org-events
+	// (optional; the endpoint registers when provided).
+	OrgEvents OrgEventSource
 }
 
 type browserAuthHandler struct {
@@ -281,6 +284,7 @@ type browserAuthHandler struct {
 	auditEvidence           *auditEvidenceHandler
 	evidence                *evidenceHandler
 	actions                 *actionsHandler
+	orgEvents               *orgEventsHandler
 }
 
 func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, error) {
@@ -352,6 +356,13 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
+	var orgEventFeed *orgEventsHandler
+	if deps.OrgEvents != nil {
+		orgEventFeed, err = newOrgEventsHandler(deps.Config.EnterpriseID, deps.OrgEvents)
+		if err != nil {
+			return nil, err
+		}
+	}
 	issuer := deps.TokenIssuer
 	if issuer == nil {
 		var err error
@@ -360,7 +371,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
-	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, trustResolver: trustResolver, authorization: authorization, approval: approvalRoutes, grants: grants, auditEvidence: auditEvidence, evidence: evidenceRuntime, actions: actionsRuntime}, nil
+	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, trustResolver: trustResolver, authorization: authorization, approval: approvalRoutes, grants: grants, auditEvidence: auditEvidence, evidence: evidenceRuntime, actions: actionsRuntime, orgEvents: orgEventFeed}, nil
 }
 
 func browserRequestTimeout(value time.Duration) (time.Duration, error) {
@@ -396,6 +407,9 @@ func (h *browserAuthHandler) register(mux *http.ServeMux) {
 	}
 	if h.actions != nil {
 		h.actions.register(mux)
+	}
+	if h.orgEvents != nil {
+		h.orgEvents.register(mux)
 	}
 }
 

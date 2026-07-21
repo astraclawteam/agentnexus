@@ -126,7 +126,11 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 		ApprovalTransmission:    approvalTransmission,
 		Grants:                  grantService,
 		Actions:                 actionService,
-		RequestTimeout:          cfg.RequestTimeout,
+		// The sealed organization change feed. It is a read-only projection of
+		// rows the organization-import path already writes, so composing it
+		// adds no writer and no second organization authority.
+		OrgEvents:      NewPostgresOrgEventSource(pool),
+		RequestTimeout: cfg.RequestTimeout,
 	})
 }
 

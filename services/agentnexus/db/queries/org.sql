@@ -34,6 +34,24 @@ INSERT INTO org_versions (id, enterprise_id, version_number, source_event_id)
 VALUES ($1, $2, $3, $4)
 RETURNING id, enterprise_id, version_number, source_event_id, created_at, policy_snapshot_sealed;
 
+-- Organization change feed (public surface GET /v1/org-events). Only SEALED
+-- versions are published: an unsealed row is not yet authoritative, so a
+-- consumer must never observe it. The cursor is the sealed version number, and
+-- the projection is deliberately narrow -- id, type, version, timestamp. The
+-- payload and source_hash columns stay unselected so the feed cannot become a
+-- second read path around the evidence surface.
+-- name: ListSealedOrgEventsSince :many
+SELECT e.id, e.event_type, v.version_number, e.created_at
+FROM org_events e
+JOIN org_versions v
+  ON v.source_event_id = e.id
+ AND v.enterprise_id = e.enterprise_id
+WHERE e.enterprise_id = $1
+  AND v.policy_snapshot_sealed = true
+  AND v.version_number > $2
+ORDER BY v.version_number ASC
+LIMIT $3;
+
 -- name: GetLatestAuthorizationOrgVersion :one
 SELECT version_number
 FROM org_versions
