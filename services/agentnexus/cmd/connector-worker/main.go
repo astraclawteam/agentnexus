@@ -88,7 +88,11 @@ func main() {
 		executionWorker = nil
 	}
 
-	health := app.NewHealthStatus(cfg.ServiceName, cfg.Version, true)
+	// Readiness in the startup line must be the SAME predicate /readyz answers.
+	// It used to be a literal true, so the one line an operator reads at boot
+	// said ready=true while /readyz on the same process returned 503 - the
+	// startup log actively masked the fact that the worker consumes nothing.
+	health := app.NewHealthStatus(cfg.ServiceName, cfg.Version, workerCanConsume(executionWorker))
 	healthServer := startHealthServer(cfg, executionWorker, notReadyReason)
 
 	fmt.Printf("service=%s version=%s environment=%s ready=%t mtls=%t identity=%s dispatch_consumer=%s stream=%s bus=%t\n",
@@ -101,9 +105,17 @@ func main() {
 			slog.Error("connector worker stopped", "error", err)
 		}
 	} else {
-		// Without a bus there is nothing to consume. Stay up so the health
-		// surface stays observable and the container does not flap.
-		if !dispatchConfig.Enabled() {
+		// Stay up so the health surface stays observable and the container does
+		// not flap. Staying up is deliberate; staying SILENT was not. Both
+		// reasons must say so: in the deployed configuration NATS *is* set and
+		// the worker is nil, which is exactly the branch that previously logged
+		// nothing at all and parked forever looking healthy.
+		switch {
+		case executionWorker == nil:
+			slog.Warn("connector worker cannot consume and is idle: its execution seams are not wired",
+				"reason", notReadyReason, "consumer", worker.DurableName,
+				"bus_configured", dispatchConfig.Enabled(), "readyz", "503")
+		case !dispatchConfig.Enabled():
 			slog.Warn("no dispatch bus configured; connector worker is idle", "consumer", worker.DurableName)
 		}
 		<-ctx.Done()
@@ -145,13 +157,36 @@ func runDispatchLoop(ctx context.Context, executionWorker *worker.Worker, dispat
 // CheckReady the dispatch gate uses, so an orchestrator's view of readiness can
 // never disagree with whether the worker is actually consuming.
 func startHealthServer(cfg config.Config, executionWorker *worker.Worker, constructionError string) *http.Server {
+	mux := newHealthMux(cfg, executionWorker, constructionError)
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10}
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("connector worker health server stopped", "error", err)
+		}
+	}()
+	return server
+}
+
+// workerCanConsume is the single readiness predicate. Both the startup line and
+// /readyz derive from it, because the one thing that must never happen again is
+// the two disagreeing.
+func workerCanConsume(executionWorker *worker.Worker) bool { return executionWorker != nil }
+
+// newHealthMux builds the health surface. Split out from startHealthServer so
+// the readiness contract can be exercised over a real HTTP round trip instead
+// of asserted by reading this file.
+func newHealthMux(cfg config.Config, executionWorker *worker.Worker, constructionError string) *http.ServeMux {
 	mux := http.NewServeMux()
-	health := app.NewHealthStatus(cfg.ServiceName, cfg.Version, true)
+	health := app.NewHealthStatus(cfg.ServiceName, cfg.Version, workerCanConsume(executionWorker))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeHealth(w, http.StatusOK, health.Service, health.Version, true, "")
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		if executionWorker == nil {
+		// Branch on health.Ready rather than re-deriving the predicate, so the
+		// value this handler answers with and the value the startup line prints
+		// are the SAME value. When they were derived independently they drifted:
+		// the startup line said ready=true while this handler said 503.
+		if !health.Ready {
 			writeHealth(w, http.StatusServiceUnavailable, health.Service, health.Version, false, constructionError)
 			return
 		}
@@ -161,13 +196,7 @@ func startHealthServer(cfg config.Config, executionWorker *worker.Worker, constr
 		}
 		writeHealth(w, http.StatusOK, health.Service, health.Version, true, "")
 	})
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10}
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("connector worker health server stopped", "error", err)
-		}
-	}()
-	return server
+	return mux
 }
 
 func writeHealth(w http.ResponseWriter, status int, service, version string, ready bool, reason string) {
