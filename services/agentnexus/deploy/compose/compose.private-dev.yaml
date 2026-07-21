@@ -33,14 +33,21 @@ services:
     ports:
       - "${AGENTNEXUS_GATEWAY_API_PORT:-8080}:8080"
 
-  # gateway-agent is NOT started here yet: cmd/gateway-agent still validates
-  # its TLS material, prints one line and exits, so the container would flap
-  # on every `docker compose up`. It returns once the bounded ADK operations
-  # assistant makes it a real service. Commented out rather than deleted so
-  # the gap stays visible.
-  # gateway-agent:
-  #   <<: *agentnexus-service
-  #   command: ["go", "run", "./cmd/gateway-agent"]
+  gateway-agent:
+    <<: *agentnexus-service
+    command: ["go", "run", "./cmd/gateway-agent"]
+    ports:
+      - "${AGENTNEXUS_GATEWAY_AGENT_PORT:-8081}:8080"
+    # Liveness only, matching connector-worker. The assistant reports
+    # not-ready until its llmrouter model and deterministic diagnostics
+    # service are wired; that gap is logged and visible at /readyz, and
+    # must not paint the whole stack red.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 40s
 
   connector-worker:
     <<: *agentnexus-service
