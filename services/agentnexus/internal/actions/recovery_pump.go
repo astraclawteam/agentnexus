@@ -33,7 +33,7 @@ type RecoveryPump struct {
 // NewRecoveryPump validates the configuration. Every dependency is required:
 // a pump with a missing tenant or a non-positive interval would silently never
 // recover anything, which is worse than refusing to start.
-func NewRecoveryPump(republisher PendingRepublisher, tenantRef string, interval time.Duration, opts ...RecoveryPumpOption) (*RecoveryPump, error) {
+func NewRecoveryPump(republisher PendingRepublisher, tenantRef string, interval time.Duration) (*RecoveryPump, error) {
 	if republisher == nil {
 		return nil, errors.New("recovery pump requires a republisher")
 	}
@@ -44,22 +44,7 @@ func NewRecoveryPump(republisher PendingRepublisher, tenantRef string, interval 
 		return nil, errors.New("recovery pump requires a positive interval")
 	}
 	pump := &RecoveryPump{republisher: republisher, tenantRef: tenantRef, interval: interval, logger: slog.Default()}
-	for _, opt := range opts {
-		opt(pump)
-	}
 	return pump, nil
-}
-
-// RecoveryPumpOption configures a RecoveryPump.
-type RecoveryPumpOption func(*RecoveryPump)
-
-// WithRecoveryPumpLogger overrides the pump's logger.
-func WithRecoveryPumpLogger(logger *slog.Logger) RecoveryPumpOption {
-	return func(p *RecoveryPump) {
-		if logger != nil {
-			p.logger = logger
-		}
-	}
 }
 
 // Run drains the outbox immediately, then on every interval, until ctx is done.

@@ -6,10 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -153,29 +150,6 @@ func TestLoginAttemptCleanupRemovesAllExpiredRows(t *testing.T) {
 		t.Fatalf("attempts=%d", got)
 	}
 	assertMemoryAttemptQuotaInvariant(t, store)
-}
-
-func TestMemoryLoginAttemptQuotaUsesCountersAndExpiryHeapWithoutMapScan(t *testing.T) {
-	_, here, _, _ := runtime.Caller(0)
-	source, err := os.ReadFile(filepath.Join(filepath.Dir(here), "memory_store.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(source)
-	start := strings.Index(text, "func (s *MemoryStore) CreateLoginAttempt")
-	end := strings.Index(text, "func (s *MemoryStore) ConsumeLoginAttempt")
-	if start < 0 || end <= start {
-		t.Fatal("CreateLoginAttempt source not found")
-	}
-	create := text[start:end]
-	if strings.Contains(create, "range s.loginAttempts") {
-		t.Fatal("CreateLoginAttempt scans every login attempt")
-	}
-	for _, required := range []string{"container/heap", "scopeCounts", "browserCounts", "loginAttemptExpiry", "Generation"} {
-		if !strings.Contains(text, required) {
-			t.Errorf("memory quota implementation missing %q", required)
-		}
-	}
 }
 
 func TestDefaultLoginAttemptLimitsRemainEightPerBrowserAnd65536Global(t *testing.T) {

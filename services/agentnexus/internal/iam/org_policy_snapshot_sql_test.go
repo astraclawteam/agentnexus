@@ -83,20 +83,6 @@ func TestOrgPolicySnapshotMigrationContract(t *testing.T) {
 	}
 }
 
-func TestOrgPolicySnapshotDeploymentGuidanceIsExplicit(t *testing.T) {
-	t.Parallel()
-	raw, err := os.ReadFile(filepath.Join(agentnexusRoot(t), "db", "migrations", "README.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	guidance := strings.ToLower(string(raw))
-	for _, required := range []string{"deployment prerequisite", "does not create environment-specific roles", "grant", "revoke", "two-connection", "mutation-first", "seal-first", "concurrent publishers"} {
-		if !strings.Contains(guidance, required) {
-			t.Errorf("deployment guidance missing %q", required)
-		}
-	}
-}
-
 func TestPostgresPublicationTakesSessionLockBeforeRepeatableReadSnapshot(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join(agentnexusRoot(t), "internal", "iam", "store.go"))

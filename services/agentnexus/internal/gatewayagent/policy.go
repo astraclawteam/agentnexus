@@ -87,30 +87,9 @@ type Policy struct {
 	timeout        time.Duration
 }
 
-// PolicyOption tightens a policy bound.
-type PolicyOption func(*Policy)
-
-// WithMaxToolCalls overrides the per-turn tool-call cap.
-func WithMaxToolCalls(n int) PolicyOption {
-	return func(p *Policy) {
-		if n > 0 {
-			p.maxToolCalls = n
-		}
-	}
-}
-
-// WithTurnTimeout overrides the per-turn deadline.
-func WithTurnTimeout(d time.Duration) PolicyOption {
-	return func(p *Policy) {
-		if d > 0 {
-			p.timeout = d
-		}
-	}
-}
-
 // NewPolicy builds the capability policy. The allow-list is copied so a caller
 // cannot widen a live policy by mutating the package variable.
-func NewPolicy(opts ...PolicyOption) Policy {
+func NewPolicy() Policy {
 	allowed := make(map[ToolCapability]struct{}, len(AllowedCapabilities))
 	for _, capability := range AllowedCapabilities {
 		allowed[capability] = struct{}{}
@@ -120,9 +99,6 @@ func NewPolicy(opts ...PolicyOption) Policy {
 		maxToolCalls:   defaultMaxToolCalls,
 		maxOutputBytes: defaultMaxOutputByte,
 		timeout:        defaultTurnTimeout,
-	}
-	for _, opt := range opts {
-		opt(&policy)
 	}
 	return policy
 }

@@ -28,7 +28,7 @@ type ReadyRunner interface {
 // while the process is up starts serving without a restart. Startup order
 // between the worker and its dependencies stops being something an operator has
 // to get right.
-func RunWhenReady(ctx context.Context, runner ReadyRunner, source DispatchSource, pollInterval time.Duration, opts ...ReadinessGateOption) error {
+func RunWhenReady(ctx context.Context, runner ReadyRunner, source DispatchSource, pollInterval time.Duration) error {
 	if runner == nil {
 		return errors.Join(ErrInvalidConfig, errors.New("readiness gate requires a worker"))
 	}
@@ -39,9 +39,6 @@ func RunWhenReady(ctx context.Context, runner ReadyRunner, source DispatchSource
 		return errors.Join(ErrInvalidConfig, errors.New("readiness gate requires a positive poll interval"))
 	}
 	gate := &readinessGate{logger: slog.Default()}
-	for _, opt := range opts {
-		opt(gate)
-	}
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -71,16 +68,4 @@ func RunWhenReady(ctx context.Context, runner ReadyRunner, source DispatchSource
 
 type readinessGate struct {
 	logger *slog.Logger
-}
-
-// ReadinessGateOption configures the readiness gate.
-type ReadinessGateOption func(*readinessGate)
-
-// WithReadinessGateLogger overrides the gate's logger.
-func WithReadinessGateLogger(logger *slog.Logger) ReadinessGateOption {
-	return func(g *readinessGate) {
-		if logger != nil {
-			g.logger = logger
-		}
-	}
 }
