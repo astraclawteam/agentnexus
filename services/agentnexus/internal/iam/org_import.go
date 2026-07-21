@@ -86,13 +86,8 @@ func (s *Service) CreateOrgVersion(ctx context.Context, input CreateOrgVersionIn
 		SourceHash:   input.SourceHash,
 	}
 	version := OrgVersion{ID: s.newID(), EnterpriseID: input.EnterpriseID, VersionNumber: input.VersionNumber, SourceEventID: event.ID}
-	if publisher, ok := s.store.(orgPolicyPublisher); ok {
-		return publisher.PublishOrgVersion(ctx, event, version)
-	}
-	persistedEvent, err := s.store.CreateOrgEvent(ctx, event)
-	if err != nil {
-		return OrgVersion{}, err
-	}
-	version.SourceEventID = persistedEvent.ID
-	return s.store.CreateOrgVersion(ctx, version)
+	// One transaction, no fallback. Writing the event and the version it seals
+	// separately could leave an event no version references, which the sealed
+	// feed joins away and therefore silently never publishes.
+	return s.store.PublishOrgVersion(ctx, event, version)
 }

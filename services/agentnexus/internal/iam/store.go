@@ -27,9 +27,12 @@ type Store interface {
 	AddOrgMembership(context.Context, OrgMembership) (OrgMembership, error)
 	CreateOrgEvent(context.Context, OrgEvent) (OrgEvent, error)
 	CreateOrgVersion(context.Context, OrgVersion) (OrgVersion, error)
-}
-
-type orgPolicyPublisher interface {
+	// PublishOrgVersion writes the event and the version it seals as ONE
+	// transaction. It is a required capability, not an optional one: a store
+	// that could only write them separately would be able to leave an event
+	// with no version (invisible to the sealed feed) or a version with no
+	// event. It was previously probed for with a type assertion and backed by
+	// a non-atomic fallback that no store could ever reach.
 	PublishOrgVersion(context.Context, OrgEvent, OrgVersion) (OrgVersion, error)
 }
 
