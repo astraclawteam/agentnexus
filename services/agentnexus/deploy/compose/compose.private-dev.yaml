@@ -16,6 +16,25 @@ x-agentnexus-service: &agentnexus-service
     AGENTNEXUS_NATS_URL: "${AGENTNEXUS_NATS_URL:-nats://nats:4222}"
     AGENTNEXUS_OBJECT_STORAGE_EXTERNAL: "${AGENTNEXUS_OBJECT_STORAGE_EXTERNAL:-false}"
     AGENTNEXUS_OBJECT_STORAGE_ENDPOINT: "${AGENTNEXUS_OBJECT_STORAGE_ENDPOINT:-http://object-storage:9000}"
+    # gateway-api serves ONLY /healthz, /readyz and /api/console/overview until
+    # browser auth is enabled: cmd/gateway-api/main.go returns the minimal
+    # router when this is unset, so the runtime, evidence, approval, action,
+    # audit and org-event surfaces are not registered and every cross-product
+    # call 404s. Enabling it is not a single flag -- OIDC signing key material
+    # and console client secrets must be provisioned first (tasks E1/E2), and
+    # the process fails closed at startup if any of them are missing:
+    #   AGENTNEXUS_BROWSER_AUTH_ENABLED: "true"
+    #   AGENTNEXUS_OIDC_SIGNING_KEY_PATH, AGENTNEXUS_OIDC_SIGNING_KEY_ID
+    #   AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON
+    #   AGENTNEXUS_OIDC_CONSOLE_CLIENT_SECRET_FILES_JSON
+    #   AGENTNEXUS_OIDC_UPSTREAM_CLIENT_SECRET_FILE
+    #   AGENTNEXUS_OIDC_ENTERPRISE_ID, _ENTERPRISE_ISSUER_URL, _PUBLIC_ISSUER_URL,
+    #   _CLIENT_ID, _CALLBACK_URL
+    AGENTNEXUS_BROWSER_AUTH_ENABLED: "${AGENTNEXUS_BROWSER_AUTH_ENABLED:-false}"
+    # Registers the approval transmission surface. No outbound OA/BPM delivery
+    # exists yet (B7), so pending-only correlates plans durably and reports them
+    # honestly undelivered rather than 404ing AgentAtlas.
+    AGENTNEXUS_APPROVAL_CHANNEL: "${AGENTNEXUS_APPROVAL_CHANNEL:-pending-only}"
     AGENTNEXUS_SECRET_PROVIDER: "${AGENTNEXUS_SECRET_PROVIDER:-local-dev}"
     AGENTNEXUS_SECRET_PROVIDER_EXTERNAL: "${AGENTNEXUS_SECRET_PROVIDER_EXTERNAL:-false}"
   depends_on:

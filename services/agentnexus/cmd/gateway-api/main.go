@@ -89,6 +89,20 @@ func main() {
 
 func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.BrowserAuthConfig, dispatchConfig config.DispatchConfig, approvalConfig config.ApprovalConfig) (http.Handler, *actions.RecoveryPump, func(), error) {
 	if !browserConfig.Enabled {
+		// This is the branch every shipped compose/helm profile currently takes,
+		// because none of them set AGENTNEXUS_BROWSER_AUTH_ENABLED. The result is
+		// a gateway that answers /healthz, /readyz and /api/console/overview and
+		// NOTHING else -- no runtime, evidence, approval, action, audit or
+		// org-event surface -- while looking perfectly healthy to an
+		// orchestrator. Serving a reduced router is a legitimate mode; doing it
+		// without saying so is how a whole product surface goes missing and
+		// every cross-product call 404s with no explanation on this side.
+		log.Printf("gateway-api: browser auth is disabled, serving the minimal router only "+
+			"(health and console overview). The runtime, evidence, approval, action, audit and "+
+			"org-event surfaces are NOT registered. Set AGENTNEXUS_BROWSER_AUTH_ENABLED=true with "+
+			"AGENTNEXUS_POSTGRES_DSN, AGENTNEXUS_OIDC_SIGNING_KEY_PATH, "+
+			"AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON, AGENTNEXUS_OIDC_CONSOLE_CLIENT_SECRET_FILES_JSON "+
+			"and AGENTNEXUS_OIDC_UPSTREAM_CLIENT_SECRET_FILE to serve them. service=%s", cfg.ServiceName)
 		return app.NewGatewayAPIRouter(cfg.ServiceName, cfg.Version), nil, func() {}, nil
 	}
 	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout)
