@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
+	"strings"
 	"time"
 
 	sdkaudit "github.com/astraclawteam/agentnexus/sdk/go/audit"
@@ -61,6 +63,23 @@ type PostgresGatewayConfig struct {
 	// defaultDispatchRecoveryInterval. The pump only runs when a publisher is
 	// configured — there is nothing to recover to otherwise.
 	DispatchRecoveryInterval time.Duration
+	// EvidenceObjectRoot / EvidenceContentKeyRef / EvidenceContentKey compose
+	// the GA Task 0D semantic evidence runtime behind /v1/runtime/locate and
+	// /v1/runtime/read. All three together or none: with none the endpoints stay
+	// UNREGISTERED (historical behaviour), with a partial set router
+	// construction FAILS CLOSED.
+	//
+	// EvidenceContentKeyRef must be STABLE across restarts and redeploys. Read
+	// resolves a handle's key through the reference persisted at locate time, so
+	// a changed ref (or changed material under the same ref) makes every
+	// previously staged handle undecryptable — a fail-closed 503 with no hint
+	// that key rotation caused it. This mirrors the AuditSigningKeyID/
+	// AuditSigningKey contract above, deliberately WITHOUT an ephemeral escape
+	// hatch: an ephemeral audit key still signs new events, an ephemeral content
+	// key destroys staged content.
+	EvidenceObjectRoot    string
+	EvidenceContentKeyRef string
+	EvidenceContentKey    []byte
 }
 
 // defaultDispatchRecoveryInterval paces the outbox recovery drain. It only
@@ -141,13 +160,19 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 			return nil, nil, err
 		}
 	}
-	// The GA Task 0F ActionBindingVerifier implements the evidence
-	// ActionBindingVerifier seam; it type-checks here and is ready to wire into
-	// the evidence service's WithActionBindingVerifier once the evidence RUNTIME
-	// is constructed in production (its object/key/content/decider ports are not
-	// part of PostgresGatewayConfig yet).
-	var _ evidence.ActionBindingVerifier = actions.NewBindingVerifier(actionStore)
-	router, err := NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, BrowserAuthDependencies{
+	// The GA Task 0D semantic evidence runtime. It composes only when the
+	// deployment supplies a staging root and a stable content key; unset, both
+	// /v1/runtime endpoints stay unregistered exactly as before. The GA Task 0F
+	// ActionBindingVerifier is wired INTO it there — that is the wiring the
+	// discarded `var _ = actions.NewBindingVerifier(actionStore)` that used to
+	// stand at this spot was only pretending to be. There is no separate type
+	// assertion left to keep: the real construction type-checks the conformance,
+	// and a second one at package scope would be the same decoration again.
+	evidenceRuntime, err := buildEvidenceRuntime(pool, cfg, auditSink, authorizationPolicy, actionStore)
+	if err != nil {
+		return nil, nil, err
+	}
+	deps := BrowserAuthDependencies{
 		Config:                  cfg.OIDC,
 		Sessions:                browserauth.NewService(browserauth.NewPostgresStore(pool), browserauth.WithLoginAttemptLimits(cfg.LoginAttemptLimits)),
 		Upstream:                upstream,
@@ -164,16 +189,131 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 		ApprovalTransmission:    approvalTransmission,
 		Grants:                  grantService,
 		Actions:                 actionService,
+		Evidence:                evidenceRuntime,
 		// The sealed organization change feed. It is a read-only projection of
 		// rows the organization-import path already writes, so composing it
 		// adds no writer and no second organization authority.
 		OrgEvents:      NewPostgresOrgEventSource(pool),
 		RequestTimeout: cfg.RequestTimeout,
-	})
+	}
+	// Refuse to compose a gateway that is missing a surface it is contracted to
+	// serve. newBrowserAuthHandler's own nil check cannot do this job: it lets
+	// every optional surface go unregistered so in-memory tests and reduced
+	// routers still work, which is exactly how a dependency can be implemented,
+	// unit-tested and constructed by nobody while the suite stays green.
+	//
+	// Honest limit, carried over from the AgentAtlas side: the unit guarantee
+	// below is mutation-provable - break the wiring and TestPostgresGatewayDeps*
+	// fails - but "the shipped binary actually reaches this line" is NOT
+	// independently verified here. This check sits after pgxpool.New and Ping,
+	// so no unit test that lacks a database can observe it running. Proving the
+	// call happens on the real startup path belongs to a deployment smoke test.
+	if missing := deps.MissingRequired(); len(missing) > 0 {
+		return nil, nil, fmt.Errorf("gateway composition incomplete, these dependencies were constructed by nobody: %s "+
+			"(wire them here, or declare them in optionalGatewayDeps with the reason they may stay unset)",
+			strings.Join(missing, ", "))
+	}
+	router, err := NewGatewayAPIRouterWithDependencies(cfg.ServiceName, cfg.Version, deps)
 	if err != nil {
 		return nil, nil, err
 	}
 	return router, recoveryPump, nil
+}
+
+// buildEvidenceRuntime composes the GA Task 0D semantic evidence runtime behind
+// /v1/runtime/locate and /v1/runtime/read, or returns a nil EvidenceService when
+// the deployment did not configure one.
+//
+// The three config fields are ALL-OR-NOTHING and checked here rather than by the
+// wiring guard, because a string and a []byte are configuration VALUES that
+// reflection cannot judge unset (wiring.Inspects skips them by design). A
+// partial set is a startup error, on the AGENTNEXUS_APPROVAL_CHANNEL precedent:
+// an operator who supplied a staging root but no content key must be told at
+// startup, not left with a plane that accepts every locate and fails it.
+//
+// WHAT THIS ACTUALLY DELIVERS TODAY — read before assuming the plane works:
+//
+//   - ContentSource is PendingContentSource. There is no resolver from a source
+//     binding's private SourceRef to a connector manifest, customer binding,
+//     resource/operation and credential ref; that is task B3. Every fetch fails
+//     closed with 503 evidence_unavailable. Nothing fabricates records.
+//   - Service.RegisterSourceBinding has no caller here or anywhere outside
+//     tests, so the private semantic registry is EMPTY. resolveNeed's
+//     GetSourceBinding returns ErrNotFound for every data class, which denies
+//     with not_resolvable — so locate answers 403 evidence_denied before it ever
+//     reaches the content source above. A binding-registration path is B3's to
+//     ship; until it does, this surface is registered and honest, not working.
+//   - No ObservationSigner is wired, so verification-purpose reads fail closed.
+//     That is moot over PostgreSQL anyway: PostgresStore.UpsertSourceBinding
+//     refuses bindings carrying AuthorityTier/FreshnessBound (migration 000008
+//     has no such columns) and sourceBindingFromRow never populates them, so
+//     every verification read denies at observation_authority_undeclared first.
+//     Wiring a signer would not change one response; wiring an in-memory
+//     ephemeral one would mint receipts nobody can verify.
+//
+// The ObjectStore is FileObjectStore: durable, atomic and traversal-guarded, but
+// NODE-LOCAL. With more than one gateway-api replica a handle staged by one
+// replica is unreadable on another — the read fails authenticated decryption and
+// reports 503. That is fail-closed, not a leak, but it makes this composition
+// single-node until a shared ObjectStore exists.
+func buildEvidenceRuntime(pool *pgxpool.Pool, cfg PostgresGatewayConfig, auditSink *PostgresBrowserAuditSink, snapshots policy.SnapshotSource, actionStore *actions.PostgresStore) (EvidenceService, error) {
+	var missing []string
+	for _, entry := range []struct {
+		name string
+		set  bool
+	}{
+		{"EvidenceObjectRoot", cfg.EvidenceObjectRoot != ""},
+		{"EvidenceContentKeyRef", cfg.EvidenceContentKeyRef != ""},
+		{"EvidenceContentKey", len(cfg.EvidenceContentKey) > 0},
+	} {
+		if !entry.set {
+			missing = append(missing, entry.name)
+		}
+	}
+	switch len(missing) {
+	case 3:
+		// Nothing configured: the historical shape. Return the interface's own
+		// nil rather than a typed nil pointer, which would be non-nil to the
+		// dependency check and register endpoints over a nil service.
+		return nil, nil
+	case 0:
+	default:
+		return nil, fmt.Errorf("evidence runtime configuration incomplete, missing: %s "+
+			"(supply all three, or none to leave /v1/runtime/locate and /v1/runtime/read unregistered)",
+			strings.Join(missing, ", "))
+	}
+	objects, err := evidence.NewFileObjectStore(cfg.EvidenceObjectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("evidence object store: %w", err)
+	}
+	keys, err := evidence.NewConfiguredKeyProvider(cfg.EvidenceContentKeyRef, cfg.EvidenceContentKey)
+	if err != nil {
+		return nil, fmt.Errorf("evidence content key: %w", err)
+	}
+	return evidence.NewService(
+		evidence.NewPostgresStore(pool),
+		objects,
+		keys,
+		evidence.NewPendingContentSource(),
+		// The same neutral capability policy the rest of the gateway decides on;
+		// the evidence plane never builds a parallel authorization path.
+		policy.NewCapabilityEvaluator(snapshots, policy.WithSnapshotIntegrityObserver(snapshotIntegrityLogger{})),
+		evidenceAuditSink{sink: auditSink},
+		evidence.WithActionBindingVerifier(actions.NewBindingVerifier(actionStore)),
+	), nil
+}
+
+// evidenceAuditSink adapts the hash-chained audit ledger to the evidence
+// AuditSink port. The evidence plane makes this append MANDATORY on both allow
+// paths — no handle is issued and no bytes are served without a recorded
+// lineage head — so a failure here is a fail-closed 503, never silent egress.
+type evidenceAuditSink struct{ sink *PostgresBrowserAuditSink }
+
+func (s evidenceAuditSink) AppendEvidenceAudit(ctx context.Context, event evidence.AuditEvent) (string, error) {
+	if s.sink == nil {
+		return "", errors.New("evidence audit sink is not wired")
+	}
+	return s.sink.AppendEvidenceLineageAudit(ctx, event)
 }
 
 // buildAuditSigner constructs the GA Task 0G audit signer and registers its

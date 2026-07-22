@@ -601,18 +601,26 @@ func TestActionCancellationAfterDispatchEscalates(t *testing.T) {
 }
 
 func TestActionCrashBeforePublishReplaysOutbox(t *testing.T) {
-	recorder := &recordingPublisher{}
-	svc, store, _ := newTestService(t, WithPublisher(recorder))
+	// Simulate a crash BETWEEN the outbox commit and the publish by dispatching
+	// through a service that never reaches a publisher at all, then recovering
+	// over the SAME durable store with one wired. This is the ONLY window the
+	// pump exists for — an ordinary dispatch publishes itself, which
+	// TestActionDispatchPublishesWithoutWaitingForTheRecoveryPump pins.
+	crashed, store, audit := newTestService(t)
 	principal := testPrincipal(runtime.TrustFirstParty)
 	ctx := context.Background()
-	granted := mustGranted(t, svc, principal, testRequest(t))
-	if _, err := svc.Dispatch(ctx, principal, granted.ActionRef); err != nil {
+	granted := mustGranted(t, crashed, principal, testRequest(t))
+	if _, err := crashed.Dispatch(ctx, principal, granted.ActionRef); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	// Simulate a crash BEFORE the outbox row was published: it is still pending.
 	pending, _ := store.PendingDispatches(ctx, principal.TenantRef, 0)
 	if len(pending) != 1 {
 		t.Fatalf("pending before replay = %d, want 1", len(pending))
+	}
+	recorder := &recordingPublisher{}
+	svc, err := NewService(store, audit, WithIDGenerator(sequentialIDs()), WithReceiptVerifier(&fakeReceiptVerifier{}), WithPublisher(recorder))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
 	}
 	// Recovery republishes the durable intent exactly once and marks it published.
 	n, err := svc.RepublishPending(ctx, principal.TenantRef)

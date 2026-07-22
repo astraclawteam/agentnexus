@@ -18,6 +18,7 @@ import (
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approvaltransport"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/evidence"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/policy"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -347,6 +348,82 @@ func (s *PostgresBrowserAuditSink) AppendApprovalTransmissionAudit(ctx context.C
 	sum := sha256.Sum256(details)
 	chained := audit.NewEvent(audit.EventInput{ID: id, EnterpriseID: event.TenantRef, ActorUserID: event.PrincipalRef, ResourceType: "approval_transmission", ResourceID: event.PlanRef, Action: event.Action, Decision: event.Decision, InputHash: "sha256:" + hex.EncodeToString(sum[:])}, previous)
 	if _, err := tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{ID: chained.ID, EnterpriseID: chained.EnterpriseID, ActorUserID: textValue(chained.ActorUserID), ResourceType: textValue(chained.ResourceType), ResourceID: textValue(chained.ResourceID), Action: chained.Action, Decision: chained.Decision, InputHash: textValue(chained.InputHash), PrevHash: textValue(chained.PrevHash), EventHash: chained.EventHash}); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// AppendEvidenceLineageAudit appends one hash-chained evidence authorization
+// lineage event (evidence_located / evidence_read) and returns the audit event
+// id. It is the durable AuditSink of the GA Task 0D evidence plane, whose
+// contract makes the append MANDATORY on the allow paths: locate issues no
+// handle and read serves no bytes unless the lineage head is recorded, so a
+// failure here is a fail-closed 503, never unaudited egress.
+//
+// The two actions are members of the frozen public audit vocabulary
+// (audit.ActionEvidenceLocated / ActionEvidenceRead), but this appends through
+// the chained ledger directly rather than through AppendAuditEvidence: that path
+// requires a Case Ticket id, and an evidence AuditEvent carries none — the
+// evidence plane's business-context binding is the wc_* work-case ref, which
+// travels in Details. Synthesizing a ticket id to satisfy the validator would
+// put a fabricated lineage key on every evidence event.
+//
+// Details carry only refs, hashes, versions and coded reasons by construction
+// (see internal/evidence), and are recorded as a bounded digest exactly like the
+// approval-transmission lineage.
+func (s *PostgresBrowserAuditSink) AppendEvidenceLineageAudit(ctx context.Context, event evidence.AuditEvent) (id string, resultErr error) {
+	if s == nil || s.evidenceDB == nil || s.random == nil || event.TenantRef == "" || event.PrincipalRef == "" ||
+		!ValidAuditEvidenceAction(AuditEvidenceAction(event.Action)) || event.ResourceType == "" || event.ResourceID == "" {
+		return "", errors.New("invalid evidence lineage audit event")
+	}
+	// The decision is the evidence plane's own allow/deny verdict; it is always
+	// present on both the allow and the deny paths. Refusing to guess keeps the
+	// ledger's decision column honest.
+	decision, _ := event.Details["decision"].(string)
+	if decision != evidence.DecisionAllow && decision != evidence.DecisionDeny {
+		return "", errors.New("evidence lineage audit event carries no decision")
+	}
+	tx, err := s.evidenceDB.BeginAuditEvidenceTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mandatoryCleanupTimeout)
+		defer cancel()
+		if rollbackErr := tx.Rollback(cleanupCtx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			resultErr = errors.Join(resultErr, rollbackErr)
+		}
+	}()
+	if _, err := tx.AcquireEnterpriseAuditLock(ctx, event.TenantRef); err != nil {
+		return "", err
+	}
+	previous, err := tx.GetLatestEnterpriseAuditHash(ctx, event.TenantRef)
+	if err != nil {
+		return "", err
+	}
+	id, err = randomAuditID(s.random)
+	if err != nil {
+		return "", err
+	}
+	details, err := json.Marshal(event.Details)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(details)
+	chained := audit.NewEvent(audit.EventInput{
+		ID: id, EnterpriseID: event.TenantRef, ActorUserID: event.PrincipalRef,
+		ResourceType: event.ResourceType, ResourceID: event.ResourceID, Action: event.Action,
+		Decision: decision, InputHash: "sha256:" + hex.EncodeToString(sum[:]), EvidencePointer: event.TraceID,
+	}, previous)
+	if _, err := tx.AppendAuditEvent(ctx, db.AppendAuditEventParams{
+		ID: chained.ID, EnterpriseID: chained.EnterpriseID, ActorUserID: textValue(chained.ActorUserID),
+		ResourceType: textValue(chained.ResourceType), ResourceID: textValue(chained.ResourceID),
+		Action: chained.Action, Decision: chained.Decision, InputHash: textValue(chained.InputHash),
+		EvidencePointer: textValue(chained.EvidencePointer), PrevHash: textValue(chained.PrevHash), EventHash: chained.EventHash,
+	}); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(ctx); err != nil {

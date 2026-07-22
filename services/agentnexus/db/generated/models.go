@@ -56,17 +56,20 @@ type ActionInbox struct {
 }
 
 type ActionOutbox struct {
-	TenantRef     string
-	DispatchRef   string
-	ActionRef     string
-	Capability    string
-	ParameterHash string
-	GrantRef      string
-	Kind          string
-	Published     bool
-	Attempts      int32
-	CreatedAt     pgtype.Timestamptz
-	PublishedAt   pgtype.Timestamptz
+	TenantRef      string
+	DispatchRef    string
+	ActionRef      string
+	Capability     string
+	ParameterHash  string
+	GrantRef       string
+	Kind           string
+	Published      bool
+	Attempts       int32
+	CreatedAt      pgtype.Timestamptz
+	PublishedAt    pgtype.Timestamptz
+	NextAttemptAt  pgtype.Timestamptz
+	LastError      string
+	DeadLetteredAt pgtype.Timestamptz
 }
 
 type ActionReceipt struct {

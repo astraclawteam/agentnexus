@@ -36,4 +36,25 @@ spec:
               value: "{{ .Values.dependencies.nats.url }}"
             - name: AGENTNEXUS_SECRET_PROVIDER
               value: "{{ .Values.dependencies.secretProvider.mode }}"
+            # The assistant's only outbound model path. All three must be set
+            # or the process runs, serves health, and reports at /readyz that
+            # it has no model - there is no direct-provider fallback.
+            - name: AGENTNEXUS_LLMROUTER_BASE_URL
+              value: "{{ .Values.dependencies.llmRouter.baseURL }}"
+            - name: AGENTNEXUS_LLMROUTER_MODEL
+              value: "{{ .Values.dependencies.llmRouter.model }}"
+            # The router key is a secret and is referenced, never inlined. A
+            # plain `value:` here would put the key in the rendered manifest,
+            # in `helm get values`, and in every cluster backup that captures
+            # the Deployment.
+            - name: AGENTNEXUS_LLMROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .Values.dependencies.llmRouter.apiKeySecret.name }}"
+                  key: "{{ .Values.dependencies.llmRouter.apiKeySecret.key }}"
+            # Services whose readiness the assistant may report. It grounds
+            # every health answer in these probes, so an empty list leaves the
+            # assistant unready rather than answering from nothing.
+            - name: AGENTNEXUS_HEALTH_PROBE_TARGETS
+              value: "{{ .Values.services.gatewayAgent.healthProbeTargets }}"
 {{- end }}

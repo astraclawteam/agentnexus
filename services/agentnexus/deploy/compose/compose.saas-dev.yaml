@@ -1,22 +1,35 @@
 name: agentnexus-saas-dev
 
+# The browser-authentication material, dev IdP and schema migrator that let
+# gateway-api serve its full surface instead of the minimal health/console
+# router. Shared with the private-dev profile; see the file for what each part
+# exists to satisfy.
+include:
+  - path: browser-auth-dev.yaml
+
 x-agentnexus-service: &agentnexus-service
   image: golang:1.25-alpine
   working_dir: /workspace/services/agentnexus
   volumes:
     - ../../../..:/workspace
+    # The three Go services compile the same module tree. Sharing the module
+    # and build caches turns three cold `go run` builds into roughly one.
+    - agentnexus-saas-gomodcache:/go/pkg/mod
+    - agentnexus-saas-gobuildcache:/root/.cache/go-build
   environment: &agentnexus-env
+    # Only variables some Go code actually reads. The profile previously also
+    # exported AGENTNEXUS_PROFILE, the three *_EXTERNAL toggles,
+    # AGENTNEXUS_OBJECT_STORAGE_ENDPOINT and both AGENTNEXUS_SECRET_PROVIDER*
+    # variables; none of them had a reader anywhere in the module, so setting
+    # them changed nothing while reading as configuration.
     AGENTNEXUS_ENV: saas-dev
     AGENTNEXUS_VERSION: 0.1.0-dev
-    AGENTNEXUS_PROFILE: saas-dev
-    AGENTNEXUS_POSTGRES_EXTERNAL: "false"
     AGENTNEXUS_POSTGRES_DSN: postgres://agentnexus:agentnexus@postgres:5432/agentnexus?sslmode=disable
-    AGENTNEXUS_NATS_EXTERNAL: "false"
     AGENTNEXUS_NATS_URL: nats://nats:4222
-    AGENTNEXUS_OBJECT_STORAGE_EXTERNAL: "false"
-    AGENTNEXUS_OBJECT_STORAGE_ENDPOINT: http://object-storage:9000
-    AGENTNEXUS_SECRET_PROVIDER: local-dev
-    AGENTNEXUS_SECRET_PROVIDER_EXTERNAL: "false"
+    # Registers the approval transmission surface. No outbound OA/BPM delivery
+    # exists yet (B7), so pending-only correlates plans durably and reports them
+    # honestly undelivered rather than 404ing AgentAtlas.
+    AGENTNEXUS_APPROVAL_CHANNEL: "${AGENTNEXUS_APPROVAL_CHANNEL:-pending-only}"
   depends_on:
     postgres:
       condition: service_healthy
@@ -31,16 +44,30 @@ services:
     command: ["go", "run", "./cmd/gateway-api"]
     ports:
       - "${AGENTNEXUS_GATEWAY_API_PORT:-8080}:8080"
+    # The browser-auth environment, credential volume, ordering and health
+    # probe all arrive from browser-auth-dev.yaml.
 
   gateway-agent:
     <<: *agentnexus-service
     command: ["go", "run", "./cmd/gateway-agent"]
     ports:
       - "${AGENTNEXUS_GATEWAY_AGENT_PORT:-8081}:8080"
-    # Liveness only, matching connector-worker. The assistant reports
-    # not-ready until its llmrouter model and deterministic diagnostics
-    # service are wired; that gap is logged and visible at /readyz, and
-    # must not paint the whole stack red.
+    environment:
+      <<: *agentnexus-env
+      # The assistant's only outbound model path. The dev stack does not ship
+      # a router, so these are unset by default and the assistant reports
+      # itself not ready with the missing variables named. Set all three to
+      # bring it up locally.
+      AGENTNEXUS_LLMROUTER_BASE_URL: "${AGENTNEXUS_LLMROUTER_BASE_URL:-}"
+      AGENTNEXUS_LLMROUTER_MODEL: "${AGENTNEXUS_LLMROUTER_MODEL:-}"
+      AGENTNEXUS_LLMROUTER_API_KEY: "${AGENTNEXUS_LLMROUTER_API_KEY:-}"
+      # Services the assistant probes to answer health questions. Every
+      # readiness fact it states comes from this list.
+      AGENTNEXUS_HEALTH_PROBE_TARGETS: "${AGENTNEXUS_HEALTH_PROBE_TARGETS:-gateway-api=http://gateway-api:8080/readyz,connector-worker=http://connector-worker:8080/readyz}"
+    # Liveness only, matching connector-worker. /readyz is deliberately NOT
+    # the container probe: without a configured llmrouter there is no model,
+    # so the assistant stays unready by design in the default dev stack. That
+    # gap is logged and visible at /readyz and must not paint the stack red.
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz || exit 1"]
       interval: 5s
@@ -108,3 +135,6 @@ services:
 volumes:
   agentnexus-saas-postgres:
   agentnexus-saas-object-storage:
+  # The credential volume itself is declared by browser-auth-dev.yaml.
+  agentnexus-saas-gomodcache:
+  agentnexus-saas-gobuildcache:

@@ -21,6 +21,10 @@ type tenantKey struct{}
 // carries no tenant.
 var ErrNoTenant = errors.New("gateway agent: no tenant in context")
 
+// ErrTenantMismatch is returned when an operation carries a session that
+// belongs to a different tenant than the one bound to the context.
+var ErrTenantMismatch = errors.New("gateway agent: session belongs to another tenant")
+
 // WithTenant binds the verified tenant to ctx. Call it at the service edge,
 // from the credential-derived trusted context - never from request JSON.
 func WithTenant(ctx context.Context, tenantRef string) context.Context {
@@ -119,12 +123,29 @@ func (s *TenantScopedSessionService) Delete(ctx context.Context, req *adksession
 	return s.inner.Delete(ctx, &scoped)
 }
 
-// AppendEvent takes the session by value and carries its own identifiers, so
-// there is no request field to rewrite here. The tenant check still runs: an
-// append on a context with no tenant is refused rather than silently accepted.
+// AppendEvent carries the session itself rather than a request struct, and
+// adksession.Session exposes AppName only as a read-only accessor. There is
+// therefore no field to re-author: the scope is VALIDATED here instead.
+//
+// Validating is not a weaker substitute for re-authoring, it is the only thing
+// that holds the boundary on this path. The inner service keys the append by
+// the session's own AppName, so a session opened under one tenant has its
+// events written into that tenant's namespace no matter which tenant ctx
+// carries. Checking only that SOME tenant is present would let a caller append
+// into a namespace its credential never proved - a cross-tenant write.
 func (s *TenantScopedSessionService) AppendEvent(ctx context.Context, sess adksession.Session, event *adksession.Event) error {
-	if _, err := s.scope(ctx); err != nil {
+	appName, err := s.scope(ctx)
+	if err != nil {
 		return err
+	}
+	if sess == nil {
+		return errors.New("gateway agent: append to a nil session")
+	}
+	if sess.AppName() != appName {
+		// The session's own AppName is deliberately not echoed: the caller
+		// already knows the scope it is entitled to, and naming the other
+		// tenant's namespace in an error is itself a small disclosure.
+		return fmt.Errorf("%w: expected namespace %q", ErrTenantMismatch, appName)
 	}
 	return s.inner.AppendEvent(ctx, sess, event)
 }

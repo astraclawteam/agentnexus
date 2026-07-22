@@ -180,6 +180,10 @@ type Grant struct {
 
 // Dispatch is the durable dispatch intent written to the transactional outbox
 // atomically with the granted->dispatched transition.
+//
+// DispatchRef is the intent's stable dedup id: the SAME ref rides every
+// delivery attempt of the same intent, on the wire and into the connector's
+// inbox, so an at-least-once redelivery is absorbed rather than executed twice.
 type Dispatch struct {
 	TenantRef     string
 	DispatchRef   string
@@ -189,10 +193,43 @@ type Dispatch struct {
 	GrantRef      string
 	Kind          DispatchKind
 	Published     bool
-	Attempts      int
-	CreatedAt     time.Time
-	PublishedAt   time.Time
+	// Attempts counts every DELIVERY ATTEMPT, failed ones included; the retry
+	// policy reads it to schedule the backoff and to decide when to give up.
+	Attempts    int
+	CreatedAt   time.Time
+	PublishedAt time.Time
+	// NextAttemptAt is the earliest time a failed intent may be claimed again.
+	// Zero means eligible now.
+	NextAttemptAt time.Time
+	// LastError is the coded reason the last delivery attempt failed.
+	LastError string
+	// DeadLetteredAt stamps the intent the drain gave up on. A dead-lettered
+	// intent is never published and never claimed again: it is durable evidence
+	// of an undelivered side effect that an operator owns.
+	DeadLetteredAt time.Time
 }
+
+// DispatchOutcome is what ONE delivery attempt durably records about a claimed
+// outbox row. The caller of a claim decides it (it owns the transport and the
+// retry policy); the store applies it inside the claim transaction, while the
+// row lock is still held.
+type DispatchOutcome struct {
+	// Published marks the intent as accepted by the transport.
+	Published bool
+	// NextAttemptAt schedules the next attempt of a failed intent. It must be
+	// in the future, or the drain re-claims the row within the same pass.
+	NextAttemptAt time.Time
+	// LastError is the coded reason of the failed attempt.
+	LastError string
+	// DeadLetter gives up on the intent instead of scheduling another attempt.
+	DeadLetter bool
+}
+
+// DispatchDeliverer delivers one claimed dispatch intent to the transport and
+// reports what the store must durably record about the attempt. It is called
+// with the row lock held, so no second claimer can be delivering the same
+// intent at the same time.
+type DispatchDeliverer func(ctx context.Context, dispatch Dispatch) DispatchOutcome
 
 // DispatchKind separates an original execution dispatch from a compensation
 // dispatch (the compensation carries its own new grant and receipts).
@@ -258,11 +295,26 @@ type Store interface {
 	// (inbox membership). The service consults it to distinguish an idempotent
 	// duplicate from an out-of-order receipt BEFORE emitting a completion audit.
 	ResultApplied(ctx context.Context, tenantRef, resultID string) (bool, error)
-	// PendingDispatches returns unpublished outbox rows for the recovery pump.
+	// ClaimDispatch locks ONE unpublished, not-yet-dead-lettered outbox row for
+	// the lifetime of a single transaction, hands it to deliver and applies the
+	// returned outcome with the lock STILL HELD. It reports claimed=false — and
+	// never calls deliver — when the row is absent, already published, dead
+	// lettered, or locked by a concurrent claimer. It is the dispatching
+	// request's publish path.
+	ClaimDispatch(ctx context.Context, tenantRef, dispatchRef string, at time.Time, deliver DispatchDeliverer) (bool, error)
+	// ClaimPendingDispatches claims every ELIGIBLE pending row the same way,
+	// oldest first, and returns how many rows deliver was called for. Eligible
+	// means unpublished, not dead lettered, and past its scheduled next attempt.
+	// A row whose delivery fails records its outcome and the drain moves on to
+	// the next row, so one undeliverable intent cannot block the ones behind it.
+	// limit <= 0 selects the store's default batch bound.
+	ClaimPendingDispatches(ctx context.Context, tenantRef string, limit int, at time.Time, deliver DispatchDeliverer) (int, error)
+	// PendingDispatches returns undelivered outbox rows. It takes NO lock and is
+	// read-only observability — a delivery must go through a claim.
 	PendingDispatches(ctx context.Context, tenantRef string, limit int) ([]Dispatch, error)
-	// MarkDispatchPublished stamps an outbox row published after the pump
-	// delivered it to the connector transport.
-	MarkDispatchPublished(ctx context.Context, tenantRef, dispatchRef string, at time.Time) error
+	// DeadLetteredDispatches returns the intents the drain gave up on, so an
+	// undelivered side effect is visible instead of merely absent.
+	DeadLetteredDispatches(ctx context.Context, tenantRef string, limit int) ([]Dispatch, error)
 }
 
 // EvidenceConsumer is the one-shot approval-evidence gate (Task 0E store seam).
@@ -351,6 +403,7 @@ type MemoryStore struct {
 	byIdem     map[string]string                // tenant/idempotency_key -> action_ref
 	grants     map[string]Grant                 // tenant/action_ref
 	dispatches map[string]Dispatch              // tenant/dispatch_ref
+	claimed    map[string]bool                  // tenant/dispatch_ref currently in-flight
 	inbox      map[string]bool                  // tenant/result_id
 	receipts   map[string]runtime.ActionReceipt // tenant/receipt_ref
 }
@@ -362,6 +415,7 @@ func NewMemoryStore() *MemoryStore {
 		byIdem:     map[string]string{},
 		grants:     map[string]Grant{},
 		dispatches: map[string]Dispatch{},
+		claimed:    map[string]bool{},
 		inbox:      map[string]bool{},
 		receipts:   map[string]runtime.ActionReceipt{},
 	}
@@ -534,33 +588,158 @@ func (s *MemoryStore) GetReceipt(_ context.Context, tenantRef, receiptRef string
 }
 
 func (s *MemoryStore) PendingDispatches(_ context.Context, tenantRef string, limit int) ([]Dispatch, error) {
+	return s.snapshot(tenantRef, limit, func(d Dispatch) bool {
+		return !d.Published && d.DeadLetteredAt.IsZero()
+	}, func(a, b Dispatch) bool { return a.CreatedAt.Before(b.CreatedAt) }), nil
+}
+
+func (s *MemoryStore) DeadLetteredDispatches(_ context.Context, tenantRef string, limit int) ([]Dispatch, error) {
+	return s.snapshot(tenantRef, limit, func(d Dispatch) bool {
+		return !d.DeadLetteredAt.IsZero()
+	}, func(a, b Dispatch) bool { return a.DeadLetteredAt.Before(b.DeadLetteredAt) }), nil
+}
+
+func (s *MemoryStore) snapshot(tenantRef string, limit int, keep func(Dispatch) bool, less func(a, b Dispatch) bool) []Dispatch {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []Dispatch
 	for _, dispatch := range s.dispatches {
-		if dispatch.TenantRef == tenantRef && !dispatch.Published {
+		if dispatch.TenantRef == tenantRef && keep(dispatch) {
 			out = append(out, dispatch)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool { return less(out[i], out[j]) })
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
-	return out, nil
+	return out
 }
 
-func (s *MemoryStore) MarkDispatchPublished(_ context.Context, tenantRef, dispatchRef string, at time.Time) error {
+// ClaimDispatch models the durable store's `FOR UPDATE SKIP LOCKED` claim: the
+// row is marked in-flight under the mutex, the mutex is RELEASED for the
+// delivery itself (so a concurrent claimer runs rather than queues), and the
+// outcome is applied before the claim is released. A concurrent claimer of an
+// in-flight row therefore SKIPS it exactly as the durable store does — it must,
+// or a concurrency test against this store would prove nothing about the pump
+// that actually runs on PostgreSQL.
+func (s *MemoryStore) ClaimDispatch(ctx context.Context, tenantRef, dispatchRef string, at time.Time, deliver DispatchDeliverer) (bool, error) {
+	if deliver == nil {
+		return false, errors.Join(ErrInvalidInput, errors.New("a dispatch claim requires a deliverer"))
+	}
+	dispatch, ok := s.acquireDispatch(tenantRef, dispatchRef, at, false)
+	if !ok {
+		return false, nil
+	}
+	defer s.releaseDispatch(tenantRef, dispatchRef)
+	s.applyDispatchOutcome(tenantRef, dispatchRef, deliver(ctx, dispatch), at)
+	return true, nil
+}
+
+func (s *MemoryStore) ClaimPendingDispatches(ctx context.Context, tenantRef string, limit int, at time.Time, deliver DispatchDeliverer) (int, error) {
+	if deliver == nil {
+		return 0, errors.Join(ErrInvalidInput, errors.New("a dispatch claim requires a deliverer"))
+	}
+	bound := limit
+	if bound <= 0 {
+		bound = defaultDispatchClaimBatch
+	}
+	// visited bounds the pass to one attempt per row even if a deliverer
+	// schedules a next attempt that is not actually in the future.
+	visited := map[string]bool{}
+	claimed := 0
+	for claimed < bound {
+		dispatch, ok := s.acquireNextDispatch(tenantRef, at, visited)
+		if !ok {
+			break
+		}
+		visited[dispatch.DispatchRef] = true
+		s.applyDispatchOutcome(tenantRef, dispatch.DispatchRef, deliver(ctx, dispatch), at)
+		s.releaseDispatch(tenantRef, dispatch.DispatchRef)
+		claimed++
+	}
+	return claimed, nil
+}
+
+// acquireDispatch marks one eligible row in-flight and returns it.
+func (s *MemoryStore) acquireDispatch(tenantRef, dispatchRef string, at time.Time, eligibleOnly bool) (Dispatch, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := storeKey(tenantRef, dispatchRef)
+	dispatch, ok := s.dispatches[key]
+	if !ok || !claimable(dispatch, at, eligibleOnly) || s.claimed[key] {
+		return Dispatch{}, false
+	}
+	s.claimed[key] = true
+	return dispatch, true
+}
+
+// acquireNextDispatch marks the OLDEST eligible, unclaimed, not-yet-visited row
+// in-flight and returns it.
+func (s *MemoryStore) acquireNextDispatch(tenantRef string, at time.Time, visited map[string]bool) (Dispatch, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var next Dispatch
+	found := false
+	for key, dispatch := range s.dispatches {
+		switch {
+		case dispatch.TenantRef != tenantRef, visited[dispatch.DispatchRef], s.claimed[key]:
+			continue
+		case !claimable(dispatch, at, true):
+			continue
+		case found && !dispatch.CreatedAt.Before(next.CreatedAt):
+			continue
+		}
+		next, found = dispatch, true
+	}
+	if !found {
+		return Dispatch{}, false
+	}
+	s.claimed[storeKey(tenantRef, next.DispatchRef)] = true
+	return next, true
+}
+
+func (s *MemoryStore) releaseDispatch(tenantRef, dispatchRef string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.claimed, storeKey(tenantRef, dispatchRef))
+}
+
+// applyDispatchOutcome records one delivery attempt. attempts rises on EVERY
+// attempt, succeeded or failed — the durable store's two update shapes.
+func (s *MemoryStore) applyDispatchOutcome(tenantRef, dispatchRef string, outcome DispatchOutcome, at time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := storeKey(tenantRef, dispatchRef)
 	dispatch, ok := s.dispatches[key]
 	if !ok {
-		return ErrNotFound
+		return
 	}
-	dispatch.Published = true
-	dispatch.PublishedAt = at
+	dispatch.Attempts++
+	if outcome.Published {
+		dispatch.Published = true
+		dispatch.PublishedAt = at
+		s.dispatches[key] = dispatch
+		return
+	}
+	dispatch.LastError = outcome.LastError
+	dispatch.NextAttemptAt = outcome.NextAttemptAt
+	if outcome.DeadLetter {
+		dispatch.DeadLetteredAt = at
+		dispatch.NextAttemptAt = time.Time{}
+	}
 	s.dispatches[key] = dispatch
-	return nil
+}
+
+// claimable mirrors the durable claim predicate: unpublished, not dead
+// lettered, and (for the drain) past its scheduled next attempt.
+func claimable(dispatch Dispatch, at time.Time, eligibleOnly bool) bool {
+	if dispatch.Published || !dispatch.DeadLetteredAt.IsZero() {
+		return false
+	}
+	if eligibleOnly && !dispatch.NextAttemptAt.IsZero() && dispatch.NextAttemptAt.After(at) {
+		return false
+	}
+	return true
 }
 
 // Grants returns a snapshot of stored grants (test observability).

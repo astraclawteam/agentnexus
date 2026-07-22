@@ -18,6 +18,11 @@ services:
     enabled: true
     replicas: 1
     command: /app/gateway-agent
+    # name=url pairs the assistant probes to answer health questions. Every
+    # answer it gives about readiness comes from this list, so a service left
+    # out of it is a service the assistant will never mention.
+    healthProbeTargets: >-
+      gateway-api=http://agentnexus-gateway-api:8080/readyz,connector-worker=http://agentnexus-connector-worker:8080/readyz
   connectorWorker:
     enabled: true
     replicas: 1
@@ -47,3 +52,14 @@ dependencies:
   secretProvider:
     external: false
     mode: local-dev
+  # The llmrouter gateway is the single outbound model path for the gateway
+  # agent. There is deliberately no default baseURL or model: an unset value
+  # leaves the assistant unready and saying so, which is the honest state.
+  llmRouter:
+    baseURL: ""
+    model: ""
+    # The API key is NEVER a chart value. Provision the Secret out of band and
+    # name it here; the Deployment references it with secretKeyRef.
+    apiKeySecret:
+      name: agentnexus-llmrouter
+      key: api-key

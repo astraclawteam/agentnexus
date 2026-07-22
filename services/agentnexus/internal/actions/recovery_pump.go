@@ -16,13 +16,28 @@ type PendingRepublisher interface {
 //
 // The outbox row is committed in the SAME transaction as the granted->
 // dispatched transition, before anything is published. That ordering is what
-// makes a crash safe, but it also means a process that dies between commit and
-// publish leaves a durable intent that nothing will ever deliver on its own.
-// This loop is the only thing that closes that window.
+// makes a crash safe. Dispatch then publishes the committed intent itself, so
+// this loop is NOT the delivery path — it exists for what that publish could
+// not finish: a process that died between the commit and the publish, a
+// transport outage, a delivery a dead replica had claimed. This loop is the
+// only thing that closes that window.
 //
-// It cannot double-dispatch: the one-use grant was consumed in the transaction
-// that wrote the row, so republishing an already-consumed action is impossible
-// by construction rather than by this loop being careful.
+// It can publish the same intent TWICE, and that is by design, not an
+// oversight. The publish and the published-stamp are separate, non-atomic
+// operations: a crash after the transport accepted the intent but before the
+// stamp committed leaves the row pending, and the next drain republishes the
+// identical message. What that duplicate cannot do is produce a second SIDE
+// EFFECT — the message carries the dispatch ref as its dedup id, and the
+// connector absorbs the redelivery at its dispatched->executing barrier and its
+// dispatch_ref inbox (see worker.executeAndComplete).
+//
+// The one-use grant does NOT make this safe on its own: it is consumed once at
+// dispatch and says nothing about how many times the resulting intent was put
+// on the wire.
+//
+// Concurrent pumps are safe: each row is claimed FOR UPDATE SKIP LOCKED for the
+// duration of its publish, so N replicas divide the outbox instead of each
+// publishing all of it.
 type RecoveryPump struct {
 	republisher PendingRepublisher
 	tenantRef   string

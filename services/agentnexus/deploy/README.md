@@ -5,24 +5,41 @@ This directory contains open-core development profiles only. Production private-
 ## Profiles
 
 - `compose/compose.saas-dev.yaml` runs the open-core services with local PostgreSQL, NATS, and object storage using SaaS-style defaults.
-- `compose/compose.private-dev.yaml` runs the same open-core services with private-dev defaults and external dependency environment toggles.
+- `compose/compose.private-dev.yaml` runs the same open-core services with private-dev defaults.
+- `compose/browser-auth-dev.yaml` is included by both profiles. It provisions the browser-authentication credentials, runs a development enterprise IdP, and applies the database schema, which is what allows gateway-api to serve its real surface rather than the minimal router.
 - `helm/agentnexus` is a local/dev Helm chart skeleton for validating open-core workload shape.
 
+Both compose profiles set `AGENTNEXUS_BROWSER_AUTH_ENABLED=true`. Without it `cmd/gateway-api` registers only `/healthz`, `/readyz` and `/api/console/overview`; the runtime, evidence, approval, action, audit, and org-event surfaces are absent while the container still reports itself healthy. The Helm chart does **not** enable it: a cluster deployment is expected to supply its own IdP, secret mounts, and migration step, and enabling the flag without them fails closed at startup.
+
+### What the dev profiles stand up for browser auth
+
+| Service | Role |
+| --- | --- |
+| `dev-auth-material` | One-shot. Generates the ID-token signing key, the console and upstream client secrets, and a throwaway CA plus IdP server certificate into a docker volume. Idempotent, and never writes into the repository or onto a host bind mount, which would strip the `0600` mode the loaders require. |
+| `idp` | A development stand-in for the customer enterprise IdP. gateway-api resolves this issuer's OIDC discovery document while it builds the router and rejects a non-HTTPS enterprise issuer, so the dev stack cannot omit it. |
+| `migrate` | One-shot. Applies each migration's `+goose Up` block, one transaction per migration, and records what it applied. The gateway writes its audit signing key into the registry during startup, so an unmigrated database is a startup failure rather than a first-request failure. |
+
+None of this is production wiring, and none of the generated credentials are shared between profiles. To rotate them, stop the stack, remove the credential volume, and start it again; the provisioner mints a fresh set:
+
+```powershell
+docker compose -f compose.private-dev.yaml down
+docker volume rm agentnexus-private-dev_agentnexus-dev-auth
+```
+
+Full browser login additionally needs the issuer host to be reachable from the browser under the name in the issuer URL; add an `idp` hosts entry pointing at `127.0.0.1` and use the published IdP port. Everything else, including the approval, action, and audit surfaces, works without it.
+
 ## Shared Environment Variables
+
+Every variable the compose profiles export is read by the code. `AGENTNEXUS_PROFILE`, `AGENTNEXUS_PRIVATE_BOUNDARY`, `AGENTNEXUS_POSTGRES_EXTERNAL`, `AGENTNEXUS_NATS_EXTERNAL`, `AGENTNEXUS_OBJECT_STORAGE_EXTERNAL`, `AGENTNEXUS_OBJECT_STORAGE_ENDPOINT`, `AGENTNEXUS_SECRET_PROVIDER`, and `AGENTNEXUS_SECRET_PROVIDER_EXTERNAL` were removed: no Go code read any of them, so setting them — including pointing an `*_EXTERNAL` toggle at a real external service — changed nothing while reading as configuration. Point a profile at external infrastructure by overriding the DSN and URL below.
 
 | Variable | Purpose |
 | --- | --- |
 | `AGENTNEXUS_ENV` | Runtime environment label, such as `saas-dev` or `private-dev`. |
-| `AGENTNEXUS_PROFILE` | Deployment profile name. |
 | `AGENTNEXUS_VERSION` | Open-core runtime version string. |
-| `AGENTNEXUS_POSTGRES_EXTERNAL` | Set to `true` when using an external PostgreSQL service. |
 | `AGENTNEXUS_POSTGRES_DSN` | PostgreSQL connection string. |
-| `AGENTNEXUS_NATS_EXTERNAL` | Set to `true` when using an external NATS service. |
-| `AGENTNEXUS_NATS_URL` | NATS URL. |
-| `AGENTNEXUS_OBJECT_STORAGE_EXTERNAL` | Set to `true` when using external object storage. |
-| `AGENTNEXUS_OBJECT_STORAGE_ENDPOINT` | S3-compatible object storage endpoint. |
-| `AGENTNEXUS_SECRET_PROVIDER_EXTERNAL` | Set to `true` when secrets are resolved by an external provider. |
-| `AGENTNEXUS_SECRET_PROVIDER` | Secret provider mode, defaulting to `local-dev`. |
+| `AGENTNEXUS_NATS_URL` | NATS URL. Also selects the Action dispatch transport. |
+| `AGENTNEXUS_APPROVAL_CHANNEL` | `pending-only` registers the approval transmission surface with a channel that correlates plans durably and reports them undelivered; `none` (the default) leaves the endpoints unregistered. |
+| `AGENTNEXUS_BROWSER_AUTH_ENABLED` | `true` in both compose profiles. See the browser authentication contract below for everything it requires. |
 
 ## Browser OIDC Ingress Controls
 
@@ -45,10 +62,9 @@ HTTP `429` responses at `/oauth2/authorize` are a deployment observation signal:
 
 ## Compose
 
-Validate the private-dev compose profile:
+Validate the private-dev compose profile from `services/agentnexus/deploy/compose`:
 
 ```powershell
-cd E:\xiaozhiclaw\agentnexus\services\agentnexus\deploy\compose
 docker compose -f compose.private-dev.yaml config
 ```
 
@@ -96,7 +112,7 @@ Do not add production private-deployment automation here. Put production ingress
 
 ## Browser authentication production contract
 
-Browser authentication is disabled unless `AGENTNEXUS_BROWSER_AUTH_ENABLED=true`. When enabled, every item below is required and any missing, malformed, weak, non-canonical, unreadable, or over-permissive secret stops startup. Production release preflight accepts only a `postgres://` URL with a host, database, and exactly one explicit `sslmode=require`, `sslmode=verify-ca`, or `sslmode=verify-full`. Missing, weak, duplicate, conflicting, case-variant, percent-encoded bypass, malformed, keyword-format, and non-PostgreSQL DSNs fail before any deployment hook. `sslmode=disable` is test-only.
+Browser authentication is disabled unless `AGENTNEXUS_BROWSER_AUTH_ENABLED=true`. When enabled, every item below is required and any missing, malformed, weak, non-canonical, unreadable, or over-permissive secret stops startup. Building the router also resolves the enterprise issuer's OIDC discovery document, so an unreachable IdP is a startup failure too. The dev profiles satisfy all of it through `compose/browser-auth-dev.yaml`; those generated credentials and that IdP are development scaffolding and must never be carried into a deployment. Production release preflight accepts only a `postgres://` URL with a host, database, and exactly one explicit `sslmode=require`, `sslmode=verify-ca`, or `sslmode=verify-full`. Missing, weak, duplicate, conflicting, case-variant, percent-encoded bypass, malformed, keyword-format, and non-PostgreSQL DSNs fail before any deployment hook. `sslmode=disable` is test-only.
 
 | Variable | Contract |
 | --- | --- |

@@ -11,6 +11,82 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimActionOutbox = `-- name: ClaimActionOutbox :one
+SELECT tenant_ref, dispatch_ref, action_ref, capability, parameter_hash,
+       grant_ref, kind, published, attempts, created_at, published_at,
+       next_attempt_at, last_error, dead_lettered_at
+FROM action_outbox
+WHERE tenant_ref = $1 AND dispatch_ref = $2
+  AND published = false AND dead_lettered_at IS NULL
+FOR UPDATE SKIP LOCKED
+`
+
+type ClaimActionOutboxParams struct {
+	TenantRef   string
+	DispatchRef string
+}
+
+func (q *Queries) ClaimActionOutbox(ctx context.Context, arg ClaimActionOutboxParams) (ActionOutbox, error) {
+	row := q.db.QueryRow(ctx, claimActionOutbox, arg.TenantRef, arg.DispatchRef)
+	var i ActionOutbox
+	err := row.Scan(
+		&i.TenantRef,
+		&i.DispatchRef,
+		&i.ActionRef,
+		&i.Capability,
+		&i.ParameterHash,
+		&i.GrantRef,
+		&i.Kind,
+		&i.Published,
+		&i.Attempts,
+		&i.CreatedAt,
+		&i.PublishedAt,
+		&i.NextAttemptAt,
+		&i.LastError,
+		&i.DeadLetteredAt,
+	)
+	return i, err
+}
+
+const claimNextActionOutbox = `-- name: ClaimNextActionOutbox :one
+SELECT tenant_ref, dispatch_ref, action_ref, capability, parameter_hash,
+       grant_ref, kind, published, attempts, created_at, published_at,
+       next_attempt_at, last_error, dead_lettered_at
+FROM action_outbox
+WHERE tenant_ref = $1 AND published = false AND dead_lettered_at IS NULL
+  AND (next_attempt_at IS NULL OR next_attempt_at <= $2)
+ORDER BY created_at
+LIMIT 1
+FOR UPDATE SKIP LOCKED
+`
+
+type ClaimNextActionOutboxParams struct {
+	TenantRef     string
+	NextAttemptAt pgtype.Timestamptz
+}
+
+func (q *Queries) ClaimNextActionOutbox(ctx context.Context, arg ClaimNextActionOutboxParams) (ActionOutbox, error) {
+	row := q.db.QueryRow(ctx, claimNextActionOutbox, arg.TenantRef, arg.NextAttemptAt)
+	var i ActionOutbox
+	err := row.Scan(
+		&i.TenantRef,
+		&i.DispatchRef,
+		&i.ActionRef,
+		&i.Capability,
+		&i.ParameterHash,
+		&i.GrantRef,
+		&i.Kind,
+		&i.Published,
+		&i.Attempts,
+		&i.CreatedAt,
+		&i.PublishedAt,
+		&i.NextAttemptAt,
+		&i.LastError,
+		&i.DeadLetteredAt,
+	)
+	return i, err
+}
+
 const insertActionOutbox = `-- name: InsertActionOutbox :execrows
 
 INSERT INTO action_outbox (
@@ -33,7 +109,16 @@ type InsertActionOutboxParams struct {
 
 // Transactional outbox queries (GA Task 0F). The outbox row is the durable
 // dispatch intent written atomically with the granted->dispatched transition;
-// the recovery pump publishes pending rows exactly once.
+// the dispatching request publishes it immediately after that commit and the
+// recovery pump republishes whatever a crash or a transport outage left behind.
+//
+// Every DELIVERY path goes through a claim (ClaimActionOutbox /
+// ClaimNextActionOutbox): the row is locked FOR UPDATE SKIP LOCKED and the
+// publish + the outcome write happen inside that one transaction. N gateway
+// replicas therefore never publish the same intent concurrently — a replica
+// that does not win the row lock skips it instead of queueing behind it.
+// ListPendingActionOutbox / ListDeadLetteredActionOutbox take no lock: they are
+// read-only observability and must never be used to drive a publish.
 func (q *Queries) InsertActionOutbox(ctx context.Context, arg InsertActionOutboxParams) (int64, error) {
 	result, err := q.db.Exec(ctx, insertActionOutbox,
 		arg.TenantRef,
@@ -51,11 +136,62 @@ func (q *Queries) InsertActionOutbox(ctx context.Context, arg InsertActionOutbox
 	return result.RowsAffected(), nil
 }
 
+const listDeadLetteredActionOutbox = `-- name: ListDeadLetteredActionOutbox :many
+SELECT tenant_ref, dispatch_ref, action_ref, capability, parameter_hash,
+       grant_ref, kind, published, attempts, created_at, published_at,
+       next_attempt_at, last_error, dead_lettered_at
+FROM action_outbox
+WHERE tenant_ref = $1 AND dead_lettered_at IS NOT NULL
+ORDER BY dead_lettered_at
+LIMIT $2
+`
+
+type ListDeadLetteredActionOutboxParams struct {
+	TenantRef string
+	Limit     int32
+}
+
+func (q *Queries) ListDeadLetteredActionOutbox(ctx context.Context, arg ListDeadLetteredActionOutboxParams) ([]ActionOutbox, error) {
+	rows, err := q.db.Query(ctx, listDeadLetteredActionOutbox, arg.TenantRef, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionOutbox
+	for rows.Next() {
+		var i ActionOutbox
+		if err := rows.Scan(
+			&i.TenantRef,
+			&i.DispatchRef,
+			&i.ActionRef,
+			&i.Capability,
+			&i.ParameterHash,
+			&i.GrantRef,
+			&i.Kind,
+			&i.Published,
+			&i.Attempts,
+			&i.CreatedAt,
+			&i.PublishedAt,
+			&i.NextAttemptAt,
+			&i.LastError,
+			&i.DeadLetteredAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingActionOutbox = `-- name: ListPendingActionOutbox :many
 SELECT tenant_ref, dispatch_ref, action_ref, capability, parameter_hash,
-       grant_ref, kind, published, attempts, created_at, published_at
+       grant_ref, kind, published, attempts, created_at, published_at,
+       next_attempt_at, last_error, dead_lettered_at
 FROM action_outbox
-WHERE tenant_ref = $1 AND published = false
+WHERE tenant_ref = $1 AND published = false AND dead_lettered_at IS NULL
 ORDER BY created_at
 LIMIT $2
 `
@@ -86,6 +222,9 @@ func (q *Queries) ListPendingActionOutbox(ctx context.Context, arg ListPendingAc
 			&i.Attempts,
 			&i.CreatedAt,
 			&i.PublishedAt,
+			&i.NextAttemptAt,
+			&i.LastError,
+			&i.DeadLetteredAt,
 		); err != nil {
 			return nil, err
 		}
@@ -100,7 +239,8 @@ func (q *Queries) ListPendingActionOutbox(ctx context.Context, arg ListPendingAc
 const markActionOutboxPublished = `-- name: MarkActionOutboxPublished :execrows
 UPDATE action_outbox
 SET published = true, attempts = attempts + 1, published_at = $3
-WHERE tenant_ref = $1 AND dispatch_ref = $2 AND published = false
+WHERE tenant_ref = $1 AND dispatch_ref = $2
+  AND published = false AND dead_lettered_at IS NULL
 `
 
 type MarkActionOutboxPublishedParams struct {
@@ -111,6 +251,38 @@ type MarkActionOutboxPublishedParams struct {
 
 func (q *Queries) MarkActionOutboxPublished(ctx context.Context, arg MarkActionOutboxPublishedParams) (int64, error) {
 	result, err := q.db.Exec(ctx, markActionOutboxPublished, arg.TenantRef, arg.DispatchRef, arg.PublishedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const recordActionOutboxAttempt = `-- name: RecordActionOutboxAttempt :execrows
+UPDATE action_outbox
+SET attempts = attempts + 1,
+    next_attempt_at = $3,
+    last_error = $4,
+    dead_lettered_at = $5
+WHERE tenant_ref = $1 AND dispatch_ref = $2
+  AND published = false AND dead_lettered_at IS NULL
+`
+
+type RecordActionOutboxAttemptParams struct {
+	TenantRef      string
+	DispatchRef    string
+	NextAttemptAt  pgtype.Timestamptz
+	LastError      string
+	DeadLetteredAt pgtype.Timestamptz
+}
+
+func (q *Queries) RecordActionOutboxAttempt(ctx context.Context, arg RecordActionOutboxAttemptParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordActionOutboxAttempt,
+		arg.TenantRef,
+		arg.DispatchRef,
+		arg.NextAttemptAt,
+		arg.LastError,
+		arg.DeadLetteredAt,
+	)
 	if err != nil {
 		return 0, err
 	}

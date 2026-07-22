@@ -318,7 +318,11 @@ func TestActionPostgresCrashAfterDispatchReplaysOutbox(t *testing.T) {
 	pool := integrationPool(t)
 	ctx := context.Background()
 	recorder := &recordingPublisher{}
-	svc := newPostgresService(t, pool, WithPublisher(recorder))
+	// The dispatching service never reaches a publisher: that is the crash
+	// window between the outbox commit and the publish, and the only thing the
+	// pump exists for. An ordinary dispatch publishes itself — see
+	// TestActionPostgresDispatchPublishesAfterCommit.
+	svc := newPostgresService(t, pool)
 	principal := testPrincipal(runtime.TrustFirstParty)
 	action, err := svc.RequestAction(ctx, principal, testRequest(t))
 	if err != nil {
@@ -330,8 +334,8 @@ func TestActionPostgresCrashAfterDispatchReplaysOutbox(t *testing.T) {
 	if _, err := svc.Dispatch(ctx, principal, action.ActionRef); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	// Simulate a crash BEFORE publish: a fresh service over the SAME durable pool
-	// finds the pending outbox row and republishes it exactly once.
+	// A fresh service over the SAME durable pool finds the pending outbox row
+	// and republishes it exactly once.
 	recovered := newPostgresService(t, pool, WithPublisher(recorder))
 	n, err := recovered.RepublishPending(ctx, principal.TenantRef)
 	if err != nil || n != 1 {

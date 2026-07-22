@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -76,17 +77,22 @@ func main() {
 	// The worker's own first-party identity. The tenant of each dispatch comes
 	// from the server-authored message, never from here and never from Agent
 	// input.
-	executionWorker, err := worker.New(worker.Config{
+	workerConfig := worker.Config{
 		Identity: worker.Identity{PrincipalRef: cfg.ServiceName},
-	})
-	notReadyReason := ""
-	if err != nil {
-		// A worker that cannot even be constructed still must not take the
-		// process down: the health surface has to stay observable so an
-		// operator sees WHY it is not serving.
-		notReadyReason = err.Error()
-		executionWorker = nil
 	}
+	// Name the gap before trying to construct through it. worker.New stops at
+	// the FIRST problem it meets (a nil action plane), so on its own it tells an
+	// operator to go wire one thing, and the next restart tells them the next
+	// thing. MissingRequired reports the whole set at once, including the three
+	// identity refs that have no configuration surface at all -- which worker.New
+	// can only describe as a sentence and CheckReady never reaches.
+	//
+	// Nothing here can satisfy that set today; both halves are task B3. The
+	// guard's job for this binary is therefore to make the failure EXPLICIT, not
+	// to pretend it can be met: no pass-stub, no fake ActionPlane, no invented
+	// agent_client_ref. The process still stays up, because a container that
+	// flaps hides the reason, and /readyz still answers 503 with it.
+	executionWorker, notReadyReason := composeWorker(workerConfig)
 
 	// Readiness in the startup line must be the SAME predicate /readyz answers.
 	// It used to be a literal true, so the one line an operator reads at boot
@@ -124,6 +130,45 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = healthServer.Shutdown(shutdownCtx)
+}
+
+// composeWorker builds the worker, or explains precisely why it could not.
+//
+// It is a function rather than inline in main so the refusal contract can be
+// exercised directly. That matters here: the reason it returns is what /readyz
+// serves and what an operator reads at boot, and the only alternative way to
+// cover it would be to grep main.go for a string, which proves nothing about
+// what the process actually answers.
+//
+// A nil worker is never an exit. The process stays up so the health surface
+// stays observable; a container that flaps on boot tells an operator nothing.
+func composeWorker(cfg worker.Config) (*worker.Worker, string) {
+	unwired := cfg.MissingRequired()
+	executionWorker, err := worker.New(cfg)
+	reason := ""
+	if err != nil {
+		reason = err.Error()
+		executionWorker = nil
+	}
+	if len(unwired) == 0 {
+		return executionWorker, reason
+	}
+	// Lead with the full set. worker.New stops at the FIRST problem it meets, so
+	// on its own it sends an operator to wire one thing and the next restart
+	// sends them after the next.
+	if reason != "" {
+		reason = "; " + reason
+	}
+	// Drop a worker the guard says is incomplete, even when worker.New accepted
+	// it. New only refuses a nil action plane and a blank identity, so a
+	// partially wired config (an action plane, a full identity, no binding
+	// resolver) constructs fine and then fails CheckReady forever - while the
+	// startup line, which reads only "is the worker non-nil", would print
+	// ready=true against a /readyz answering 503. That contradiction is the exact
+	// one this binary was fixed for. Every dependency the guard names is fixed at
+	// construction, so no runtime event could have made this worker ready later;
+	// nilling it costs nothing and keeps both surfaces answering from one fact.
+	return nil, "connector worker dependencies constructed by nobody (task B3): " + strings.Join(unwired, ", ") + reason
 }
 
 func runDispatchLoop(ctx context.Context, executionWorker *worker.Worker, dispatchConfig config.DispatchConfig) error {

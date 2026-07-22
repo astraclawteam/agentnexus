@@ -350,8 +350,9 @@ func (s *Service) Grant(ctx context.Context, principal runtime.PrincipalContext,
 }
 
 // Dispatch advances granted -> dispatched: it consumes the one-use grant and
-// writes the durable outbox row in one transaction BEFORE any publish. A blind
-// re-dispatch of an already-dispatched or result-unknown action is forbidden.
+// writes the durable outbox row in one transaction BEFORE any publish, then
+// publishes the committed intent. A blind re-dispatch of an already-dispatched
+// or result-unknown action is forbidden.
 func (s *Service) Dispatch(ctx context.Context, principal runtime.PrincipalContext, actionRef string) (Action, error) {
 	if err := s.guard(ctx); err != nil {
 		return Action{}, err
@@ -389,6 +390,11 @@ func (s *Service) Dispatch(ctx context.Context, principal runtime.PrincipalConte
 	if err != nil {
 		return Action{}, mapTransitionErr(err)
 	}
+	// Committed, then published — in that order and in the same call. Committing
+	// the intent is what makes a crash safe; publishing it is what makes the
+	// action happen. A publish failure here leaves the row pending for the
+	// recovery pump and never fails the dispatch (see publishDispatched).
+	s.publishDispatched(ctx, principal.TenantRef, dispatchRef)
 	return dispatched, nil
 }
 

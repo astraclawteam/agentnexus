@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/worker"
 )
 
 // The connector worker's execution seams (the private Postgres BindingResolver
@@ -74,5 +75,53 @@ func TestStartupReadinessAgreesWithReadyz(t *testing.T) {
 	status, ready, _ := readyState(t, mux, "/readyz")
 	if status == http.StatusOK || ready {
 		t.Fatalf("readiness disagrees with the worker's actual state: status=%d ready=%v", status, ready)
+	}
+}
+
+// The wiring guard's contract for this binary: name every unconstructed
+// dependency, and never hand back a worker it called incomplete. Exercised
+// through composeWorker rather than by reading main.go, because the value that
+// matters is the one /readyz actually serves.
+
+func TestComposeWorkerNamesEveryUnconstructedDependency(t *testing.T) {
+	// Exactly what main() supplies today: this service's own name, and nothing
+	// else, because the remaining seams and identity refs have no configuration
+	// surface at all (task B3).
+	executionWorker, reason := composeWorker(worker.Config{
+		Identity: worker.Identity{PrincipalRef: "connector-worker"},
+	})
+	if executionWorker != nil {
+		t.Fatal("composeWorker returned a worker whose dependencies were constructed by nobody")
+	}
+	// Every name, not just the first. A reason that stops at the action plane
+	// sends an operator to wire one thing and the next restart sends them after
+	// the next one.
+	for _, want := range []string{
+		"Actions", "Resolver", "Signer", "Observations",
+		"Identity.AgentClientRef", "Identity.AgentReleaseRef", "Identity.OrgSnapshotRef",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the not-ready reason does not name %s: %q", want, reason)
+		}
+	}
+	// The ref that IS supplied must not be listed as missing; a guard that cries
+	// wolf about a wired dependency gets read past.
+	if strings.Contains(reason, "Identity.PrincipalRef") {
+		t.Errorf("the reason names Identity.PrincipalRef, which main() does supply: %q", reason)
+	}
+}
+
+// The reason is served from /readyz, so the two must agree. This is the same
+// invariant the startup-line fix pinned, now covering the guard's own output.
+func TestReadyzServesTheGuardsReason(t *testing.T) {
+	executionWorker, reason := composeWorker(worker.Config{
+		Identity: worker.Identity{PrincipalRef: "connector-worker"},
+	})
+	status, ready, served := readyState(t, newHealthMux(testConfig(), executionWorker, reason), "/readyz")
+	if status != http.StatusServiceUnavailable || ready {
+		t.Fatalf("/readyz status=%d ready=%v while the worker cannot consume", status, ready)
+	}
+	if served != reason {
+		t.Errorf("/readyz reason = %q, want the guard's own reason %q", served, reason)
 	}
 }

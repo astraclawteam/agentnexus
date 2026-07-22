@@ -1,0 +1,157 @@
+# Everything the dev gateway needs before it can serve its actual product
+# surface. Both shipped profiles include this file; neither is expected to
+# stand up this material on its own.
+#
+# Why it exists: cmd/gateway-api/main.go serves ONLY /healthz, /readyz and
+# /api/console/overview unless AGENTNEXUS_BROWSER_AUTH_ENABLED is true. The
+# runtime, evidence, approval, action, audit and org-event surfaces are simply
+# never registered, so every cross-product call 404s against a container that
+# reports itself healthy. Enabling the flag alone turns that into a crash loop,
+# because three separate things must be true first:
+#
+#   1. config.LoadBrowserAuth resolves every credential -- signing key, console
+#      client secrets, upstream IdP secret -- and fails closed otherwise.
+#      dev-auth-material generates them.
+#   2. Building the router performs OIDC discovery against the enterprise
+#      issuer, which must be HTTPS. idp is that issuer.
+#   3. The schema exists: the router writes its audit signing key into the
+#      registry while starting. migrate applies the migrations.
+#
+# None of this is production wiring. A real deployment already owns an IdP and
+# a secret manager, and runs migrations through its release process.
+services:
+  gateway-api:
+    environment:
+      AGENTNEXUS_BROWSER_AUTH_ENABLED: "true"
+      AGENTNEXUS_OIDC_ENTERPRISE_ID: "${AGENTNEXUS_OIDC_ENTERPRISE_ID:-agentnexus-dev}"
+      AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL: https://idp:5556/dex
+      AGENTNEXUS_OIDC_CLIENT_ID: agentnexus-gateway
+      AGENTNEXUS_OIDC_UPSTREAM_CLIENT_SECRET_FILE: /run/agentnexus/auth/upstream-client-secret
+      # The public issuer determines every discovery endpoint, and the callback
+      # must be exactly <public issuer>/oauth2/idp/callback, so both follow the
+      # published port.
+      AGENTNEXUS_OIDC_PUBLIC_ISSUER_URL: "http://localhost:${AGENTNEXUS_GATEWAY_API_PORT:-8080}"
+      AGENTNEXUS_OIDC_CALLBACK_URL: "http://localhost:${AGENTNEXUS_GATEWAY_API_PORT:-8080}/oauth2/idp/callback"
+      AGENTNEXUS_OIDC_CONSOLE_CLIENTS_JSON: '{"agentatlas":["${AGENTNEXUS_AGENTATLAS_REDIRECT_URI:-http://localhost:5173/auth/callback}"]}'
+      AGENTNEXUS_OIDC_CONSOLE_CLIENT_SECRET_FILES_JSON: '{"agentatlas":["/run/agentnexus/auth/console-agentatlas-secret"]}'
+      AGENTNEXUS_OIDC_SIGNING_KEY_PATH: /run/agentnexus/auth/oidc-signing-key.pem
+      AGENTNEXUS_OIDC_SIGNING_KEY_ID: "${AGENTNEXUS_OIDC_SIGNING_KEY_ID:-agentnexus-dev-1}"
+      # Go replaces only the directory list when SSL_CERT_DIR is set and still
+      # reads the system root file, so the dev IdP becomes trusted without
+      # breaking module downloads or any other public TLS.
+      SSL_CERT_DIR: /run/agentnexus/auth/trust
+    volumes:
+      - agentnexus-dev-auth:/run/agentnexus/auth:ro
+    depends_on:
+      dev-auth-material:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      idp:
+        condition: service_healthy
+    # gateway-api is the only service publishing a port and was the only one
+    # with no health probe, so a crash-looping gateway and a working one looked
+    # identical and `up --wait` reported success for both. Nothing depends_on
+    # gateway-api because nothing in the stack calls it -- it is the entry
+    # point -- but an orchestrator still has to be told the truth about it.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      # `go run` compiles the module on first start. Later starts hit the
+      # shared build cache; the first one does not.
+      start_period: 300s
+
+  # One-shot. Generates the OIDC signing key, the console and upstream client
+  # secrets, and the dev CA plus IdP server certificate into a volume, then
+  # exits. Idempotent: a second run finds its marker and does nothing. See
+  # dev-auth-material/provision.sh for why this is a volume and not a bind
+  # mount, and for the exact shape each loader demands.
+  dev-auth-material:
+    image: alpine/openssl:3.5.4
+    entrypoint: ["/bin/sh"]
+    command: ["/opt/agentnexus/provision.sh"]
+    volumes:
+      - agentnexus-dev-auth:/run/agentnexus/auth
+      - ./dev-auth-material:/opt/agentnexus:ro
+
+  # Development stand-in for the customer's enterprise IdP. It is not optional
+  # scenery: gateway-api resolves this issuer's discovery document while it
+  # builds the router and refuses a non-HTTPS enterprise issuer, so without it
+  # the gateway cannot start with browser auth enabled.
+  idp:
+    image: dexidp/dex:v2.44.0
+    # Root so it can read the 0600 material the provisioner wrote. Dev-only; a
+    # real deployment mounts secrets with matching ownership instead.
+    user: "0:0"
+    environment:
+      AGENTNEXUS_DEV_CALLBACK_URL: "http://localhost:${AGENTNEXUS_GATEWAY_API_PORT:-8080}/oauth2/idp/callback"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        AGENTNEXUS_DEV_UPSTREAM_CLIENT_SECRET="$$(cat /run/agentnexus/auth/upstream-client-secret)"
+        export AGENTNEXUS_DEV_UPSTREAM_CLIENT_SECRET
+        exec dex serve /etc/dex/config.yaml
+    volumes:
+      - agentnexus-dev-auth:/run/agentnexus/auth:ro
+      - ./dev-idp:/etc/dex:ro
+    # Published so a browser can follow a login redirect to the issuer. Reaching
+    # it under the name the issuer uses also needs an `idp` host entry locally.
+    ports:
+      - "${AGENTNEXUS_DEV_IDP_PORT:-15556}:5556"
+    depends_on:
+      dev-auth-material:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:5558/healthz || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot schema migrator. gateway-api writes its audit signing key into the
+  # registry while the router is being built, so an unmigrated database is a
+  # startup failure rather than a first-request failure. Applies each
+  # migration's `+goose Up` block in filename order and records what it applied,
+  # so a rerun against a populated volume is a no-op and a migration added later
+  # is still picked up.
+  migrate:
+    image: postgres:16-alpine
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: agentnexus
+      PGUSER: agentnexus
+      PGPASSWORD: agentnexus
+    volumes:
+      - ../../db/migrations:/migrations:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        psql -v ON_ERROR_STOP=1 -q -c 'CREATE TABLE IF NOT EXISTS dev_schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+        for file in /migrations/*.sql; do
+          name=$$(basename "$$file")
+          if [ -n "$$(psql -tAq -c "SELECT 1 FROM dev_schema_migrations WHERE name = '$$name'")" ]; then
+            echo "migrate: $$name already applied"
+            continue
+          fi
+          echo "migrate: applying $$name"
+          # One transaction per migration, exactly as goose runs them: several
+          # migrations take table locks, which PostgreSQL rejects outside a
+          # transaction block. Recording the migration inside that same
+          # transaction is what makes a failed run leave no half-applied trace.
+          { awk '/^-- \+goose Down/ { exit } { print }' "$$file"
+            echo "INSERT INTO dev_schema_migrations (name) VALUES ('$$name');"
+          } | psql -1 -v ON_ERROR_STOP=1 -q -f -
+        done
+        echo "migrate: schema up to date"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  # Generated credentials live here and nowhere else: never in the repository,
+  # never on a host bind mount that would strip their 0600 mode.
+  agentnexus-dev-auth:

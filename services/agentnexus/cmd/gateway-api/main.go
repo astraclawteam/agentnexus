@@ -39,9 +39,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	evidenceConfig, err := config.LoadEvidence()
+	if err != nil {
+		log.Fatal(err)
+	}
 	runCtx, stopRun := context.WithCancel(context.Background())
 	defer stopRun()
-	router, recoveryPump, cleanup, err := buildRouter(runCtx, cfg, browserConfig, dispatchConfig, approvalConfig)
+	router, recoveryPump, cleanup, err := buildRouter(runCtx, cfg, browserConfig, dispatchConfig, approvalConfig, evidenceConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -87,7 +91,7 @@ func main() {
 	}
 }
 
-func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.BrowserAuthConfig, dispatchConfig config.DispatchConfig, approvalConfig config.ApprovalConfig) (http.Handler, *actions.RecoveryPump, func(), error) {
+func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.BrowserAuthConfig, dispatchConfig config.DispatchConfig, approvalConfig config.ApprovalConfig, evidenceConfig config.EvidenceConfig) (http.Handler, *actions.RecoveryPump, func(), error) {
 	if !browserConfig.Enabled {
 		// This is the branch every shipped compose/helm profile currently takes,
 		// because none of them set AGENTNEXUS_BROWSER_AUTH_ENABLED. The result is
@@ -149,6 +153,24 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 	if approvalConfig.Registered() {
 		approvalChannel = approvaltransport.NewPendingDeliveryChannel()
 	}
+	// The semantic evidence runtime (task B6). Configured, /v1/runtime/locate and
+	// /v1/runtime/read are REGISTERED and fail closed with a stated reason;
+	// unconfigured, they 404 as before. Registration is not function: no path
+	// registers a source binding yet, so every locate denies with 403
+	// evidence_denied (not_resolvable), and the content source cannot reach any
+	// customer system. Both are task B3 — say so to whoever reads the log.
+	if evidenceConfig.Enabled() {
+		log.Printf("gateway-api: evidence runtime registered at /v1/runtime/locate and /v1/runtime/read, "+
+			"staging under %s (NODE-LOCAL: a handle staged by one replica is unreadable on another). "+
+			"It cannot serve data yet: the source-binding registry has no registration path and the content "+
+			"source is not connected to the connector runtime (task B3), so locate denies every data class. "+
+			"service=%s", evidenceConfig.ObjectRoot, cfg.ServiceName)
+	} else {
+		log.Printf("gateway-api: evidence runtime NOT configured, /v1/runtime/locate and /v1/runtime/read are "+
+			"UNREGISTERED and answer 404. Set %s, %s and %s together to register them. service=%s",
+			"AGENTNEXUS_EVIDENCE_OBJECT_ROOT", "AGENTNEXUS_EVIDENCE_CONTENT_KEY_REF",
+			"AGENTNEXUS_EVIDENCE_CONTENT_KEY_FILE", cfg.ServiceName)
+	}
 	router, recoveryPump, err := app.NewPostgresGatewayRouter(startupCtx, pool, app.PostgresGatewayConfig{
 		ApprovalChannel: approvalChannel,
 		ServiceName:     cfg.ServiceName, Version: cfg.Version, OIDC: browserConfig.OIDC,
@@ -160,6 +182,13 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		AllowEphemeralAuditKey:   true,
 		DispatchPublisher:        dispatchPublisher,
 		DispatchRecoveryInterval: dispatchConfig.RecoveryInterval,
+		// No ephemeral fallback here, deliberately: an ephemeral audit key still
+		// signs new events, but an ephemeral CONTENT key orphans every handle
+		// staged before the restart. The operator supplies a stable one or the
+		// surface stays unregistered.
+		EvidenceObjectRoot:    evidenceConfig.ObjectRoot,
+		EvidenceContentKeyRef: evidenceConfig.ContentKeyRef,
+		EvidenceContentKey:    evidenceConfig.ContentKey,
 	})
 	if err != nil {
 		cleanup()

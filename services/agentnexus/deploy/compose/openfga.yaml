@@ -1,9 +1,0 @@
-services:
-  openfga:
-    image: openfga/openfga:latest
-    command: run
-    ports:
-      - "8080:8080"
-      - "8081:8081"
-    environment:
-      OPENFGA_DATASTORE_ENGINE: memory

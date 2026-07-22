@@ -83,6 +83,14 @@ func explainErrorHandler(diagnostics DiagnosticsService) func(context.Context, e
 // A denied capability produces no tool at all. Building it and refusing at call
 // time would still advertise the capability to the model, which turns a hard
 // boundary into an argument the model is invited to have.
+//
+// Allowed is not the same as implemented. The allow-list names five
+// capabilities; the three without a builder below (prepare_connector_onboarding,
+// validate_draft, propose_diagnostics) simply produce nothing here, and because
+// the agent instruction is generated from what this function returns, the model
+// is never told they exist. TestToolsBuildExactlyTheImplementedCapabilities
+// pins the resulting set so a capability can never again ship with no tool
+// without a test saying so.
 func NewTools(policy Policy, diagnostics DiagnosticsService) ([]tool.Tool, error) {
 	if diagnostics == nil {
 		return nil, errors.New("gateway agent: a deterministic diagnostics service is required; the assistant may not invent diagnostic facts")
@@ -96,8 +104,12 @@ func NewTools(policy Policy, diagnostics DiagnosticsService) ([]tool.Tool, error
 	if err := policy.Allow(CapabilityInspectHealth); err == nil {
 		handler := inspectHealthHandler(diagnostics)
 		built, err := functiontool.New(functiontool.Config{
-			Name:        toolNamePrefix + "inspect_health",
-			Description: "Report the deterministic readiness of AgentNexus services for the current tenant. Read-only.",
+			Name: toolNamePrefix + "inspect_health",
+			// Deployment readiness, not tenant readiness. The tenant is a gate
+			// on asking, not a filter on the answer, and this description is
+			// handed to the model verbatim - describing it as tenant-scoped
+			// would invite the model to report it as such.
+			Description: "Report the deterministic readiness of this AgentNexus deployment's services. Read-only.",
 		}, func(ctx agent.Context, args inspectHealthArgs) (HealthReport, error) {
 			return handler(ctx, args)
 		})

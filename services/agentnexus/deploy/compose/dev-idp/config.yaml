@@ -1,0 +1,46 @@
+# Development-only upstream enterprise IdP for the private-dev profile.
+#
+# gateway-api does not treat the enterprise IdP as optional: with browser auth
+# enabled, browserauth.NewEnterpriseOIDC performs OIDC discovery against
+# AGENTNEXUS_OIDC_ENTERPRISE_ISSUER_URL while the router is being built, and
+# browserauth.validateIssuerURL refuses anything but HTTPS for that URL (the
+# loopback-HTTP exemption applies only to the public issuer and console
+# redirects). So the dev stack needs a real HTTPS issuer, not a placeholder.
+#
+# This stands in for the customer IdP that a real deployment already owns. It
+# holds no durable state (memory storage), authenticates nobody (the mock
+# connector returns a fixed dev identity), and its client secret is generated
+# per volume by dev-auth-material rather than written here.
+issuer: https://idp:5556/dex
+
+storage:
+  type: memory
+
+web:
+  https: 0.0.0.0:5556
+  # Issued by the throwaway CA in the same volume; gateway-api trusts it via
+  # SSL_CERT_DIR, which appends to the system roots instead of replacing them.
+  tlsCert: /run/agentnexus/auth/idp/tls.crt
+  tlsKey: /run/agentnexus/auth/idp/tls.key
+
+# Plain-HTTP readiness surface, so the container healthcheck does not have to
+# disable certificate verification to answer "is the IdP up".
+telemetry:
+  http: 0.0.0.0:5558
+
+oauth2:
+  skipApprovalScreen: true
+
+staticClients:
+  - id: agentnexus-gateway
+    name: AgentNexus private-dev gateway
+    # Read from the environment, which the compose entrypoint fills from the
+    # generated secret file. Never inline a secret here.
+    secretEnv: AGENTNEXUS_DEV_UPSTREAM_CLIENT_SECRET
+    redirectURIs:
+      - $AGENTNEXUS_DEV_CALLBACK_URL
+
+connectors:
+  - type: mockCallback
+    id: mock
+    name: Dev login

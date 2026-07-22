@@ -3,10 +3,12 @@ package gatewayagent
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
 )
 
 // AppName is the ADK app name. It is fixed at Runner construction and is the
@@ -17,7 +19,7 @@ const AppName = "agentnexus-gateway-agent"
 // unique within the agent tree.
 const AgentName = "nexus-ops-assistant"
 
-// instruction is the operator-facing brief.
+// instructionPreamble is the fixed half of the operator-facing brief.
 //
 // It states the boundary in plain language for the operator's benefit, but it
 // is NOT what enforces the boundary: the policy allow-list decides which tools
@@ -25,11 +27,16 @@ const AgentName = "nexus-ops-assistant"
 // session service scopes by tenant. Those hold even if this text is ignored,
 // contradicted, or overridden by hostile content arriving through connector
 // metadata - which is exactly what an instruction alone cannot survive.
-const instruction = `You are the AgentNexus operations assistant.
+//
+// Note what this text does NOT contain: a list of what the assistant can do.
+// That list is generated in buildInstruction from the tools that were actually
+// built, because a hand-written one drifts. It previously advertised five
+// capabilities while two tools existed, so the model was told to call three
+// tools that were never registered - the assistant's first move on those
+// questions was a call that could only fail.
+const instructionPreamble = `You are the AgentNexus operations assistant.
 
-You help an operator understand and prepare. You can report service health,
-explain a recorded error, help prepare a connector onboarding, validate a draft
-package or binding, and suggest what to check next.
+You help an operator understand and prepare.
 
 You do not decide business risk, choose approvers, issue grants, execute
 actions, read business data, change policy, install packages, or reveal secret
@@ -42,6 +49,23 @@ state, an error cause, or a configuration value.
 
 Write for an operator who may not be technical: short sentences, concrete next
 steps, no jargon that the tool output did not already use.`
+
+// buildInstruction composes the brief from the tools that were actually built.
+//
+// Deriving the capability list rather than writing it is what keeps the two in
+// step. The allow-list may name a capability whose tool has not been written
+// yet; when it does, the model is simply never told about it, instead of being
+// promised a tool that does not exist.
+func buildInstruction(tools []tool.Tool) string {
+	var brief strings.Builder
+	brief.WriteString(instructionPreamble)
+	brief.WriteString("\n\nThese are the only tools you have:\n")
+	for _, built := range tools {
+		fmt.Fprintf(&brief, "\n- %s: %s", built.Name(), built.Description())
+	}
+	brief.WriteString("\n\nIf answering would need something no tool above covers, say so plainly and\nname the person or screen that owns it. Do not describe it as something you\ncan do.")
+	return brief.String()
+}
 
 // NewAgent builds the bounded operations assistant.
 //
@@ -62,7 +86,7 @@ func NewAgent(llm model.LLM, policy Policy, diagnostics DiagnosticsService) (age
 		Name:        AgentName,
 		Description: "Bounded AgentNexus operations assistant: health, error explanation, connector onboarding preparation and draft validation.",
 		Model:       llm,
-		Instruction: instruction,
+		Instruction: buildInstruction(tools),
 		Tools:       tools,
 	})
 	if err != nil {

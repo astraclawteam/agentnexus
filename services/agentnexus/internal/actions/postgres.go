@@ -358,45 +358,200 @@ func (s *PostgresStore) ResultApplied(ctx context.Context, tenantRef, resultID s
 	return applied, nil
 }
 
+// dispatchFromRow projects one outbox row onto the durable dispatch intent.
+func dispatchFromRow(row db.ActionOutbox) Dispatch {
+	return Dispatch{
+		TenantRef:      row.TenantRef,
+		DispatchRef:    row.DispatchRef,
+		ActionRef:      row.ActionRef,
+		Capability:     row.Capability,
+		ParameterHash:  row.ParameterHash,
+		GrantRef:       row.GrantRef,
+		Kind:           DispatchKind(row.Kind),
+		Published:      row.Published,
+		Attempts:       int(row.Attempts),
+		CreatedAt:      timeOf(row.CreatedAt),
+		PublishedAt:    timeOf(row.PublishedAt),
+		NextAttemptAt:  timeOf(row.NextAttemptAt),
+		LastError:      row.LastError,
+		DeadLetteredAt: timeOf(row.DeadLetteredAt),
+	}
+}
+
+func dispatchesFromRows(rows []db.ActionOutbox) []Dispatch {
+	out := make([]Dispatch, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, dispatchFromRow(row))
+	}
+	return out
+}
+
+func outboxLimit(limit int) int32 {
+	if limit <= 0 {
+		return defaultDispatchClaimBatch
+	}
+	return int32(limit)
+}
+
 func (s *PostgresStore) PendingDispatches(ctx context.Context, tenantRef string, limit int) ([]Dispatch, error) {
 	if s == nil || s.pool == nil {
 		return nil, errors.Join(ErrUnavailable, errors.New("action store is not wired"))
 	}
-	bound := int32(limit)
-	if limit <= 0 {
-		bound = 1000
-	}
-	rows, err := db.New(s.pool).ListPendingActionOutbox(ctx, db.ListPendingActionOutboxParams{TenantRef: tenantRef, Limit: bound})
+	rows, err := db.New(s.pool).ListPendingActionOutbox(ctx, db.ListPendingActionOutboxParams{TenantRef: tenantRef, Limit: outboxLimit(limit)})
 	if err != nil {
 		return nil, errors.Join(ErrUnavailable, err)
 	}
-	out := make([]Dispatch, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, Dispatch{
-			TenantRef:     row.TenantRef,
-			DispatchRef:   row.DispatchRef,
-			ActionRef:     row.ActionRef,
-			Capability:    row.Capability,
-			ParameterHash: row.ParameterHash,
-			GrantRef:      row.GrantRef,
-			Kind:          DispatchKind(row.Kind),
-			Published:     row.Published,
-			Attempts:      int(row.Attempts),
-			CreatedAt:     timeOf(row.CreatedAt),
-			PublishedAt:   timeOf(row.PublishedAt),
-		})
-	}
-	return out, nil
+	return dispatchesFromRows(rows), nil
 }
 
-func (s *PostgresStore) MarkDispatchPublished(ctx context.Context, tenantRef, dispatchRef string, at time.Time) error {
+func (s *PostgresStore) DeadLetteredDispatches(ctx context.Context, tenantRef string, limit int) ([]Dispatch, error) {
 	if s == nil || s.pool == nil {
-		return errors.Join(ErrUnavailable, errors.New("action store is not wired"))
+		return nil, errors.Join(ErrUnavailable, errors.New("action store is not wired"))
 	}
-	if _, err := db.New(s.pool).MarkActionOutboxPublished(ctx, db.MarkActionOutboxPublishedParams{TenantRef: tenantRef, DispatchRef: dispatchRef, PublishedAt: pgTime(at)}); err != nil {
+	rows, err := db.New(s.pool).ListDeadLetteredActionOutbox(ctx, db.ListDeadLetteredActionOutboxParams{TenantRef: tenantRef, Limit: outboxLimit(limit)})
+	if err != nil {
+		return nil, errors.Join(ErrUnavailable, err)
+	}
+	return dispatchesFromRows(rows), nil
+}
+
+// ClaimDispatch locks ONE outbox row with FOR UPDATE SKIP LOCKED, delivers it
+// and writes the attempt's outcome inside that same transaction. Holding the
+// row lock across the publish is the point: it is what stops a concurrent
+// replica — or the recovery pump racing the dispatching request — from
+// publishing the same intent a second time. A row another claimer already holds
+// is SKIPPED (claimed=false), never queued behind.
+func (s *PostgresStore) ClaimDispatch(ctx context.Context, tenantRef, dispatchRef string, at time.Time, deliver DispatchDeliverer) (bool, error) {
+	if deliver == nil {
+		return false, errors.Join(ErrInvalidInput, errors.New("a dispatch claim requires a deliverer"))
+	}
+	tx, queries, err := s.begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	row, err := queries.ClaimActionOutbox(ctx, db.ClaimActionOutboxParams{TenantRef: tenantRef, DispatchRef: dispatchRef})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Already published, dead lettered, absent, or held by another
+			// claimer. All four mean: not ours to deliver.
+			return false, nil
+		}
+		return false, errors.Join(ErrUnavailable, err)
+	}
+	dispatch := dispatchFromRow(row)
+	if err := applyDispatchOutcome(ctx, queries, dispatch, deliver(ctx, dispatch), at); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, errors.Join(ErrUnavailable, err)
+	}
+	return true, nil
+}
+
+// ClaimPendingDispatches drains the eligible outbox rows oldest-first, ONE
+// transaction per row. Per-row transactions are deliberate: a store failure on
+// the fifth intent must not roll back the published stamp of the first four and
+// make them republish, and a row whose delivery fails must not abort the pass —
+// its outcome commits and the drain moves to the next row.
+func (s *PostgresStore) ClaimPendingDispatches(ctx context.Context, tenantRef string, limit int, at time.Time, deliver DispatchDeliverer) (int, error) {
+	if deliver == nil {
+		return 0, errors.Join(ErrInvalidInput, errors.New("a dispatch claim requires a deliverer"))
+	}
+	if s == nil || s.pool == nil {
+		return 0, errors.Join(ErrUnavailable, errors.New("action store is not wired"))
+	}
+	bound := int(outboxLimit(limit))
+	claimed := 0
+	for claimed < bound {
+		ok, err := s.claimNext(ctx, tenantRef, at, deliver)
+		if err != nil {
+			return claimed, err
+		}
+		if !ok {
+			break
+		}
+		claimed++
+	}
+	return claimed, nil
+}
+
+// claimNext claims and delivers the oldest eligible row in its own transaction.
+// It reports ok=false when nothing is eligible or every eligible row is held by
+// another claimer, which is what ends the drain pass.
+func (s *PostgresStore) claimNext(ctx context.Context, tenantRef string, at time.Time, deliver DispatchDeliverer) (bool, error) {
+	tx, queries, err := s.begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	row, err := queries.ClaimNextActionOutbox(ctx, db.ClaimNextActionOutboxParams{TenantRef: tenantRef, NextAttemptAt: pgTime(at)})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, errors.Join(ErrUnavailable, err)
+	}
+	dispatch := dispatchFromRow(row)
+	if err := applyDispatchOutcome(ctx, queries, dispatch, deliver(ctx, dispatch), at); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, errors.Join(ErrUnavailable, err)
+	}
+	return true, nil
+}
+
+// applyDispatchOutcome writes one delivery attempt onto the claimed row: the
+// publish stamp, or the failed attempt with its backoff / dead-letter stamp.
+// Both shapes raise attempts, so the column counts ATTEMPTS rather than
+// publishes and the retry policy has something real to read.
+func applyDispatchOutcome(ctx context.Context, queries *db.Queries, dispatch Dispatch, outcome DispatchOutcome, at time.Time) error {
+	if outcome.Published {
+		affected, err := queries.MarkActionOutboxPublished(ctx, db.MarkActionOutboxPublishedParams{
+			TenantRef:   dispatch.TenantRef,
+			DispatchRef: dispatch.DispatchRef,
+			PublishedAt: pgTime(at),
+		})
+		if err != nil {
+			return errors.Join(ErrUnavailable, err)
+		}
+		if affected != 1 {
+			return errors.Join(ErrUnavailable, errors.New("claimed outbox row could not be stamped published"))
+		}
+		return nil
+	}
+	deadLetteredAt := time.Time{}
+	nextAttemptAt := outcome.NextAttemptAt
+	if outcome.DeadLetter {
+		deadLetteredAt = at
+		nextAttemptAt = time.Time{}
+	}
+	affected, err := queries.RecordActionOutboxAttempt(ctx, db.RecordActionOutboxAttemptParams{
+		TenantRef:      dispatch.TenantRef,
+		DispatchRef:    dispatch.DispatchRef,
+		NextAttemptAt:  pgTime(nextAttemptAt),
+		LastError:      truncateOutboxError(outcome.LastError),
+		DeadLetteredAt: pgTime(deadLetteredAt),
+	})
+	if err != nil {
 		return errors.Join(ErrUnavailable, err)
 	}
+	if affected != 1 {
+		return errors.Join(ErrUnavailable, errors.New("claimed outbox row could not record its failed attempt"))
+	}
 	return nil
+}
+
+// maxOutboxErrorLength bounds the persisted failure reason: a transport can
+// return an arbitrarily long error and the outbox row is evidence, not a log.
+const maxOutboxErrorLength = 512
+
+func truncateOutboxError(reason string) string {
+	if len(reason) <= maxOutboxErrorLength {
+		return reason
+	}
+	return reason[:maxOutboxErrorLength]
 }
 
 func (s *PostgresStore) commitAndReload(ctx context.Context, tx pgx.Tx, queries *db.Queries, tenantRef, actionRef string) (Action, error) {
