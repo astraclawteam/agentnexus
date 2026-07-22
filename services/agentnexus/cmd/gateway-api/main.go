@@ -154,22 +154,27 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		approvalChannel = approvaltransport.NewPendingDeliveryChannel()
 	}
 	// The semantic evidence runtime (task B6). Configured, /v1/runtime/locate and
-	// /v1/runtime/read are REGISTERED and fail closed with a stated reason;
-	// unconfigured, they 404 as before. Registration is not function: no path
-	// registers a source binding yet, so every locate denies with 403
-	// evidence_denied (not_resolvable), and the content source cannot reach any
-	// customer system. Both are task B3 — say so to whoever reads the log.
+	// /v1/runtime/read are REGISTERED; unconfigured, they 404 as before. The
+	// source-binding registry is now populated from the deployment's source
+	// catalog, so a DECLARED data class resolves and is authorized — but the
+	// content source still cannot reach any customer system (task B3), so an
+	// authorized locate fails at the fetch with 503 evidence_unavailable rather
+	// than serving records. An UNDECLARED data class still denies with 403
+	// evidence_denied (not_resolvable), which is correct. Say both to whoever
+	// reads the log, so a 503 is not mistaken for a regression.
 	if evidenceConfig.Enabled() {
 		log.Printf("gateway-api: evidence runtime registered at /v1/runtime/locate and /v1/runtime/read, "+
-			"staging under %s (NODE-LOCAL: a handle staged by one replica is unreadable on another). "+
-			"It cannot serve data yet: the source-binding registry has no registration path and the content "+
-			"source is not connected to the connector runtime (task B3), so locate denies every data class. "+
-			"service=%s", evidenceConfig.ObjectRoot, cfg.ServiceName)
+			"staging under %s (NODE-LOCAL: a handle staged by one replica is unreadable on another), "+
+			"with %d source(s) declared in the semantic registry. It still cannot serve data: the content "+
+			"source is not connected to the connector runtime (task B3), so a locate for a declared data "+
+			"class fails at the fetch with 503 evidence_unavailable. An undeclared data class denies with "+
+			"403 evidence_denied. service=%s",
+			evidenceConfig.ObjectRoot, len(evidenceConfig.SourceCatalog.Sources), cfg.ServiceName)
 	} else {
 		log.Printf("gateway-api: evidence runtime NOT configured, /v1/runtime/locate and /v1/runtime/read are "+
-			"UNREGISTERED and answer 404. Set %s, %s and %s together to register them. service=%s",
+			"UNREGISTERED and answer 404. Set %s, %s, %s and %s together to register them. service=%s",
 			"AGENTNEXUS_EVIDENCE_OBJECT_ROOT", "AGENTNEXUS_EVIDENCE_CONTENT_KEY_REF",
-			"AGENTNEXUS_EVIDENCE_CONTENT_KEY_FILE", cfg.ServiceName)
+			"AGENTNEXUS_EVIDENCE_CONTENT_KEY_FILE", "AGENTNEXUS_EVIDENCE_SOURCE_CATALOG_FILE", cfg.ServiceName)
 	}
 	router, recoveryPump, err := app.NewPostgresGatewayRouter(startupCtx, pool, app.PostgresGatewayConfig{
 		ApprovalChannel: approvalChannel,
@@ -189,6 +194,7 @@ func buildRouter(ctx context.Context, cfg config.Config, browserConfig config.Br
 		EvidenceObjectRoot:    evidenceConfig.ObjectRoot,
 		EvidenceContentKeyRef: evidenceConfig.ContentKeyRef,
 		EvidenceContentKey:    evidenceConfig.ContentKey,
+		EvidenceSourceCatalog: evidenceConfig.SourceCatalog,
 	})
 	if err != nil {
 		cleanup()

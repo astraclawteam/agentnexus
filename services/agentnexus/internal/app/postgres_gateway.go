@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -80,6 +81,20 @@ type PostgresGatewayConfig struct {
 	EvidenceObjectRoot    string
 	EvidenceContentKeyRef string
 	EvidenceContentKey    []byte
+	// EvidenceSourceCatalog is the deployment-authored private semantic
+	// registry: which business-semantic data classes exist, which connector
+	// binding of migration 000012 supplies each, and which organization-placed
+	// capability authorizes reading it. It is the FOURTH member of the
+	// all-or-nothing set above, not an optional extra.
+	//
+	// It has to be required for the same reason a content key is. Without a
+	// catalog the registry is empty, GetSourceBinding returns ErrNotFound for
+	// every data class, and locate denies at not_resolvable before it reaches a
+	// content source — a plane that registers /v1/runtime/locate, reports
+	// healthy to every probe, and refuses everything. Making it optional would
+	// leave that shape reachable by omission, which is exactly how it went
+	// unnoticed before.
+	EvidenceSourceCatalog evidence.SourceCatalog
 }
 
 // defaultDispatchRecoveryInterval paces the outbox recovery drain. It only
@@ -168,7 +183,7 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 	// stand at this spot was only pretending to be. There is no separate type
 	// assertion left to keep: the real construction type-checks the conformance,
 	// and a second one at package scope would be the same decoration again.
-	evidenceRuntime, err := buildEvidenceRuntime(pool, cfg, auditSink, authorizationPolicy, actionStore)
+	evidenceRuntime, err := buildEvidenceRuntime(ctx, pool, cfg, auditSink, authorizationPolicy, actionStore)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -224,12 +239,12 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 // /v1/runtime/locate and /v1/runtime/read, or returns a nil EvidenceService when
 // the deployment did not configure one.
 //
-// The three config fields are ALL-OR-NOTHING and checked here rather than by the
-// wiring guard, because a string and a []byte are configuration VALUES that
-// reflection cannot judge unset (wiring.Inspects skips them by design). A
-// partial set is a startup error, on the AGENTNEXUS_APPROVAL_CHANNEL precedent:
-// an operator who supplied a staging root but no content key must be told at
-// startup, not left with a plane that accepts every locate and fails it.
+// The four config fields are ALL-OR-NOTHING and checked here rather than by the
+// wiring guard, because a string, a []byte and a document are configuration
+// VALUES that reflection cannot judge unset (wiring.Inspects skips them by
+// design). A partial set is a startup error, on the AGENTNEXUS_APPROVAL_CHANNEL
+// precedent: an operator who supplied a staging root but no content key must be
+// told at startup, not left with a plane that accepts every locate and fails it.
 //
 // WHAT THIS ACTUALLY DELIVERS TODAY — read before assuming the plane works:
 //
@@ -237,26 +252,59 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 //     binding's private SourceRef to a connector manifest, customer binding,
 //     resource/operation and credential ref; that is task B3. Every fetch fails
 //     closed with 503 evidence_unavailable. Nothing fabricates records.
-//   - Service.RegisterSourceBinding has no caller here or anywhere outside
-//     tests, so the private semantic registry is EMPTY. resolveNeed's
-//     GetSourceBinding returns ErrNotFound for every data class, which denies
-//     with not_resolvable — so locate answers 403 evidence_denied before it ever
-//     reaches the content source above. A binding-registration path is B3's to
-//     ship; until it does, this surface is registered and honest, not working.
-//   - No ObservationSigner is wired, so verification-purpose reads fail closed.
-//     That is moot over PostgreSQL anyway: PostgresStore.UpsertSourceBinding
-//     refuses bindings carrying AuthorityTier/FreshnessBound (migration 000008
-//     has no such columns) and sourceBindingFromRow never populates them, so
-//     every verification read denies at observation_authority_undeclared first.
-//     Wiring a signer would not change one response; wiring an in-memory
-//     ephemeral one would mint receipts nobody can verify.
+//   - The private semantic registry is now POPULATED, from the deployment's
+//     EvidenceSourceCatalog (evidence/catalog.go). A declared data class
+//     resolves, is authorized against the sealed organization snapshot, and
+//     reaches the content source above — where it meets the 503 named there. An
+//     UNDECLARED data class still denies at not_resolvable, which is correct
+//     and is not something a catalog may relax. This was the gap the B6 note
+//     recorded here: Service.RegisterSourceBinding had no caller, so the
+//     registry was empty and locate answered 403 evidence_denied for
+//     everything, on a surface that reported healthy to every probe.
+//   - No ObservationSigner is wired, so verification-purpose reads fail closed
+//     — and that is only the FIRST of two independent gaps. Migration 000015
+//     added the authority columns and PostgresStore now round-trips them, so a
+//     catalog entry CAN declare an observation authority and get past
+//     observation_authority_undeclared. It still cannot mint: the receipt needs
+//     a signer, and behind it worker.ObservationProducer (result.go, Task 7)
+//     has no implementation at all. A green locate says nothing about
+//     verification; the two paths must be tested separately.
 //
 // The ObjectStore is FileObjectStore: durable, atomic and traversal-guarded, but
 // NODE-LOCAL. With more than one gateway-api replica a handle staged by one
 // replica is unreadable on another — the read fails authenticated decryption and
 // reports 503. That is fail-closed, not a leak, but it makes this composition
 // single-node until a shared ObjectStore exists.
-func buildEvidenceRuntime(pool *pgxpool.Pool, cfg PostgresGatewayConfig, auditSink *PostgresBrowserAuditSink, snapshots policy.SnapshotSource, actionStore *actions.PostgresStore) (EvidenceService, error) {
+func buildEvidenceRuntime(ctx context.Context, pool *pgxpool.Pool, cfg PostgresGatewayConfig, auditSink *PostgresBrowserAuditSink, snapshots policy.SnapshotSource, actionStore *actions.PostgresStore) (EvidenceService, error) {
+	service, err := composeEvidenceRuntime(pool, cfg, auditSink, snapshots, actionStore)
+	if err != nil || service == nil {
+		return nil, err
+	}
+	// Populate the private semantic registry. This is the caller
+	// Service.RegisterSourceBinding never had; without it the composition above
+	// is a plane that denies every locate at not_resolvable.
+	//
+	// It runs at startup and FAILS THE COMPOSITION on any error. A catalog that
+	// names a connector binding the tenant does not have, or a write capability,
+	// or an authorization pair the neutral policy does not grant, is a
+	// deployment that would answer 403 forever for the data class it thought it
+	// had configured — so the router refuses to exist rather than serve that.
+	// Applying is idempotent (see ApplySourceCatalog), so a restart re-applies
+	// the same rows without disturbing a live handle.
+	registered, err := evidence.ApplySourceCatalog(ctx, service, postgresConnectorSourceResolver{pool: pool}, cfg.EvidenceSourceCatalog)
+	if err != nil {
+		return nil, fmt.Errorf("evidence source catalog: %w", err)
+	}
+	slog.InfoContext(ctx, "evidence.source_catalog_applied", slog.Int("sources", len(registered)))
+	return service, nil
+}
+
+// composeEvidenceRuntime builds the service over its six ports, or returns the
+// interface's own nil when the deployment configured nothing. It is split from
+// buildEvidenceRuntime so the port composition is testable without a database:
+// applying a catalog necessarily writes through PostgresStore, so the two
+// concerns cannot share one test.
+func composeEvidenceRuntime(pool *pgxpool.Pool, cfg PostgresGatewayConfig, auditSink *PostgresBrowserAuditSink, snapshots policy.SnapshotSource, actionStore *actions.PostgresStore) (*evidence.Service, error) {
 	var missing []string
 	for _, entry := range []struct {
 		name string
@@ -265,13 +313,14 @@ func buildEvidenceRuntime(pool *pgxpool.Pool, cfg PostgresGatewayConfig, auditSi
 		{"EvidenceObjectRoot", cfg.EvidenceObjectRoot != ""},
 		{"EvidenceContentKeyRef", cfg.EvidenceContentKeyRef != ""},
 		{"EvidenceContentKey", len(cfg.EvidenceContentKey) > 0},
+		{"EvidenceSourceCatalog", cfg.EvidenceSourceCatalog.Declared()},
 	} {
 		if !entry.set {
 			missing = append(missing, entry.name)
 		}
 	}
 	switch len(missing) {
-	case 3:
+	case 4:
 		// Nothing configured: the historical shape. Return the interface's own
 		// nil rather than a typed nil pointer, which would be non-nil to the
 		// dependency check and register endpoints over a nil service.
@@ -279,7 +328,7 @@ func buildEvidenceRuntime(pool *pgxpool.Pool, cfg PostgresGatewayConfig, auditSi
 	case 0:
 	default:
 		return nil, fmt.Errorf("evidence runtime configuration incomplete, missing: %s "+
-			"(supply all three, or none to leave /v1/runtime/locate and /v1/runtime/read unregistered)",
+			"(supply all four, or none to leave /v1/runtime/locate and /v1/runtime/read unregistered)",
 			strings.Join(missing, ", "))
 	}
 	objects, err := evidence.NewFileObjectStore(cfg.EvidenceObjectRoot)

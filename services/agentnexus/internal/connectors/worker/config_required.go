@@ -34,8 +34,10 @@ var optionalWorkerDeps = map[string]string{
 // are bound as the principal of the completion and result_unknown audit lineage,
 // so an empty one is an unattributable audit record, not a default.
 //
-// Three of the four have no configuration surface at all (task B3). The guard's
-// job here is to name them, not to pretend the gap can be satisfied.
+// All four have a configuration surface now (config.LoadWorkerIdentity, task
+// B3), so a deployment that sets AGENTNEXUS_WORKER_* stops seeing them here.
+// The guard's job is to name what is genuinely unsatisfied, not to keep
+// reporting a gap that has been closed.
 var requiredIdentityFields = []string{"PrincipalRef", "AgentClientRef", "AgentReleaseRef", "OrgSnapshotRef"}
 
 // MissingRequired reports every dependency this Config leaves unsatisfied,

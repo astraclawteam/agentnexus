@@ -32,11 +32,22 @@ type EvidenceConfig struct {
 	ContentKeyRef string
 	// ContentKey is exactly evidence.ContentKeyBytes of AES-256 key material.
 	ContentKey []byte
+	// SourceCatalog is the private semantic registry this deployment declares:
+	// the data classes that exist, the connector binding supplying each, and
+	// the organization-placed capability that authorizes reading it.
+	//
+	// It is part of the all-or-nothing set rather than an optional extra. A
+	// staging root and a key with no catalog compose a registry that is EMPTY,
+	// so every locate denies at not_resolvable — a runtime surface that
+	// registers, reports healthy, and refuses everything. That failure has no
+	// symptom worth noticing, which is precisely why it must be refused at
+	// startup instead.
+	SourceCatalog evidence.SourceCatalog
 }
 
 // Enabled reports whether the evidence runtime should be composed at all.
 func (c EvidenceConfig) Enabled() bool {
-	return c.ObjectRoot != "" && c.ContentKeyRef != "" && len(c.ContentKey) > 0
+	return c.ObjectRoot != "" && c.ContentKeyRef != "" && len(c.ContentKey) > 0 && c.SourceCatalog.Declared()
 }
 
 // Evidence environment variables.
@@ -44,6 +55,7 @@ const (
 	envEvidenceObjectRoot    = "AGENTNEXUS_EVIDENCE_OBJECT_ROOT"
 	envEvidenceContentKeyRef = "AGENTNEXUS_EVIDENCE_CONTENT_KEY_REF"
 	envEvidenceContentKey    = "AGENTNEXUS_EVIDENCE_CONTENT_KEY_FILE"
+	envEvidenceSourceCatalog = "AGENTNEXUS_EVIDENCE_SOURCE_CATALOG_FILE"
 )
 
 // LoadEvidence reads the evidence runtime settings. A partial set is an error
@@ -54,7 +66,8 @@ func LoadEvidence() (EvidenceConfig, error) {
 	root := strings.TrimSpace(os.Getenv(envEvidenceObjectRoot))
 	keyRef := strings.TrimSpace(os.Getenv(envEvidenceContentKeyRef))
 	keyPath := strings.TrimSpace(os.Getenv(envEvidenceContentKey))
-	if root == "" && keyRef == "" && keyPath == "" {
+	catalogPath := strings.TrimSpace(os.Getenv(envEvidenceSourceCatalog))
+	if root == "" && keyRef == "" && keyPath == "" && catalogPath == "" {
 		return EvidenceConfig{}, nil
 	}
 	var missing []string
@@ -62,6 +75,7 @@ func LoadEvidence() (EvidenceConfig, error) {
 		{envEvidenceObjectRoot, root},
 		{envEvidenceContentKeyRef, keyRef},
 		{envEvidenceContentKey, keyPath},
+		{envEvidenceSourceCatalog, catalogPath},
 	} {
 		if entry.value == "" {
 			missing = append(missing, entry.name)
@@ -69,14 +83,36 @@ func LoadEvidence() (EvidenceConfig, error) {
 	}
 	if len(missing) > 0 {
 		return EvidenceConfig{}, fmt.Errorf(
-			"the evidence runtime needs %s, %s and %s together; missing: %s",
-			envEvidenceObjectRoot, envEvidenceContentKeyRef, envEvidenceContentKey, strings.Join(missing, ", "))
+			"the evidence runtime needs %s, %s, %s and %s together; missing: %s",
+			envEvidenceObjectRoot, envEvidenceContentKeyRef, envEvidenceContentKey, envEvidenceSourceCatalog,
+			strings.Join(missing, ", "))
 	}
 	key, err := loadEvidenceContentKey(keyPath)
 	if err != nil {
 		return EvidenceConfig{}, err
 	}
-	return EvidenceConfig{ObjectRoot: root, ContentKeyRef: keyRef, ContentKey: key}, nil
+	catalog, err := loadEvidenceSourceCatalog(catalogPath)
+	if err != nil {
+		return EvidenceConfig{}, err
+	}
+	return EvidenceConfig{ObjectRoot: root, ContentKeyRef: keyRef, ContentKey: key, SourceCatalog: catalog}, nil
+}
+
+// loadEvidenceSourceCatalog reads and fully validates the private semantic
+// registry document. Validation happens HERE, at config load, so a malformed
+// catalog is reported against the environment variable that named it rather
+// than surfacing later as an opaque router-composition failure. The connector
+// references it names are resolved later, against the database.
+func loadEvidenceSourceCatalog(path string) (evidence.SourceCatalog, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return evidence.SourceCatalog{}, fmt.Errorf("read %s: %w", envEvidenceSourceCatalog, err)
+	}
+	catalog, err := evidence.ParseSourceCatalog(raw)
+	if err != nil {
+		return evidence.SourceCatalog{}, fmt.Errorf("%s: %w", envEvidenceSourceCatalog, err)
+	}
+	return catalog, nil
 }
 
 // loadEvidenceContentKey reads the base64 (standard encoding) content key from

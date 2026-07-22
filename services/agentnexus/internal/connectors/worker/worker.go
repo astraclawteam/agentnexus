@@ -28,11 +28,14 @@
 // authoritative ActionReceipt and the exact deduplicated ObservationReceipt set;
 // duplicate dispatch, NATS redelivery and worker restart are idempotent.
 //
-// Fail closed: every deferred concrete dependency (the Postgres BindingResolver
-// and the evidence-backed ObservationProducer both land in the Task 7 connector-
-// qualification work) is nil-guarded and reported not-ready — there is no
-// pass-stub and no fake shipped to production, mirroring the 0F ReceiptVerifier /
-// 0D ActionBindingVerifier seams.
+// Fail closed: every deferred concrete dependency is nil-guarded and reported
+// not-ready — there is no pass-stub and no fake shipped to production, mirroring
+// the 0F ReceiptVerifier / 0D ActionBindingVerifier seams. The action plane, the
+// receipt signer and the Postgres BindingResolver are composed by
+// app.NewPostgresWorkerSeams; the evidence-backed ObservationProducer is the one
+// dependency with no implementation anywhere in this build (it lands with the
+// Task 7 connector-qualification work), so CheckReady still refuses and no
+// deployment can put this worker on the stream.
 package worker
 
 import (
@@ -201,7 +204,7 @@ func (w *Worker) CheckReady(ctx context.Context) error {
 		return ErrNotReady
 	}
 	if w.resolver == nil {
-		return errors.Join(ErrNotReady, errors.New("no binding resolver wired (concrete Postgres resolver lands in Task 7)"))
+		return errors.Join(ErrNotReady, errors.New("no binding resolver wired (the concrete PostgresBindingResolver is in this package; see app.NewPostgresWorkerSeams for the composition)"))
 	}
 	if w.signer == nil {
 		return errors.Join(ErrNotReady, errors.New("no receipt signer wired; an unsigned ActionReceipt can never complete an action"))

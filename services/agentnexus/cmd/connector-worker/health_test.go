@@ -1,20 +1,26 @@
 package main
 
 import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/astraclawteam/agentnexus/sdk/go/runtime"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/actions"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/config"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/connectors/worker"
 )
 
-// The connector worker's execution seams (the private Postgres BindingResolver
-// and the evidence-backed ObservationProducer) are deliberately not wired yet,
-// so worker.New fails and the process stays up with a nil worker to keep its
-// health surface observable. That decision is fine. What was NOT fine is that
+// The connector worker's evidence-backed ObservationProducer has no
+// implementation anywhere in this build, so worker.New still fails and the
+// process stays up with a nil worker to keep its health surface observable.
+// That decision is fine. What was NOT fine is that
 // the process reported itself ready anyway: the startup line printed
 // ready=true from a hard-coded literal while /readyz on the same process
 // returned 503, so the single line an operator reads at boot -- and the line a
@@ -84,9 +90,8 @@ func TestStartupReadinessAgreesWithReadyz(t *testing.T) {
 // matters is the one /readyz actually serves.
 
 func TestComposeWorkerNamesEveryUnconstructedDependency(t *testing.T) {
-	// Exactly what main() supplies today: this service's own name, and nothing
-	// else, because the remaining seams and identity refs have no configuration
-	// surface at all (task B3).
+	// The deployment that configured nothing but has a service name: no identity
+	// refs, no execution surface. Everything must be named.
 	executionWorker, reason := composeWorker(worker.Config{
 		Identity: worker.Identity{PrincipalRef: "connector-worker"},
 	})
@@ -201,4 +206,160 @@ func TestPartialIdentityEnvironmentIsAStartupError(t *testing.T) {
 	if _, err := loadWorkerConfig(testConfig()); err == nil {
 		t.Fatal("a partial identity environment must fail startup")
 	}
+}
+
+// --- the execution seams (task B1) -------------------------------------------
+
+// Three of the four execution seams have a production implementation and are now
+// composed by app.NewPostgresWorkerSeams. The fourth, the ObservationProducer,
+// has none anywhere in this build, so the worker is still not constructible and
+// this process still consumes nothing. What B1 changes is the REASON: it must
+// shrink to name only what genuinely remains, instead of listing four seams of
+// which three were satisfiable all along.
+//
+// The composed-successfully path needs a database and lives with the seams it
+// exercises (app.TestPostgresWorkerSeams*, DSN-gated). What is coverable here is
+// the link main() actually owns: the merge of the identity and the seams into
+// the one Config the guard inspects, and the boot-time refusals around it.
+
+func TestUnconfiguredExecutionSurfaceLeavesEverySeamNamed(t *testing.T) {
+	setIdentityEnv(t, "agc_console", "agr_2026_07", "orgv_7")
+	workerConfig, err := loadWorkerConfig(testConfig())
+	if err != nil {
+		t.Fatalf("loadWorkerConfig: %v", err)
+	}
+	// The deployment that has not wired its execution surface. It must boot.
+	wired, closeSeams, err := wireExecutionSeams(context.Background(), workerConfig, config.WorkerExecutionConfig{})
+	if err != nil {
+		t.Fatalf("an unconfigured execution surface must not be a startup error: %v", err)
+	}
+	defer closeSeams()
+
+	executionWorker, reason := composeWorker(wired)
+	if executionWorker != nil {
+		t.Fatal("composeWorker returned a worker whose execution seams were constructed by nobody")
+	}
+	for _, want := range []string{"Actions", "Resolver", "Signer", "Observations"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the not-ready reason does not name the unwired %s: %q", want, reason)
+		}
+	}
+	// The identity it DID carry must survive the merge. A wiring step that
+	// overwrote the whole Config would blank a configured identity and send an
+	// operator back to variables they had already set correctly.
+	if strings.Contains(reason, "Identity.") {
+		t.Errorf("wiring the execution seams discarded the configured identity: %q", reason)
+	}
+}
+
+// The composed path, minus the database the composition needs. Supplying the
+// three seams must shrink the guard's reason to the ONE dependency that has no
+// implementation anywhere in this build, and must leave the identity alone.
+//
+// The seams here are stand-ins; that they are real is what
+// app.TestPostgresWorkerSeamsLeaveOnlyTheObservationProducerUnwired asserts,
+// against a real database. What is being pinned here is the merge itself, which
+// is the step main() owns.
+func TestSuppliedSeamsLeaveOnlyTheObservationProducerNamed(t *testing.T) {
+	setIdentityEnv(t, "agc_console", "agr_2026_07", "orgv_7")
+	workerConfig, err := loadWorkerConfig(testConfig())
+	if err != nil {
+		t.Fatalf("loadWorkerConfig: %v", err)
+	}
+	seams := worker.Config{
+		Actions:  stubActionPlane{},
+		Signer:   stubReceiptSigner{},
+		Resolver: stubBindingResolver{},
+	}
+
+	executionWorker, reason := composeWorker(mergeExecutionSeams(workerConfig, seams))
+	if executionWorker != nil {
+		t.Fatal("composeWorker handed back a worker whose observation producer is nil")
+	}
+	if !strings.Contains(reason, "Observations") {
+		t.Errorf("the not-ready reason does not name the unwired Observations: %q", reason)
+	}
+	for _, gone := range []string{"Actions", "Resolver", "Signer", "Identity."} {
+		if strings.Contains(reason, gone) {
+			t.Errorf("the reason still names %s after it was supplied: %q", gone, reason)
+		}
+	}
+}
+
+// A configured surface the process cannot compose is FATAL rather than served
+// quietly: the operator asserted this worker is wired. The DSN here fails to
+// parse, so this never touches a network.
+func TestConfiguredExecutionSurfaceThatCannotBeComposedIsAStartupError(t *testing.T) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken := config.WorkerExecutionConfig{
+		DatabaseURL:         "postgres://user:pass@host:not-a-port/db",
+		ReceiptSigningKeyID: "connector-worker-receipt-1",
+		ReceiptSigningKey:   key,
+	}
+	if !broken.Configured() {
+		t.Fatal("the fixture is not a configured surface, so this asserts nothing")
+	}
+	if _, _, err := wireExecutionSeams(context.Background(), worker.Config{}, broken); err == nil {
+		t.Fatal("a configured execution surface that cannot be composed must fail startup")
+	}
+}
+
+// The cleanup func is never nil on ANY path, so main can defer it
+// unconditionally. A nil one would panic the process at shutdown on exactly the
+// paths this binary exists to keep observable.
+func TestWireExecutionSeamsAlwaysReturnsAClosableCleanup(t *testing.T) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, executionConfig := range map[string]config.WorkerExecutionConfig{
+		"unconfigured": {},
+		"unusable":     {DatabaseURL: "postgres://user:pass@host:not-a-port/db", ReceiptSigningKeyID: "k", ReceiptSigningKey: key},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, closeSeams, _ := wireExecutionSeams(context.Background(), worker.Config{}, executionConfig)
+			if closeSeams == nil {
+				t.Fatal("the cleanup func is nil; main defers it unconditionally")
+			}
+			closeSeams()
+		})
+	}
+}
+
+// Stand-ins for the three seams that DO have production implementations, used
+// only to pin what the guard reports once they are present. They are inert on
+// purpose: every method fails, so nothing here can be mistaken for a shippable
+// pass-stub. The real composition is app.NewPostgresWorkerSeams and its
+// behaviour is asserted against a real database, not here.
+
+var errStubSeam = errors.New("test stand-in seam; never a production implementation")
+
+type stubActionPlane struct{}
+
+func (stubActionPlane) GetAction(context.Context, runtime.PrincipalContext, string) (actions.Action, error) {
+	return actions.Action{}, errStubSeam
+}
+func (stubActionPlane) MarkExecuting(context.Context, runtime.PrincipalContext, string) (actions.Action, error) {
+	return actions.Action{}, errStubSeam
+}
+func (stubActionPlane) IngestReceipt(context.Context, runtime.PrincipalContext, string, runtime.ActionReceipt) (actions.Action, error) {
+	return actions.Action{}, errStubSeam
+}
+func (stubActionPlane) MarkResultUnknown(context.Context, runtime.PrincipalContext, string) (actions.Action, error) {
+	return actions.Action{}, errStubSeam
+}
+
+type stubReceiptSigner struct{}
+
+func (stubReceiptSigner) Sign(context.Context, []byte) (runtime.Signature, error) {
+	return runtime.Signature{}, errStubSeam
+}
+
+type stubBindingResolver struct{}
+
+func (stubBindingResolver) Resolve(context.Context, string, string) (worker.ResolvedBinding, error) {
+	return worker.ResolvedBinding{}, errStubSeam
 }

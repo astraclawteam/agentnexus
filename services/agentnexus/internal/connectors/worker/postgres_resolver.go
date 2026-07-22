@@ -146,11 +146,10 @@ type PostgresBindingResolver struct {
 	hosts HostFactory
 }
 
-// The port this type exists to fill. This assertion is load-bearing rather than
-// decorative: NOTHING in this build constructs a PostgresBindingResolver into a
-// worker.Config (see the note on HostFactory), so without it a signature drift
-// in BindingResolver would compile cleanly and only surface whenever the host
-// wiring finally lands.
+// The port this type exists to fill. app.NewPostgresWorkerSeams now constructs
+// this resolver into a worker.Config, so the assertion is no longer the only
+// thing type-checking the conformance; it is kept because it states the intent
+// at the definition rather than at a composition root in another package.
 var _ BindingResolver = (*PostgresBindingResolver)(nil)
 
 // NewPostgresBindingResolver builds the resolver. A nil HostFactory is allowed
