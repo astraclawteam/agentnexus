@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -72,6 +73,10 @@ const (
 	maxOpaqueCredentialLength = 4096
 	maxOriginLength           = 128
 	serviceContextTTL         = 5 * time.Minute
+	// maxLoggableClientIDLength bounds the claimed client identifier a rejection
+	// log line may echo. decodeBasicCredential accepts a much longer one, and an
+	// unbounded echo of caller-controlled bytes is a log-volume lever.
+	maxLoggableClientIDLength = 128
 )
 
 // Resolution errors. HTTPStatus maps them onto transport statuses.
@@ -210,6 +215,16 @@ type Rejection struct {
 	Field        string
 	Path         string
 	Origin       string
+	// ClaimedClientID is the client identifier a Basic service credential
+	// presented. It is UNVERIFIED — the credential was refused, so nothing about
+	// it is established — and it exists for one reason: an operator watching a
+	// first-party service fail in a retry loop needs to know WHICH credential is
+	// being refused, and the client id is the non-secret half.
+	//
+	// It is deliberately confined to the operational log. It must never reach
+	// the audit trail's actor field, which records verified identity only, and
+	// the secret half is never carried here at all.
+	ClaimedClientID string
 }
 
 // AuditSink records trust rejections. Recording is best-effort: an audit
@@ -336,6 +351,16 @@ type ResolverConfig struct {
 	Services            ServiceCredentialVerifier
 	OrgSnapshots        OrgSnapshotResolver
 	Audit               AuditSink
+	// Logger receives every authentication rejection. Nil selects
+	// slog.Default() explicitly (the handler-logger seam used elsewhere in this
+	// service).
+	//
+	// Rejections used to reach the audit TABLE and nothing else, so a
+	// first-party client refused several times a minute forever produced a
+	// completely silent gateway log while the caller saw only a status code.
+	// The evidence plane already logs its denials with reasons
+	// (evidence.locate_denied); ingress now does the same.
+	Logger *slog.Logger
 	// Protected reports whether a request requires a trusted context. Only
 	// protected requests are resolved; forged-identity header screening
 	// covers every request.
@@ -361,6 +386,9 @@ func NewResolver(cfg ResolverConfig) (*Resolver, error) {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
 	return &Resolver{cfg: cfg}, nil
 }
@@ -525,6 +553,11 @@ func (r *Resolver) resolve(req *http.Request, origin string) (Context, error) {
 	case len(authorizations) == 1:
 		return r.resolveAuthorization(req, origin, authorizations[0])
 	default:
+		// Deliberately NOT recorded. A protected request with no credential is
+		// ordinary traffic (probes, unauthenticated clients); recording it would
+		// bury the rejections that mean something and hand an unauthenticated
+		// caller a log-volume lever. Only a PRESENTED credential that fails is a
+		// trust rejection. See TestTrustedContextUnauthenticatedAndUnprotectedPaths.
 		return Context{}, ErrUnauthenticated
 	}
 }
@@ -540,7 +573,7 @@ func (r *Resolver) resolveSession(req *http.Request, origin, token string) (Cont
 	}
 	identity, err := r.cfg.Sessions.VerifyBrowserSession(req.Context(), token)
 	if err != nil {
-		return Context{}, r.credentialFailure(req, SourceBrowserSession, origin, err)
+		return Context{}, r.credentialFailure(req, SourceBrowserSession, origin, "", err)
 	}
 	return r.principalContext(req, principalInput{
 		source:                   SourceBrowserSession,
@@ -578,7 +611,7 @@ func (r *Resolver) resolveAuthorization(req *http.Request, origin, header string
 		}
 		identity, err := r.cfg.AccessTickets.VerifyAccessTicket(req.Context(), value)
 		if err != nil {
-			return Context{}, r.credentialFailure(req, SourceAccessTicket, origin, err)
+			return Context{}, r.credentialFailure(req, SourceAccessTicket, origin, "", err)
 		}
 		return r.principalContext(req, principalInput{
 			source:        SourceAccessTicket,
@@ -602,7 +635,7 @@ func (r *Resolver) resolveAuthorization(req *http.Request, origin, header string
 		}
 		identity, err := r.cfg.BrowserAccessTokens.VerifyBrowserAccessToken(req.Context(), value)
 		if err != nil {
-			return Context{}, r.credentialFailure(req, SourceBrowserAccessToken, origin, err)
+			return Context{}, r.credentialFailure(req, SourceBrowserAccessToken, origin, "", err)
 		}
 		clientRef := identity.ClientRef
 		if clientRef == "" {
@@ -631,7 +664,7 @@ func (r *Resolver) resolveAuthorization(req *http.Request, origin, header string
 		}
 		identity, err := r.cfg.StepGrants.VerifyStepGrant(req.Context(), value)
 		if err != nil {
-			return Context{}, r.credentialFailure(req, SourceStepGrant, origin, err)
+			return Context{}, r.credentialFailure(req, SourceStepGrant, origin, "", err)
 		}
 		return r.principalContext(req, principalInput{
 			source:        SourceStepGrant,
@@ -656,7 +689,11 @@ func (r *Resolver) resolveAuthorization(req *http.Request, origin, header string
 		}
 		identity, err := r.cfg.Services.VerifyServiceCredential(req.Context(), clientID, secret)
 		if err != nil {
-			return Context{}, r.credentialFailure(req, SourceServiceCredential, origin, err)
+			// The claimed client id rides along so the rejection names WHICH
+			// first-party credential was refused. This is the case a joint stack
+			// hits when the two halves of a service secret were provisioned by
+			// different hands: without the id, every rejection looks the same.
+			return Context{}, r.credentialFailure(req, SourceServiceCredential, origin, clientID, err)
 		}
 		return r.principalContext(req, principalInput{
 			source:       SourceServiceCredential,
@@ -756,22 +793,64 @@ func (r *Resolver) principalContext(req *http.Request, input principalInput) (Co
 	}, nil
 }
 
-func (r *Resolver) credentialFailure(req *http.Request, source Source, origin string, err error) error {
+func (r *Resolver) credentialFailure(req *http.Request, source Source, origin, claimedClientID string, err error) error {
 	if errors.Is(err, ErrCredentialRejected) {
-		r.audit(req, Rejection{Source: source, Reason: ReasonCredentialRejected, Path: req.URL.Path, Origin: origin})
+		r.audit(req, Rejection{Source: source, Reason: ReasonCredentialRejected, Path: req.URL.Path, Origin: origin, ClaimedClientID: claimedClientID})
 		return ErrInvalidCredential
 	}
 	return errJoinUnavailable(err)
 }
 
+// audit records one refused trust input on BOTH surfaces: the durable audit
+// trail (verified identity only, best-effort) and the operational log (what an
+// operator needs to see a client failing in a loop). Neither ever carries a
+// credential value — Field is a header NAME, ClaimedClientID is the non-secret
+// half of a Basic credential, and the secret is not in Rejection at all.
 func (r *Resolver) audit(req *http.Request, rejection Rejection) {
-	if r.cfg.Audit == nil {
-		return
-	}
 	if rejection.TenantRef == "" {
 		rejection.TenantRef = r.cfg.TenantRef
 	}
+	if r.cfg.Logger != nil {
+		attrs := []any{
+			slog.String("tenant_ref", rejection.TenantRef),
+			slog.String("reason", rejection.Reason),
+			slog.String("path", rejection.Path),
+			slog.String("credential_source", string(rejection.Source)),
+		}
+		if rejection.Field != "" {
+			attrs = append(attrs, slog.String("field", rejection.Field))
+		}
+		if rejection.Origin != "" {
+			attrs = append(attrs, slog.String("declared_origin", rejection.Origin))
+		}
+		if rejection.ClaimedClientID != "" {
+			attrs = append(attrs, slog.String("claimed_client_id", loggableClientID(rejection.ClaimedClientID)))
+		}
+		r.cfg.Logger.WarnContext(req.Context(), "trust.credential_rejected", attrs...)
+	}
+	if r.cfg.Audit == nil {
+		return
+	}
+	// ClaimedClientID stays out of the audit row on purpose: the audit trail
+	// records verified identity, and this value was never verified.
+	rejection.ClaimedClientID = ""
 	r.cfg.Audit.RecordTrustRejection(req.Context(), rejection)
+}
+
+// loggableClientID bounds and screens a caller-supplied client identifier
+// before it reaches a log line. The value is attacker-controlled, so a
+// non-printable or oversized one is reported as unloggable rather than written
+// through: a newline in a log record is a forged second record.
+func loggableClientID(clientID string) string {
+	if len(clientID) > maxLoggableClientIDLength {
+		return "<non-canonical>"
+	}
+	for i := 0; i < len(clientID); i++ {
+		if clientID[i] < 0x21 || clientID[i] > 0x7e {
+			return "<non-canonical>"
+		}
+	}
+	return clientID
 }
 
 func errJoinUnavailable(err error) error {

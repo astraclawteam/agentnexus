@@ -83,6 +83,47 @@ func (s *Service) Register(ctx context.Context, tenantRef string, in RegisterInp
 	return stored, nil
 }
 
+// ResolveClient resolves a registered Agent client by its opaque handle. The
+// public certification and revocation operations address a client by
+// agent_client_ref alone, so this is the only way a caller of those operations
+// reaches the (publisher, product) coordinates Certify keys on.
+func (s *Service) ResolveClient(ctx context.Context, tenantRef, agentClientID string) (AgentClient, error) {
+	if s == nil || s.store == nil {
+		return AgentClient{}, ErrRegistryUnavailable
+	}
+	if !canonical(tenantRef) || !canonical(agentClientID) {
+		return AgentClient{}, ErrInvalidInput
+	}
+	client, err := s.store.GetAgentClientByID(ctx, tenantRef, agentClientID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return AgentClient{}, ErrNotFound
+		}
+		return AgentClient{}, errors.Join(ErrRegistryUnavailable, err)
+	}
+	return client, nil
+}
+
+// ResolveCertification resolves one immutable revision by its opaque handle.
+// A caller that addresses a certification UNDER a client uses it to check that
+// the lineage the address asserts is the lineage that was recorded.
+func (s *Service) ResolveCertification(ctx context.Context, tenantRef, certificationID string) (Certification, error) {
+	if s == nil || s.store == nil {
+		return Certification{}, ErrRegistryUnavailable
+	}
+	if !canonical(tenantRef) || !canonical(certificationID) {
+		return Certification{}, ErrInvalidInput
+	}
+	cert, err := s.store.GetCertificationByID(ctx, tenantRef, certificationID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return Certification{}, ErrNotFound
+		}
+		return Certification{}, errors.Join(ErrRegistryUnavailable, err)
+	}
+	return cert, nil
+}
+
 // CertifyInput binds one immutable certification revision.
 type CertifyInput struct {
 	Publisher                 string
@@ -167,20 +208,23 @@ func (s *Service) Certify(ctx context.Context, tenantRef string, in CertifyInput
 
 // Revoke appends a revocation status change to a certification. Revocation is
 // append-only: the immutable revision and every prior status row are untouched.
-func (s *Service) Revoke(ctx context.Context, tenantRef, certificationID, reason string) error {
+// It returns the appended row so a caller reports the time the revocation was
+// RECORDED rather than a timestamp of its own.
+func (s *Service) Revoke(ctx context.Context, tenantRef, certificationID, reason string) (StatusChange, error) {
 	if s == nil || s.store == nil {
-		return ErrRegistryUnavailable
+		return StatusChange{}, ErrRegistryUnavailable
 	}
 	if !canonical(tenantRef) || !canonical(certificationID) || hasControlBytes(reason) {
-		return ErrInvalidInput
+		return StatusChange{}, ErrInvalidInput
 	}
-	if _, err := s.store.AppendStatus(ctx, tenantRef, certificationID, StatusRevoked, reason, s.newID("cst_"), s.now()); err != nil {
+	change, err := s.store.AppendStatus(ctx, tenantRef, certificationID, StatusRevoked, reason, s.newID("cst_"), s.now())
+	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return ErrNotFound
+			return StatusChange{}, ErrNotFound
 		}
-		return errors.Join(ErrRegistryUnavailable, err)
+		return StatusChange{}, errors.Join(ErrRegistryUnavailable, err)
 	}
-	return nil
+	return change, nil
 }
 
 // Release is the presented, credential-verified release under assessment. In

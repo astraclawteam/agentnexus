@@ -64,6 +64,12 @@ func trustProtectedPath(path string) bool {
 	if strings.HasPrefix(path, "/v1/runtime/actions/") || strings.HasPrefix(path, "/v1/runtime/receipts/") {
 		return true
 	}
+	// The GA Task 0C Agent-client trust registry. Every operation derives its
+	// tenant from a verified first-party service credential and declares no
+	// tenant parameter, so it MUST resolve a trusted context at ingress.
+	if agentClientsProtectedPath(path) {
+		return true
+	}
 	return strings.HasPrefix(path, "/v1/approvals/")
 }
 

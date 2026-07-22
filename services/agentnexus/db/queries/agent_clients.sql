@@ -11,6 +11,11 @@ SELECT tenant_ref, id, publisher, product, origin, enterprise_registered, create
 FROM agent_clients
 WHERE tenant_ref = $1 AND publisher = $2 AND product = $3;
 
+-- name: GetAgentClientByID :one
+SELECT tenant_ref, id, publisher, product, origin, enterprise_registered, created_at
+FROM agent_clients
+WHERE tenant_ref = $1 AND id = $2;
+
 -- name: GetMaxCertificationRevision :one
 SELECT COALESCE(MAX(revision), 0)::BIGINT
 FROM agent_certifications
@@ -38,6 +43,14 @@ SELECT tenant_ref, id, agent_client_id, revision, trust_class, publisher, produc
 FROM agent_certifications
 WHERE tenant_ref = $1 AND publisher = $2 AND product = $3
 ORDER BY revision DESC;
+
+-- name: GetAgentCertificationByID :one
+SELECT tenant_ref, id, agent_client_id, revision, trust_class, publisher, product, origin,
+    version_min, version_max, signing_key_id, signing_key_algorithm, signing_key_public_key,
+    release_manifest_digest, capability_ceiling, signed_build_manifest, enterprise_registered,
+    certified_decision_provider, issued_at, expires_at, created_at
+FROM agent_certifications
+WHERE tenant_ref = $1 AND id = $2;
 
 -- name: LockAgentCertification :one
 SELECT id

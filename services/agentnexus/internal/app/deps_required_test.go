@@ -29,6 +29,10 @@ func TestBrowserAuthDepsMissingRequiredNamesEveryUnwiredSurface(t *testing.T) {
 		"Sessions", "Upstream", "Identities", "Profiles", "Audit", "AuditEvidence",
 		"AuthorizeRateLimiter", "AuthorizeSourceResolver", "AuthorizationPolicy",
 		"OrgVersions", "TicketActors", "StepGrants", "Grants", "Actions", "OrgEvents",
+		// AgentTrust is the same shape: optional to newBrowserAuthHandler, and
+		// required of the shipped binary. Three PUBLISHED operations answered 404
+		// for as long as nothing constructed it.
+		"AgentTrust",
 	} {
 		if !contains(missing, want) {
 			t.Errorf("an empty dependency set must report %s missing, got %v", want, missing)

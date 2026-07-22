@@ -128,7 +128,7 @@ func TestPostgresTrustRegistryLifecycle(t *testing.T) {
 	}
 
 	// Revoked release fails before any grant is issued.
-	if err := svc.Revoke(ctx, tenant, cert.ID, "compromise"); err != nil {
+	if _, err := svc.Revoke(ctx, tenant, cert.ID, "compromise"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	revoked, err := svc.Assess(ctx, tenant, AssessRequest{Release: release, Capability: "knowledge.create", SideEffect: true})
@@ -166,7 +166,7 @@ func TestPostgresConcurrentRevocationChainsLinearly(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = svc.Revoke(ctx, tenant, cert.ID, "concurrent")
+			_, errs[i] = svc.Revoke(ctx, tenant, cert.ID, "concurrent")
 		}(i)
 	}
 	wg.Wait()
@@ -263,7 +263,7 @@ func TestPostgresConcurrentSupersedeVsRevokeChainsLinearly(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	var revokeErr, certifyErr error
-	go func() { defer wg.Done(); revokeErr = svc.Revoke(ctx, tenant, cert1.ID, "concurrent") }()
+	go func() { defer wg.Done(); _, revokeErr = svc.Revoke(ctx, tenant, cert1.ID, "concurrent") }()
 	go func() {
 		defer wg.Done()
 		_, certifyErr = svc.Certify(ctx, tenant, CertifyInput{

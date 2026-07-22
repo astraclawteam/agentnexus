@@ -11,6 +11,49 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getAgentCertificationByID = `-- name: GetAgentCertificationByID :one
+SELECT tenant_ref, id, agent_client_id, revision, trust_class, publisher, product, origin,
+    version_min, version_max, signing_key_id, signing_key_algorithm, signing_key_public_key,
+    release_manifest_digest, capability_ceiling, signed_build_manifest, enterprise_registered,
+    certified_decision_provider, issued_at, expires_at, created_at
+FROM agent_certifications
+WHERE tenant_ref = $1 AND id = $2
+`
+
+type GetAgentCertificationByIDParams struct {
+	TenantRef string
+	ID        string
+}
+
+func (q *Queries) GetAgentCertificationByID(ctx context.Context, arg GetAgentCertificationByIDParams) (AgentCertification, error) {
+	row := q.db.QueryRow(ctx, getAgentCertificationByID, arg.TenantRef, arg.ID)
+	var i AgentCertification
+	err := row.Scan(
+		&i.TenantRef,
+		&i.ID,
+		&i.AgentClientID,
+		&i.Revision,
+		&i.TrustClass,
+		&i.Publisher,
+		&i.Product,
+		&i.Origin,
+		&i.VersionMin,
+		&i.VersionMax,
+		&i.SigningKeyID,
+		&i.SigningKeyAlgorithm,
+		&i.SigningKeyPublicKey,
+		&i.ReleaseManifestDigest,
+		&i.CapabilityCeiling,
+		&i.SignedBuildManifest,
+		&i.EnterpriseRegistered,
+		&i.CertifiedDecisionProvider,
+		&i.IssuedAt,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getAgentClient = `-- name: GetAgentClient :one
 SELECT tenant_ref, id, publisher, product, origin, enterprise_registered, created_at
 FROM agent_clients
@@ -25,6 +68,32 @@ type GetAgentClientParams struct {
 
 func (q *Queries) GetAgentClient(ctx context.Context, arg GetAgentClientParams) (AgentClient, error) {
 	row := q.db.QueryRow(ctx, getAgentClient, arg.TenantRef, arg.Publisher, arg.Product)
+	var i AgentClient
+	err := row.Scan(
+		&i.TenantRef,
+		&i.ID,
+		&i.Publisher,
+		&i.Product,
+		&i.Origin,
+		&i.EnterpriseRegistered,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getAgentClientByID = `-- name: GetAgentClientByID :one
+SELECT tenant_ref, id, publisher, product, origin, enterprise_registered, created_at
+FROM agent_clients
+WHERE tenant_ref = $1 AND id = $2
+`
+
+type GetAgentClientByIDParams struct {
+	TenantRef string
+	ID        string
+}
+
+func (q *Queries) GetAgentClientByID(ctx context.Context, arg GetAgentClientByIDParams) (AgentClient, error) {
+	row := q.db.QueryRow(ctx, getAgentClientByID, arg.TenantRef, arg.ID)
 	var i AgentClient
 	err := row.Scan(
 		&i.TenantRef,

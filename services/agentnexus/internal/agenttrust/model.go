@@ -174,6 +174,15 @@ func hasControlBytes(s string) bool {
 type Store interface {
 	CreateAgentClient(ctx context.Context, client AgentClient) (AgentClient, error)
 	GetAgentClient(ctx context.Context, tenantRef, publisher, product string) (AgentClient, error)
+	// GetAgentClientByID resolves a client by its opaque handle. The public
+	// certification operations address a client by agent_client_ref and never
+	// repeat publisher/product in the body, so the handle has to be resolvable
+	// on its own. A missing client yields ErrNotFound.
+	GetAgentClientByID(ctx context.Context, tenantRef, agentClientID string) (AgentClient, error)
+	// GetCertificationByID resolves one immutable revision by its opaque handle,
+	// so a caller can check that a certification really belongs to the client it
+	// is being addressed under. A missing revision yields ErrNotFound.
+	GetCertificationByID(ctx context.Context, tenantRef, certificationID string) (Certification, error)
 	// CreateCertification persists an immutable revision atomically: it assigns
 	// the next revision number, writes the initial active status (a fresh hash
 	// chain) and supersedes every prior active revision of the same
@@ -246,6 +255,17 @@ func (s *MemoryStore) GetAgentClient(_ context.Context, tenantRef, publisher, pr
 	return client, nil
 }
 
+func (s *MemoryStore) GetAgentClientByID(_ context.Context, tenantRef, agentClientID string) (AgentClient, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, client := range s.clients {
+		if client.TenantRef == tenantRef && client.ID == agentClientID {
+			return client, nil
+		}
+	}
+	return AgentClient{}, ErrNotFound
+}
+
 func (s *MemoryStore) CreateCertification(_ context.Context, cert Certification, statusID func() string, now time.Time) (Certification, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -299,6 +319,16 @@ func (s *MemoryStore) chained(tenantRef, certificationID string, status Certific
 		Seq:             s.seq,
 		CreatedAt:       now,
 	}
+}
+
+func (s *MemoryStore) GetCertificationByID(_ context.Context, tenantRef, certificationID string) (Certification, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cert, ok := s.certs[certKey(tenantRef, certificationID)]
+	if !ok {
+		return Certification{}, ErrNotFound
+	}
+	return cert, nil
 }
 
 func (s *MemoryStore) ListCertifications(_ context.Context, tenantRef, publisher, product string) ([]Certification, error) {

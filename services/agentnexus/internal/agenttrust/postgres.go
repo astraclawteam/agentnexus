@@ -57,6 +57,34 @@ func (s *PostgresStore) GetAgentClient(ctx context.Context, tenantRef, publisher
 	return agentClientFromRow(row), nil
 }
 
+func (s *PostgresStore) GetAgentClientByID(ctx context.Context, tenantRef, agentClientID string) (AgentClient, error) {
+	if s == nil || s.pool == nil {
+		return AgentClient{}, ErrRegistryUnavailable
+	}
+	row, err := db.New(s.pool).GetAgentClientByID(ctx, db.GetAgentClientByIDParams{TenantRef: tenantRef, ID: agentClientID})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AgentClient{}, ErrNotFound
+		}
+		return AgentClient{}, err
+	}
+	return agentClientFromRow(row), nil
+}
+
+func (s *PostgresStore) GetCertificationByID(ctx context.Context, tenantRef, certificationID string) (Certification, error) {
+	if s == nil || s.pool == nil {
+		return Certification{}, ErrRegistryUnavailable
+	}
+	row, err := db.New(s.pool).GetAgentCertificationByID(ctx, db.GetAgentCertificationByIDParams{TenantRef: tenantRef, ID: certificationID})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Certification{}, ErrNotFound
+		}
+		return Certification{}, err
+	}
+	return certificationFromRow(row)
+}
+
 func (s *PostgresStore) ListCertifications(ctx context.Context, tenantRef, publisher, product string) ([]Certification, error) {
 	if s == nil || s.pool == nil {
 		return nil, ErrRegistryUnavailable

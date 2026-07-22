@@ -15,6 +15,7 @@ import (
 	sdkaudit "github.com/astraclawteam/agentnexus/sdk/go/audit"
 	db "github.com/astraclawteam/agentnexus/services/agentnexus/db/generated"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/actions"
+	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/agenttrust"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/approvaltransport"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/audit"
 	"github.com/astraclawteam/agentnexus/services/agentnexus/internal/browserauth"
@@ -208,7 +209,15 @@ func NewPostgresGatewayRouter(ctx context.Context, pool *pgxpool.Pool, cfg Postg
 		// The sealed organization change feed. It is a read-only projection of
 		// rows the organization-import path already writes, so composing it
 		// adds no writer and no second organization authority.
-		OrgEvents:      NewPostgresOrgEventSource(pool),
+		OrgEvents: NewPostgresOrgEventSource(pool),
+		// The GA Task 0C Agent-client trust registry. Its schema (migration
+		// 000007), queries, service and tests all predate this wiring; only the
+		// HTTP surface and this constructor were missing, which is why three
+		// PUBLISHED operations answered a bare 404. It is deliberately NOT
+		// deployment-gated: the registry needs no configuration beyond the
+		// database the gateway already has, so there is no honest reason for the
+		// shipped binary to leave a contracted surface unregistered.
+		AgentTrust:     agenttrust.NewService(agenttrust.NewPostgresStore(pool)),
 		RequestTimeout: cfg.RequestTimeout,
 	}
 	// Refuse to compose a gateway that is missing a surface it is contracted to

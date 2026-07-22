@@ -140,7 +140,7 @@ func (h *grantHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeGrantError(w, status)
 		return
 	}
-	fields, ok := decodeUniqueGrantObject(w, r)
+	fields, ok := decodeUniqueJSONObject(w, r, maxGrantRequestBytes)
 	if !ok {
 		return
 	}
@@ -182,7 +182,7 @@ func (h *grantHandler) verify(w http.ResponseWriter, r *http.Request) {
 		writeGrantError(w, status)
 		return
 	}
-	fields, ok := decodeUniqueGrantObject(w, r)
+	fields, ok := decodeUniqueJSONObject(w, r, maxGrantRequestBytes)
 	if !ok {
 		return
 	}
@@ -199,30 +199,34 @@ func (h *grantHandler) verify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "step_grant_id": grant.ID, "expires_at": grant.ExpiresAt, "scopes": grant.Scopes})
 }
 
-func decodeUniqueGrantObject(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage, bool) {
+// decodeUniqueJSONObject reads a bounded JSON object into its raw members. It
+// rejects a missing or non-JSON content type, an oversized body, a duplicate
+// member, an explicit null member and any trailing document. Members are
+// returned undecoded so each caller can apply its own exact-shape rules.
+func decodeUniqueJSONObject(w http.ResponseWriter, r *http.Request, maxJSONRequestBytes int64) (map[string]json.RawMessage, bool) {
 	values := r.Header.Values("Content-Type")
 	if len(values) != 1 {
-		writeGrantError(w, http.StatusUnsupportedMediaType)
+		writeRequestFailed(w, http.StatusUnsupportedMediaType)
 		return nil, false
 	}
 	mediaType, _, err := mime.ParseMediaType(values[0])
 	if err != nil || mediaType != "application/json" {
-		writeGrantError(w, http.StatusUnsupportedMediaType)
+		writeRequestFailed(w, http.StatusUnsupportedMediaType)
 		return nil, false
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxGrantRequestBytes+1))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxJSONRequestBytes+1))
 	if err != nil {
-		writeGrantError(w, http.StatusBadRequest)
+		writeRequestFailed(w, http.StatusBadRequest)
 		return nil, false
 	}
-	if len(body) > maxGrantRequestBytes {
-		writeGrantError(w, http.StatusRequestEntityTooLarge)
+	if int64(len(body)) > maxJSONRequestBytes {
+		writeRequestFailed(w, http.StatusRequestEntityTooLarge)
 		return nil, false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	opening, err := decoder.Token()
 	if err != nil || opening != json.Delim('{') {
-		writeGrantError(w, http.StatusBadRequest)
+		writeRequestFailed(w, http.StatusBadRequest)
 		return nil, false
 	}
 	fields := map[string]json.RawMessage{}
@@ -230,27 +234,27 @@ func decodeUniqueGrantObject(w http.ResponseWriter, r *http.Request) (map[string
 		keyToken, err := decoder.Token()
 		key, valid := keyToken.(string)
 		if err != nil || !valid {
-			writeGrantError(w, http.StatusBadRequest)
+			writeRequestFailed(w, http.StatusBadRequest)
 			return nil, false
 		}
 		if _, duplicate := fields[key]; duplicate {
-			writeGrantError(w, http.StatusBadRequest)
+			writeRequestFailed(w, http.StatusBadRequest)
 			return nil, false
 		}
 		var raw json.RawMessage
 		if err := decoder.Decode(&raw); err != nil || string(raw) == "null" {
-			writeGrantError(w, http.StatusBadRequest)
+			writeRequestFailed(w, http.StatusBadRequest)
 			return nil, false
 		}
 		fields[key] = raw
 	}
 	closing, err := decoder.Token()
 	if err != nil || closing != json.Delim('}') {
-		writeGrantError(w, http.StatusBadRequest)
+		writeRequestFailed(w, http.StatusBadRequest)
 		return nil, false
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeGrantError(w, http.StatusBadRequest)
+		writeRequestFailed(w, http.StatusBadRequest)
 		return nil, false
 	}
 	return fields, true
@@ -289,6 +293,11 @@ func writeGrantServiceError(w http.ResponseWriter, err error) {
 	}
 }
 
-func writeGrantError(w http.ResponseWriter, status int) {
+func writeGrantError(w http.ResponseWriter, status int) { writeRequestFailed(w, status) }
+
+// writeRequestFailed is the fixed, opaque failure envelope the
+// credential-protected runtime endpoints return. It never states which check
+// failed: a caller learns only that the request was refused.
+func writeRequestFailed(w http.ResponseWriter, status int) {
 	writeJSON(w, status, map[string]string{"error": "request_failed"})
 }

@@ -246,7 +246,7 @@ func TestServiceRevocationEndsTrust(t *testing.T) {
 	svc, store, _ := fixture(t)
 	_, cert := certifyFirstParty(t, svc, []string{"knowledge.create"})
 
-	if err := svc.Revoke(context.Background(), testTenant, cert.ID, "key compromise"); err != nil {
+	if _, err := svc.Revoke(context.Background(), testTenant, cert.ID, "key compromise"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	got, err := svc.Assess(context.Background(), testTenant, AssessRequest{Release: compliantRelease(), Capability: "knowledge.create", SideEffect: true})
@@ -422,10 +422,10 @@ func TestCertificationRevisionsAreImmutableAndStatusAppendOnly(t *testing.T) {
 	}
 
 	// Revoking twice appends two status rows and never mutates the prior ones.
-	if err := svc.Revoke(context.Background(), testTenant, cert.ID, "first"); err != nil {
+	if _, err := svc.Revoke(context.Background(), testTenant, cert.ID, "first"); err != nil {
 		t.Fatalf("Revoke 1: %v", err)
 	}
-	if err := svc.Revoke(context.Background(), testTenant, cert.ID, "second"); err != nil {
+	if _, err := svc.Revoke(context.Background(), testTenant, cert.ID, "second"); err != nil {
 		t.Fatalf("Revoke 2: %v", err)
 	}
 	changes := store.StatusChanges(testTenant, cert.ID)
@@ -583,7 +583,7 @@ func TestServiceRevokeRejectsControlByteReason(t *testing.T) {
 	_, cert := certifyFirstParty(t, svc, []string{"knowledge.create"})
 	// A reason carrying a control byte (NUL here) is rejected before it can enter
 	// the hash preimage or the persisted log.
-	if err := svc.Revoke(context.Background(), testTenant, cert.ID, "compromised\x00rm -rf"); !errors.Is(err, ErrInvalidInput) {
+	if _, err := svc.Revoke(context.Background(), testTenant, cert.ID, "compromised\x00rm -rf"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("a reason with a control byte must be rejected: %v", err)
 	}
 	// The rejected revoke left the certification active (unchanged).

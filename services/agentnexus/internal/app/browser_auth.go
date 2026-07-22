@@ -265,6 +265,12 @@ type BrowserAuthDependencies struct {
 	// OrgEvents is the sealed organization change feed behind /v1/org-events
 	// (optional; the endpoint registers when provided).
 	OrgEvents OrgEventSource
+	// AgentTrust is the GA Task 0C Agent-client trust registry behind the
+	// /v1/agent-clients subtree (optional here so in-memory tests and reduced
+	// routers still compose; REQUIRED of the production gateway, see
+	// optionalGatewayDeps). Unset, the three published registry operations
+	// answer 404 -- which is exactly the state this dependency was added to end.
+	AgentTrust AgentTrustRegistry
 }
 
 type browserAuthHandler struct {
@@ -285,6 +291,7 @@ type browserAuthHandler struct {
 	evidence                *evidenceHandler
 	actions                 *actionsHandler
 	orgEvents               *orgEventsHandler
+	agentClients            *agentClientsHandler
 }
 
 func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, error) {
@@ -363,6 +370,16 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
+	var agentClients *agentClientsHandler
+	if deps.AgentTrust != nil {
+		// No logger is injected through BrowserAuthDependencies yet; nil selects
+		// the constructor's explicit slog.Default() fallback through the single
+		// handler-logger seam.
+		agentClients, err = newAgentClientsHandler(deps.Config.EnterpriseID, deps.AgentTrust, deps.Audit, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
 	issuer := deps.TokenIssuer
 	if issuer == nil {
 		var err error
@@ -371,7 +388,7 @@ func newBrowserAuthHandler(deps BrowserAuthDependencies) (*browserAuthHandler, e
 			return nil, err
 		}
 	}
-	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, trustResolver: trustResolver, authorization: authorization, approval: approvalRoutes, grants: grants, auditEvidence: auditEvidence, evidence: evidenceRuntime, actions: actionsRuntime, orgEvents: orgEventFeed}, nil
+	return &browserAuthHandler{config: deps.Config, sessions: deps.Sessions, upstream: deps.Upstream, identities: deps.Identities, profiles: deps.Profiles, audit: deps.Audit, issuer: issuer, authorizeRateLimiter: deps.AuthorizeRateLimiter, authorizeSourceResolver: deps.AuthorizeSourceResolver, trustResolver: trustResolver, authorization: authorization, approval: approvalRoutes, grants: grants, auditEvidence: auditEvidence, evidence: evidenceRuntime, actions: actionsRuntime, orgEvents: orgEventFeed, agentClients: agentClients}, nil
 }
 
 func browserRequestTimeout(value time.Duration) (time.Duration, error) {
@@ -410,6 +427,9 @@ func (h *browserAuthHandler) register(mux *http.ServeMux) {
 	}
 	if h.orgEvents != nil {
 		h.orgEvents.register(mux)
+	}
+	if h.agentClients != nil {
+		h.agentClients.register(mux)
 	}
 }
 
