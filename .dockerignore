@@ -1,0 +1,13 @@
+# The service images build from the repository root because the service module
+# `replace`s ../../sdk/go/*. Only those two module trees belong in the context;
+# an allowlist keeps it that way as the repository grows, and in particular
+# keeps the JavaScript workspace, the docs tree and any agent worktree checked
+# out under .claude/ from being uploaded to the daemon on every build.
+*
+!sdk/go/
+!services/agentnexus/
+
+# Re-exclude what may appear inside an allowed tree.
+**/node_modules/
+**/*.exe
+**/*.test

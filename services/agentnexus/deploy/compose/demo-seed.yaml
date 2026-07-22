@@ -22,17 +22,23 @@ services:
   # volume and exits. Idempotent: a re-run reuses every generated credential and
   # upserts every row.
   demo-seed:
-    image: golang:1.25-alpine
-    working_dir: /workspace/services/agentnexus
-    command: ["go", "run", "./cmd/demo-seed"]
+    image: agentnexus/demo-seed:dev
+    build:
+      # Same image build as the profile's services; SERVICE picks the cmd. This
+      # one-shot is on the critical path of `up`, so building it ahead of time
+      # matters here for the same reason it does for them.
+      context: ../../../..
+      dockerfile: services/agentnexus/deploy/docker/Dockerfile
+      args:
+        SERVICE: demo-seed
+    # Root so it can create the 0600 credential files in the volume below; the
+    # image runs as an unprivileged user by default. Dev-only.
+    user: "0:0"
     environment:
       AGENTNEXUS_POSTGRES_DSN: "${AGENTNEXUS_POSTGRES_DSN:-postgres://agentnexus:agentnexus@postgres:5432/agentnexus?sslmode=disable}"
       AGENTNEXUS_DEMO_TENANT: "${AGENTNEXUS_OIDC_ENTERPRISE_ID:-agentnexus-dev}"
       AGENTNEXUS_DEMO_OUTPUT_DIR: /run/agentnexus/demo
     volumes:
-      - ../../../..:/workspace
-      - agentnexus-private-dev-gomodcache:/go/pkg/mod
-      - agentnexus-private-dev-gobuildcache:/root/.cache/go-build
       - agentnexus-demo-seed:/run/agentnexus/demo
     depends_on:
       postgres:
@@ -64,6 +70,10 @@ services:
   # actually left. With these set, Actions, Signer and Resolver are all
   # constructed from Postgres and the guard names only what no build supplies.
   connector-worker:
+    # Root so it can read the 0600 receipt signing key demo-seed wrote. The
+    # base profile mounts no credentials, so the worker runs unprivileged
+    # there; this overlay is what introduces the need. Dev-only.
+    user: "0:0"
     environment:
       AGENTNEXUS_WORKER_PRINCIPAL_REF: demo-finance-controller
       AGENTNEXUS_WORKER_AGENT_CLIENT_REF: demo-connector-worker

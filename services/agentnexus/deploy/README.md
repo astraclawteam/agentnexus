@@ -4,9 +4,11 @@ This directory contains open-core development profiles only. Production private-
 
 ## Profiles
 
-- `compose/compose.saas-dev.yaml` runs the open-core services with local PostgreSQL, NATS, and object storage using SaaS-style defaults.
+- `compose/compose.saas-dev.yaml` runs the open-core services with local PostgreSQL and NATS using SaaS-style defaults.
 - `compose/compose.private-dev.yaml` runs the same open-core services with private-dev defaults.
 - `compose/browser-auth-dev.yaml` is included by both profiles. It provisions the browser-authentication credentials, runs a development enterprise IdP, and applies the database schema, which is what allows gateway-api to serve its real surface rather than the minimal router.
+- `compose/demo-seed.yaml` is an overlay for the private-dev profile. It seeds the demo tenant and turns on the evidence runtime configuration that depends on those rows.
+- `docker/Dockerfile` is the shared multi-stage build for every service binary. `SERVICE` selects the `cmd` to build; the build context is the repository root because the service module `replace`s `../../sdk/go/*`.
 - `helm/agentnexus` is a local/dev Helm chart skeleton for validating open-core workload shape.
 
 Both compose profiles set `AGENTNEXUS_BROWSER_AUTH_ENABLED=true`. Without it `cmd/gateway-api` registers only `/healthz`, `/readyz` and `/api/console/overview`; the runtime, evidence, approval, action, audit, and org-event surfaces are absent while the container still reports itself healthy. The Helm chart does **not** enable it: a cluster deployment is expected to supply its own IdP, secret mounts, and migration step, and enabling the flag without them fails closed at startup.
@@ -31,6 +33,8 @@ Full browser login additionally needs the issuer host to be reachable from the b
 ## Shared Environment Variables
 
 Every variable the compose profiles export is read by the code. `AGENTNEXUS_PROFILE`, `AGENTNEXUS_PRIVATE_BOUNDARY`, `AGENTNEXUS_POSTGRES_EXTERNAL`, `AGENTNEXUS_NATS_EXTERNAL`, `AGENTNEXUS_OBJECT_STORAGE_EXTERNAL`, `AGENTNEXUS_OBJECT_STORAGE_ENDPOINT`, `AGENTNEXUS_SECRET_PROVIDER`, and `AGENTNEXUS_SECRET_PROVIDER_EXTERNAL` were removed: no Go code read any of them, so setting them — including pointing an `*_EXTERNAL` toggle at a real external service — changed nothing while reading as configuration. Point a profile at external infrastructure by overriding the DSN and URL below.
+
+The MinIO `object-storage` service both profiles ran has been removed for the same reason. Nothing in the module reads `AGENTNEXUS_OBJECT_STORAGE_ENDPOINT` and the module depends on no S3 or MinIO client, so ordering all three services behind it with `service_started` delayed startup against a dependency none of them talk to — and would not have detected a MinIO that came up and then failed to serve. The only content AgentNexus stages is evidence, under `AGENTNEXUS_EVIDENCE_OBJECT_ROOT`, which is a node-local filesystem path. The Helm chart still ships its `objectStorage` dependency and is unchanged.
 
 | Variable | Purpose |
 | --- | --- |
@@ -64,23 +68,33 @@ HTTP `429` responses at `/oauth2/authorize` are a deployment observation signal:
 
 Validate the private-dev compose profile from `services/agentnexus/deploy/compose`:
 
-```powershell
+```bash
 docker compose -f compose.private-dev.yaml config
 ```
 
-Run the SaaS-dev profile:
+Build the service images. This is a separate step, not something `up` does at container start:
 
-```powershell
-docker compose -f compose.saas-dev.yaml up
+```bash
+docker compose -f compose.private-dev.yaml build
 ```
 
 Run the private-dev profile:
 
-```powershell
-docker compose -f compose.private-dev.yaml up
+```bash
+docker compose -f compose.private-dev.yaml up -d --wait
 ```
 
-The compose profiles use the official Go image and mount the repository so contributors can run the current open-core commands without building production images.
+Run the SaaS-dev profile:
+
+```bash
+docker compose -f compose.saas-dev.yaml up -d --wait
+```
+
+`up` builds any missing image, so the explicit `build` is only worth running when you want the build cost separated from the start cost — which is the point of it being separate. Rebuild after changing Go source with `docker compose -f compose.private-dev.yaml build`, or `up -d --build`.
+
+Compiling used to happen inside each container: the profiles ran `go run ./cmd/<service>` against a bind-mounted repository. That put a module download and a full compile on every container start, with two consequences. A `start_period` had to cover a build whose duration it could not predict — a cold build here measured over eight minutes against a 300s `start_period`, so the gateway reported `unhealthy` while it was still fetching dependencies, and a joint deployment that orders another product behind `gateway-api: service_healthy` stops on a gateway that is fine. And a transient module fetch failure — one truncated HTTP response from the module proxy — left a container exited, indistinguishable from a fatal misconfiguration. Both are properties of building at start, and neither survives building ahead of it.
+
+The service images run as an unprivileged user. Where a dev profile mounts credential material the provisioner wrote `0600` and root-owned, that service overrides `user: "0:0"`, with a comment saying so at the mount. A real deployment supplies secrets with ownership matching the user it runs as instead.
 
 ## Helm
 

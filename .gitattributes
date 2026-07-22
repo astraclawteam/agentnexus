@@ -1,0 +1,5 @@
+# Shell scripts must check out with LF regardless of platform. Windows clients
+# default to core.autocrlf=true, and dev-auth-material/provision.sh is bind
+# mounted straight into an Alpine container, where CRLF makes the interpreter
+# fail on the first line: `set: illegal option -`.
+*.sh text eol=lf
