@@ -797,6 +797,218 @@ func TestWorkerBoundedHostFailureProducesSignedFailedReceipt(t *testing.T) {
 }
 
 // ============================================================================
+// binding resolution: permanent refusal fails the Action, transient one retries
+// ============================================================================
+
+// permanentResolutionErrors are the resolver refusals that can never succeed on
+// redelivery, in the exact shapes PostgresBindingResolver.Resolve returns them
+// (bare, %w-wrapped and errors.Join-ed).
+func permanentResolutionErrors() []struct {
+	name string
+	err  error
+} {
+	return []struct {
+		name string
+		err  error
+	}{
+		{"no binding for the capability", ErrBindingNotFound},
+		{"ambiguous binding", fmt.Errorf("%w: %d bindings declare it", ErrBindingAmbiguous, 2)},
+		{"unmapped resource", errors.Join(ErrBindingUnresolvable, errors.New("the customer binding maps no resource for this capability"))},
+		{"ambiguous credential", errors.Join(ErrBindingUnresolvable, errors.New("the customer binding declares 2 secrets"))},
+		{"digest mismatch", errors.Join(ErrBindingUnresolvable, errors.New("customer binding pins a different product digest"))},
+	}
+}
+
+// TestWorkerPermanentBindingResolutionFailsActionWithoutExecuting pins the
+// permanent half of the split. An unresolvable binding (unknown capability,
+// ambiguous binding, missing/ambiguous credential) is a fact about STORED
+// customer data: redelivery re-derives it forever. So the Action reaches the
+// terminal FAILED status with a signed receipt on the FIRST delivery, and the
+// redelivery is an idempotent dedup — never a nak loop that burns delivery
+// attempts on something that cannot work.
+//
+// It also pins the status CHOICE: failed, not result_unknown. Resolution happens
+// before the MarkExecuting barrier, so the side effect provably never ran and
+// there is nothing to reconcile.
+func TestWorkerPermanentBindingResolutionFailsActionWithoutExecuting(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range permanentResolutionErrors() {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			action, msg := f.dispatch(actionRequest(t, approveCap, "idem-000000000001", 1))
+			f.resolver.err = tc.err
+
+			res, err := f.worker.ProcessDispatch(ctx, msg)
+			if err != nil {
+				t.Fatalf("ProcessDispatch = %v, want a terminal decision (an error here naks the message forever)", err)
+			}
+			if res.Outcome != OutcomeCompleted {
+				t.Fatalf("outcome = %q, want completed with a failed receipt", res.Outcome)
+			}
+			if res.ActionReceipt == nil || res.ActionReceipt.Status != runtime.StatusFailed {
+				t.Fatalf("receipt = %+v, want a signed FAILED receipt", res.ActionReceipt)
+			}
+			if res.ActionReceipt.Signature == nil {
+				t.Fatal("the failed receipt is unsigned")
+			}
+			if res.ActionReceipt.ResultHash != "" {
+				t.Fatalf("result_hash = %q, want empty: nothing executed, so there is no connector output to bind", res.ActionReceipt.ResultHash)
+			}
+			if f.host.runs() != 0 {
+				t.Fatalf("host runs = %d, want 0: an unresolvable binding never reaches the host", f.host.runs())
+			}
+			final := f.getAction(action.ActionRef)
+			if final.Status != actions.StatusFailed {
+				t.Fatalf("action status = %q, want failed (the side effect provably never ran, so it is NOT result_unknown)", final.Status)
+			}
+			if final.ReceiptRef != res.ActionReceipt.ReceiptRef {
+				t.Fatalf("action receipt ref = %q, want the produced receipt %q", final.ReceiptRef, res.ActionReceipt.ReceiptRef)
+			}
+			// No post-state exists, so no postcondition was observed.
+			if len(res.ObservationReceipts) != 0 || len(f.obs.observed()) != 0 {
+				t.Fatalf("observations produced for an action that never executed: %d", len(res.ObservationReceipts))
+			}
+			// The poison loop is gone: the redelivery is a dedup, not another attempt.
+			second, err := f.worker.ProcessDispatch(ctx, msg)
+			if err != nil {
+				t.Fatalf("redelivery ProcessDispatch = %v, want a terminal decision", err)
+			}
+			if second.Outcome != OutcomeDeduped {
+				t.Fatalf("redelivery outcome = %q, want deduped", second.Outcome)
+			}
+			if f.host.runs() != 0 {
+				t.Fatalf("host runs after redelivery = %d, want 0", f.host.runs())
+			}
+		})
+	}
+}
+
+// TestWorkerTransientBindingResolutionNaksAndStillRetries pins the transient
+// half. A store outage, an unwired deployment and an unrecognised error must all
+// still nak: the Action stays dispatched with no barrier and no side effect, and
+// the very next delivery executes it normally. Fixing the poison loop must not
+// turn a database blip into a lost Action.
+func TestWorkerTransientBindingResolutionNaksAndStillRetries(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"store outage", errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")},
+		{"resolver not ready", errors.Join(ErrNotReady, errors.New("binding resolver has no database pool"))},
+		{"no host factory in this deployment", ErrNoHostFactory},
+		{"unrecognised error defaults to transient", errors.New("something the classifier has never been taught")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			action, msg := f.dispatch(actionRequest(t, approveCap, "idem-000000000001", 0))
+			f.resolver.err = tc.err
+
+			if _, err := f.worker.ProcessDispatch(ctx, msg); err == nil {
+				t.Fatal("ProcessDispatch = nil, want a transient error so the delivery naks and is redelivered")
+			}
+			if got := f.getAction(action.ActionRef).Status; got != actions.StatusDispatched {
+				t.Fatalf("action status = %q, want it to stay dispatched (retryable, no barrier, no side effect)", got)
+			}
+			if f.host.runs() != 0 {
+				t.Fatalf("host runs = %d, want 0", f.host.runs())
+			}
+
+			// The outage clears; the redelivery must still execute the Action.
+			f.resolver.err = nil
+			res, err := f.worker.ProcessDispatch(ctx, msg)
+			if err != nil {
+				t.Fatalf("ProcessDispatch after the outage cleared: %v", err)
+			}
+			if res.Outcome != OutcomeCompleted || res.ActionReceipt.Status != runtime.StatusSucceeded {
+				t.Fatalf("res = %+v, want the retry to complete the action successfully", res)
+			}
+			if f.host.runs() != 1 {
+				t.Fatalf("host runs = %d, want exactly 1 (a transient failure must not lose the action)", f.host.runs())
+			}
+			if got := f.getAction(action.ActionRef).Status; got != actions.StatusSucceeded {
+				t.Fatalf("action status = %q, want succeeded", got)
+			}
+		})
+	}
+}
+
+// TestWorkerResolutionOutcomeDrivesAckAndNak drives the split through the real
+// pull loop, where the poison loop actually manifests: a permanent refusal must
+// ACK (the message leaves the consumer), a transient one must NAK (redelivery).
+func TestWorkerResolutionOutcomeDrivesAckAndNak(t *testing.T) {
+	t.Run("permanent refusal acks", func(t *testing.T) {
+		f := newFixture(t)
+		_, msg := f.dispatch(actionRequest(t, approveCap, "idem-000000000001", 0))
+		f.resolver.err = ErrBindingNotFound
+		src := newFakeSource(msg)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _ = f.worker.Run(ctx, src) }()
+		waitFor(t, 2*time.Second, func() bool { return src.ackCount()+src.nakCount() > 0 })
+		cancel()
+
+		if src.ackCount() != 1 || src.nakCount() != 0 {
+			t.Fatalf("acks=%d naks=%d, want the unresolvable dispatch acked (naking it redelivers a message that can never succeed)", src.ackCount(), src.nakCount())
+		}
+	})
+
+	t.Run("transient failure naks", func(t *testing.T) {
+		f := newFixture(t)
+		_, msg := f.dispatch(actionRequest(t, approveCap, "idem-000000000001", 0))
+		f.resolver.err = errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+		src := newFakeSource(msg)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _ = f.worker.Run(ctx, src) }()
+		waitFor(t, 2*time.Second, func() bool { return src.ackCount()+src.nakCount() > 0 })
+		cancel()
+
+		if src.nakCount() != 1 || src.ackCount() != 0 {
+			t.Fatalf("acks=%d naks=%d, want the store outage naked for redelivery", src.ackCount(), src.nakCount())
+		}
+	})
+}
+
+// TestWorkerUnresolvableBindingWithUnsignableReceiptStaysRetryable pins the one
+// place the two failure vocabularies could be confused. When the signer is down,
+// the permanent-resolution path cannot mint the failed receipt — but nothing
+// executed, so it must NAK (retryable, still dispatched), NOT fall through to
+// result_unknown the way a post-execution signing outage does.
+func TestWorkerUnresolvableBindingWithUnsignableReceiptStaysRetryable(t *testing.T) {
+	store := actions.NewMemoryStore()
+	publisher := &recordingPublisher{}
+	svc, err := actions.NewService(store, actions.NewMemoryAuditSink(),
+		actions.WithIDGenerator(sequentialIDs()), actions.WithReceiptVerifier(acceptingVerifier{}), actions.WithPublisher(publisher))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fh := &fakeHost{result: successResult()}
+	resolver := &fakeResolver{binding: ResolvedBinding{Host: fh}, err: ErrBindingNotFound}
+	w, err := New(Config{Actions: svc, Resolver: resolver, Signer: &failingSigner{}, Observations: newFakeObservations(), Identity: workerIdentity()},
+		WithIDGenerator(sequentialIDs()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fixture{t: t, svc: svc, publisher: publisher, principal: requesterPrincipal(), host: fh}
+	action, msg := f.dispatch(actionRequest(t, approveCap, "idem-000000000001", 0))
+
+	if _, err := w.ProcessDispatch(context.Background(), msg); err == nil {
+		t.Fatal("ProcessDispatch = nil, want a transient error: an unsignable receipt must not complete the action")
+	}
+	got := f.getAction(action.ActionRef).Status
+	if got == actions.StatusResultUnknown {
+		t.Fatal("action = result_unknown, but resolution runs BEFORE the executing barrier: nothing ran, so there is nothing to reconcile")
+	}
+	if got != actions.StatusDispatched {
+		t.Fatalf("action status = %q, want it to stay dispatched (retryable)", got)
+	}
+}
+
+// ============================================================================
 // separate signed ObservationReceipt set: exactly the declared needs, deduped
 // ============================================================================
 

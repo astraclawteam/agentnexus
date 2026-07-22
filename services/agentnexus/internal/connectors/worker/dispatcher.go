@@ -90,6 +90,11 @@ func (w *Worker) executeAndComplete(ctx context.Context, principal runtime.Princ
 	// no side effect.
 	rb, err := w.resolver.Resolve(ctx, action.TenantRef, action.Capability)
 	if err != nil {
+		if PermanentResolutionFailure(err) {
+			// Unresolvable from stored customer data: redelivery re-derives the same
+			// refusal forever, so this ends the Action instead of naking.
+			return w.failUnresolvedBinding(ctx, principal, action, msg, err)
+		}
 		return ProcessResult{}, errors.Join(errors.New("binding resolution failed"), err) // transient -> nak
 	}
 	if rb.Host == nil {
@@ -146,6 +151,67 @@ func (w *Worker) executeAndComplete(ctx context.Context, principal runtime.Princ
 		res.ObservationReceipts, res.ObservationErr = w.produceObservations(ctx, principal.TenantRef, action)
 	}
 	return res, nil
+}
+
+// failUnresolvedBinding ends an Action whose private binding can never be
+// resolved, by completing it with a signed FAILED ActionReceipt.
+//
+// WHY `failed` AND NOT `result_unknown`. The two are not interchangeable: the
+// difference is whether the external side effect might have committed.
+// result_unknown is the honest answer when it MIGHT have — a crash past the
+// MarkExecuting barrier, or a host outcome ClassifyHostResult calls uncertain —
+// and it is expensive on purpose, because the only way out is reconciliation.
+// Resolution runs BEFORE the barrier and before any host exists, so no operation
+// was ever assembled, no credential was ever redeemed and the side effect
+// PROVABLY never ran. Calling that unknown would assert doubt the worker does not
+// have and would route a definite outcome into a reconciliation queue that has
+// nothing to reconcile. `failed` is the definite verdict, and a signed receipt
+// for it is honest rather than fabricated — the same reasoning ClassifyHostResult
+// already applies to host.StatusDeniedPolicy, a policy denial evaluated before
+// the connector ran, which it maps to a signed failed receipt.
+//
+// The receipt therefore carries no ResultHash: there is no connector output to
+// bind, and the receipt attests only that technical execution did not happen.
+// `dispatched -> failed` is a declared edge of the frozen state machine, so this
+// never crosses the executing barrier — which would be a lie in the other
+// direction, claiming the operation was picked up.
+//
+// CONSISTENT WITH THE OUTBOX (B2). The outbox answered the same question — what
+// happens to an intent that can never succeed — with bounded attempts, backoff
+// and a dead letter: give up, stay visible, stop starving the queue behind it.
+// The principle carried over is that one, not its mechanism. The outbox counts
+// attempts because an outbox row has no lifecycle of its own to end; an Action
+// does, so the giving-up here is the terminal status, and it is reached on the
+// first delivery precisely because the classification (not an exhausted counter)
+// already proves further attempts are futile. Both leave a durable, queryable
+// record — a dead-lettered row there, a failed Action with a signed receipt here
+// — and neither silently drops or silently cycles.
+//
+// A failure to sign or to durably apply is deliberately still TRANSIENT (nak):
+// nothing ran, so the Action is safe to leave dispatched and retry. It must not
+// fall through to result_unknown, which would manufacture the very uncertainty
+// the pre-barrier position rules out.
+func (w *Worker) failUnresolvedBinding(ctx context.Context, principal runtime.PrincipalContext, action actions.Action, msg actions.DispatchMessage, cause error) (ProcessResult, error) {
+	w.logger.ErrorContext(ctx, "worker.binding_resolution_permanently_failed",
+		slog.String("action_ref", action.ActionRef),
+		slog.String("capability", action.Capability),
+		slog.String("error", cause.Error()))
+
+	receipt, err := w.buildSignedReceipt(ctx, action, runtime.StatusFailed, host.Result{})
+	if err != nil {
+		// Unattestable, but nothing executed: retry rather than complete unsigned.
+		return ProcessResult{}, errors.Join(errors.New("failed receipt production for an unresolvable binding"), err)
+	}
+	// Same inbox dedup key as a genuine completion: a redelivery of this dispatch
+	// applies the result exactly once.
+	if _, err := w.actions.IngestReceipt(ctx, principal, msg.DispatchRef, receipt); err != nil {
+		if errors.Is(err, actions.ErrForbiddenTransition) {
+			return w.reclassify(ctx, principal, action.ActionRef) // a concurrent completion won
+		}
+		return ProcessResult{}, err // transient -> nak; nothing ran, the action stays dispatched
+	}
+	// No observations: a failed execution has no post-state to observe.
+	return ProcessResult{Outcome: OutcomeCompleted, ActionReceipt: &receipt}, nil
 }
 
 // inflightSet tracks action refs currently executing in THIS worker process, so

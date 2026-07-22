@@ -31,6 +31,54 @@ var (
 	ErrNoHostFactory = errors.New("no connector host factory is configured for this deployment")
 )
 
+// PermanentResolutionFailure reports whether a BindingResolver failure can NEVER
+// be resolved by redelivering the SAME dispatch. It is the split the dispatcher
+// needs: a permanent failure must fail the Action, a transient one must nak.
+//
+// PERMANENT is exactly the three refusal sentinels above, and the taxonomy is
+// deliberately not wider than what this resolver can actually produce:
+//
+//   - ErrBindingNotFound — the tenant has no binding for the capability;
+//   - ErrBindingAmbiguous — more than one binding declares it;
+//   - ErrBindingUnresolvable — a binding exists but cannot become runnable
+//     coordinates (unimportable pack, invalid binding document, digest that does
+//     not match the pinned product, undeclared capability, unmapped resource,
+//     absent/ambiguous credential reference).
+//
+// Every one of those is a fact about STORED customer data. Redelivery re-reads
+// the same rows and re-derives the same refusal, so retrying only burns delivery
+// attempts; the fix is a customer or operator changing a binding, and that change
+// arrives as a NEW dispatch, not as a redelivery of this one.
+//
+// TRANSIENT is everything else, and that is the safe default on purpose: a raw
+// store error from the binding query, a context cancellation during shutdown, and
+// any future error this function has not been taught. Mis-calling a transient
+// failure permanent LOSES an Action that would have succeeded; mis-calling a
+// permanent failure transient only costs redeliveries. So an unrecognised error
+// naks.
+//
+// ErrNotReady and ErrNoHostFactory are TRANSIENT even though they are certain to
+// recur: they are deployment facts (no pool, no host wiring — see HostFactory),
+// not facts about the customer's binding. The Action is perfectly executable and
+// the deployment is not; failing it would destroy a valid Action to report an
+// outage. They are the honest-503 class, and they resolve by deploying, without
+// anyone touching the Action.
+//
+// A transient marker WINS when an error somehow carries both, for the same
+// asymmetry: never fabricate a terminal failure while an outage is in evidence.
+func PermanentResolutionFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrNotReady) || errors.Is(err, ErrNoHostFactory) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(err, ErrBindingNotFound) ||
+		errors.Is(err, ErrBindingAmbiguous) ||
+		errors.Is(err, ErrBindingUnresolvable)
+}
+
 // ResolutionRequest is the server-side truth a HostFactory receives for one
 // resolution. Every field is derived from the signed pack and the customer
 // binding; nothing in it came from an Agent.
