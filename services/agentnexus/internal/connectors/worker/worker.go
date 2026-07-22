@@ -36,6 +36,14 @@
 // dependency with no implementation anywhere in this build (it lands with the
 // Task 7 connector-qualification work), so CheckReady still refuses and no
 // deployment can put this worker on the stream.
+//
+// Fail-closed means UNWIRED, not merely NIL. A dependency that is present but
+// structurally unable to do its job reports not-ready too: the Postgres resolver
+// composed without a HostFactory is the case that exists today, and CheckReady
+// asks it (ResolverReadiness) rather than inferring readiness from a non-nil
+// interface. Without that, wiring the ObservationProducer alone would make this
+// worker constructible, ready and consuming — and it would nak every intent it
+// pulled, because a missing host factory is deliberately transient.
 package worker
 
 import (
@@ -211,6 +219,21 @@ func (w *Worker) CheckReady(ctx context.Context) error {
 	}
 	if w.observations == nil {
 		return errors.Join(ErrNotReady, errors.New("no observation producer wired (concrete evidence-backed producer lands in Task 7)"))
+	}
+	// Every seam above is PRESENT; ask the ones that can still be unable to do
+	// their job. The Postgres resolver composed without a HostFactory resolves
+	// every binding correctly and then refuses at ErrNoHostFactory, which is
+	// classified transient on purpose — so a worker that served with it would nak
+	// every intent it pulled, forever. See PostgresBindingResolver.CheckReady for
+	// why the answer belongs here rather than in that classification. Asked after
+	// the nil checks because those are free and name the cheapest fixes first.
+	if probe, ok := w.resolver.(ResolverReadiness); ok {
+		if err := probe.CheckReady(ctx); err != nil {
+			if errors.Is(err, ErrNotReady) {
+				return err
+			}
+			return errors.Join(ErrNotReady, err)
+		}
 	}
 	if w.secrets != nil {
 		if err := w.secrets.CheckReady(ctx); err != nil {

@@ -64,6 +64,13 @@ var (
 // outage. They are the honest-503 class, and they resolve by deploying, without
 // anyone touching the Action.
 //
+// That classification is only safe because such a worker never reaches the
+// stream: a resolver that is structurally unable to produce a runnable operation
+// reports it through PostgresBindingResolver.CheckReady, the readiness gate parks
+// the worker, and no intent is ever pulled to nak. Read that method before
+// reclassifying either sentinel — the two halves are one decision, and moving
+// either one alone reintroduces a poison loop or loses executable Actions.
+//
 // A transient marker WINS when an error somehow carries both, for the same
 // asymmetry: never fabricate a terminal failure while an outage is in evidence.
 func PermanentResolutionFailure(err error) bool {
@@ -152,12 +159,59 @@ type PostgresBindingResolver struct {
 // at the definition rather than at a composition root in another package.
 var _ BindingResolver = (*PostgresBindingResolver)(nil)
 
+// And the optional readiness probe, which is what keeps a resolver that can
+// resolve nothing off the dispatch stream. Stated here because the conformance
+// is load-bearing and satisfied structurally: a renamed or dropped CheckReady
+// would otherwise leave the worker silently "ready" again.
+var _ ResolverReadiness = (*PostgresBindingResolver)(nil)
+
 // NewPostgresBindingResolver builds the resolver. A nil HostFactory is allowed
 // and is the shipped state of this build: resolution then fails closed at
 // ErrNoHostFactory AFTER doing all the real work, so the failure names the
-// missing host wiring rather than masking a bad binding behind it.
+// missing host wiring rather than masking a bad binding behind it. Such a
+// resolver reports NOT-READY (CheckReady), which is what keeps a worker holding
+// it off the dispatch stream instead of naking every intent it pulls.
 func NewPostgresBindingResolver(pool *pgxpool.Pool, hosts HostFactory) *PostgresBindingResolver {
 	return &PostgresBindingResolver{pool: pool, hosts: hosts}
+}
+
+// CheckReady reports whether this resolver could resolve ANY dispatch onto a
+// runnable operation in this deployment. It is the resolver's half of the
+// readiness gate, and it exists to close a poison loop BEFORE one can form.
+//
+// WHY THIS, AND NOT A PERMANENT ErrNoHostFactory. A resolver with no HostFactory
+// does the entire resolution and then refuses, and that refusal is TRANSIENT
+// (see PermanentResolutionFailure) because it is a fact about the DEPLOYMENT,
+// not about the customer's binding: the Action is perfectly executable and the
+// process is not. Calling it permanent would fail durable, valid Actions to
+// report an outage — and would do it for exactly the failure a deployment can
+// fix while the process is up, which is the premise of the readiness gate.
+// Leaving it transient with nothing else changed is the other bad end: the
+// worker naks every intent it pulls, forever, burning delivery attempts on
+// Actions it will never run — the shape failUnresolvedBinding was written to end.
+//
+// The two are reconciled by never pulling the intent. The gate already exists;
+// it simply did not cover this seam, because Worker.CheckReady sees a non-nil
+// BindingResolver and cannot tell a resolver that can run from one that will
+// refuse everything. This probe is that missing coverage, and it makes the nil
+// HostFactory behave exactly like the nil ObservationProducer beside it: an
+// honest 503 with a named reason, a gate that parks instead of crash-looping,
+// and a deployment that starts serving the moment the seam is wired — with no
+// Action ever pulled to nak. No fabricated host, no default factory, no
+// pass-stub: the missing wiring is reported, never invented.
+//
+// It is deliberately STRUCTURAL (is a pool present, is a factory present) and
+// does no I/O. A store outage is a transient RESOLUTION failure that must nak and
+// retry; making it a readiness verdict would park a healthy worker on a blip and
+// stop it consuming for as long as the probe kept failing.
+func (r *PostgresBindingResolver) CheckReady(context.Context) error {
+	switch {
+	case r == nil || r.pool == nil:
+		return errors.Join(ErrNotReady, errors.New("binding resolver has no database pool"))
+	case r.hosts == nil:
+		return errors.Join(ErrNotReady, ErrNoHostFactory)
+	}
+	return nil
 }
 
 // Resolve privately resolves one tenant + capability onto a runnable connector

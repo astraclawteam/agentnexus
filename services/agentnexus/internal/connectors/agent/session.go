@@ -334,6 +334,18 @@ func (s *Session) CheckReady(ctx context.Context) error {
 	if s.journal == nil {
 		return errors.Join(ErrNotReady, errors.New("no edge journal wired (concrete durable edge store lands in Task 7)"))
 	}
+	// Present is not the same as runnable. The shared Postgres resolver composed
+	// without a HostFactory resolves every binding and then refuses transiently,
+	// so an agent serving with it would retry every dispatch forever. The edge
+	// runs INSIDE the customer's network, so it must be at least as strict as the
+	// centre: ask the resolver before accepting work.
+	if probe, ok := s.resolver.(worker.ResolverReadiness); ok {
+		if err := probe.CheckReady(ctx); err != nil {
+			// The resolver's own not-ready sentinel is the worker package's; this
+			// surface answers with the agent's, so both are carried.
+			return errors.Join(ErrNotReady, err)
+		}
+	}
 	return nil
 }
 

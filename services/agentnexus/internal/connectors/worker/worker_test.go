@@ -265,6 +265,19 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	fh := &fakeHost{result: successResult()}
+	resolver := &fakeResolver{binding: ResolvedBinding{Host: fh, Resource: "purchase_orders", Operation: "approve", OperationAction: "write", ConnectorRef: "conn_private_instance_9", CredentialRef: "secretref://vault/acme/erp"}}
+	f := newFixtureOver(t, resolver)
+	f.resolver = resolver
+	f.host = fh
+	return f
+}
+
+// newFixtureOver builds the same fully wired fixture over an arbitrary
+// BindingResolver, so a test can drive the REAL PostgresBindingResolver through
+// the worker instead of a fake that cannot reproduce its readiness contract.
+func newFixtureOver(t *testing.T, resolver BindingResolver) *fixture {
+	t.Helper()
 	signer, key := newReceiptSigner(t)
 	store := actions.NewMemoryStore()
 	publisher := &recordingPublisher{}
@@ -276,8 +289,6 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatalf("actions.NewService: %v", err)
 	}
-	fh := &fakeHost{result: successResult()}
-	resolver := &fakeResolver{binding: ResolvedBinding{Host: fh, Resource: "purchase_orders", Operation: "approve", OperationAction: "write", ConnectorRef: "conn_private_instance_9", CredentialRef: "secretref://vault/acme/erp"}}
 	obs := newFakeObservations()
 	w, err := New(Config{
 		Actions: svc, Resolver: resolver, Signer: signer, Observations: obs, Identity: workerIdentity(),
@@ -285,7 +296,7 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatalf("worker.New: %v", err)
 	}
-	return &fixture{t: t, svc: svc, store: store, signer: signer, resolver: resolver, host: fh, obs: obs, worker: w, publisher: publisher, principal: requesterPrincipal()}
+	return &fixture{t: t, svc: svc, store: store, signer: signer, obs: obs, worker: w, publisher: publisher, principal: requesterPrincipal()}
 }
 
 func workerIdentity() Identity {
@@ -371,6 +382,108 @@ func TestWorkerCheckReadyFailsClosedWithoutConcreteDeps(t *testing.T) {
 	if err := w.CheckReady(context.Background()); err != nil {
 		t.Fatalf("CheckReady with all deps = %v, want ready", err)
 	}
+}
+
+// countingGate wraps a Worker to count the gate's readiness probes, so a test
+// can prove the gate is ALIVE and repeatedly asking rather than infer it from a
+// sleep. Everything else (Run) is the real worker.
+type countingGate struct {
+	*Worker
+	mu     sync.Mutex
+	checks int
+}
+
+func (g *countingGate) CheckReady(ctx context.Context) error {
+	g.mu.Lock()
+	g.checks++
+	g.mu.Unlock()
+	return g.Worker.CheckReady(ctx)
+}
+
+func (g *countingGate) checkCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.checks
+}
+
+// TestWorkerWithoutAHostFactoryNeverPullsADispatch closes the poison loop the
+// nil HostFactory would open, at the level where it actually manifests.
+//
+// A PostgresBindingResolver with no HostFactory does the whole resolution and
+// then refuses at ErrNoHostFactory, which is TRANSIENT on purpose (see
+// PermanentResolutionFailure): a missing host runner is a fact about the
+// DEPLOYMENT, and failing durable, executable Actions to report an outage would
+// be the worse error. The consequence, left alone, is a worker that naks every
+// intent it pulls forever and burns their delivery attempts. The resolution is
+// that such a worker is NOT READY, so it never pulls one.
+//
+// Both directions are asserted against the SAME worker and the SAME dispatch,
+// because the zero below only means something if the setup can consume at all:
+// with a host factory the gate opens and the message is consumed (naked here,
+// because the resolution then fails at the absent database — a genuine transient
+// failure, which must still nak), and without one nothing is touched.
+func TestWorkerWithoutAHostFactoryNeverPullsADispatch(t *testing.T) {
+	pool := undialedPool(t)
+
+	t.Run("no host factory: not ready, and nothing is ever pulled", func(t *testing.T) {
+		f := newFixtureOver(t, NewPostgresBindingResolver(pool, nil))
+		_, msg := f.dispatch(actionRequest(t, approveCap, "idem-000000000001", 0))
+
+		// Errorf, not Fatalf: the behavioural assertion below is the one that
+		// matters, and it must still run (and fail) when this reason regresses.
+		err := f.worker.CheckReady(context.Background())
+		if !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrNoHostFactory) {
+			t.Errorf("CheckReady = %v, want not-ready naming the missing host factory", err)
+		}
+
+		gate := &countingGate{Worker: f.worker}
+		src := newFakeSource(msg)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _ = RunWhenReady(ctx, gate, src, time.Millisecond) }()
+
+		// Wait until the gate has re-asked several times — proving it is alive and
+		// polling rather than merely slow — or until something is consumed, which
+		// is the failure this test exists to catch and must be reported as such.
+		waitFor(t, 2*time.Second, func() bool {
+			return gate.checkCount() >= 5 || src.ackCount()+src.nakCount() > 0
+		})
+		if src.ackCount()+src.nakCount() != 0 {
+			t.Fatalf("acks=%d naks=%d, want 0: a worker that can resolve nothing must never pull a dispatch, or it naks every one of them forever",
+				src.ackCount(), src.nakCount())
+		}
+	})
+
+	t.Run("host factory wired: the gate opens and the dispatch is consumed", func(t *testing.T) {
+		// This factory exists ONLY to flip the readiness bit; it is never invoked,
+		// because resolution fails at the (absent) database first. Nothing here
+		// stands in for a real connector host — a default or stub host runner in
+		// production would execute against real customer systems.
+		f := newFixtureOver(t, NewPostgresBindingResolver(pool, &recordingFactory{}))
+		_, msg := f.dispatch(actionRequest(t, approveCap, "idem-000000000001", 0))
+
+		if err := f.worker.CheckReady(context.Background()); err != nil {
+			t.Fatalf("CheckReady with a host factory = %v, want ready", err)
+		}
+
+		src := newFakeSource(msg)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _ = RunWhenReady(ctx, f.worker, src, time.Millisecond) }()
+
+		// A store outage is transient: the dispatch is naked for redelivery, never
+		// failed. Fixing the poison loop must not convert a recoverable blip into a
+		// lost Action.
+		waitFor(t, 5*time.Second, func() bool { return src.ackCount()+src.nakCount() > 0 })
+		if src.nakCount() == 0 || src.ackCount() != 0 {
+			t.Fatalf("acks=%d naks=%d, want the unreachable store naked for redelivery", src.ackCount(), src.nakCount())
+		}
+		// Naked, not failed: the Action is still there to run when the store comes
+		// back. Resolution ran before the executing barrier, so nothing executed.
+		if got := f.getAction(msg.ActionRef).Status; got != actions.StatusDispatched {
+			t.Fatalf("action status = %q, want it to stay dispatched through a store outage", got)
+		}
+	})
 }
 
 func TestWorkerNewRejectsIncompleteIdentity(t *testing.T) {

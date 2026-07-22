@@ -420,3 +420,43 @@ func TestPostgresResolverWithoutAPoolIsNotReady(t *testing.T) {
 		t.Fatalf("a resolver with no pool must report not-ready, got %v", err)
 	}
 }
+
+// undialedPool returns a REAL *pgxpool.Pool with no database behind it.
+// pgxpool.New parses the DSN and returns the pool without dialing (connections
+// are created on first acquire), so this needs no PostgreSQL: the readiness
+// probe only asks whether a pool is present, and the tests that let a resolution
+// through want it to fail at the store, which this does.
+func undialedPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	// Port 1 refuses immediately, so a resolution that reaches the store fails
+	// fast instead of hanging the test.
+	pool, err := pgxpool.New(context.Background(), "postgres://worker:secret@127.0.0.1:1/agentnexus")
+	if err != nil {
+		t.Fatalf("build an undialed pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// The resolver's half of the readiness gate, and the reason ErrNoHostFactory can
+// stay TRANSIENT: a resolver that would refuse every dispatch says so BEFORE the
+// worker is put on the stream, rather than naking each intent it pulls. Needs no
+// database — the probe is structural on purpose (a store outage is a transient
+// resolution failure, not a readiness verdict).
+func TestPostgresResolverReportsNotReadyWithoutAHostFactory(t *testing.T) {
+	ctx := context.Background()
+	pool := undialedPool(t)
+
+	err := NewPostgresBindingResolver(pool, nil).CheckReady(ctx)
+	if !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrNoHostFactory) {
+		t.Fatalf("CheckReady without a host factory = %v, want not-ready naming ErrNoHostFactory", err)
+	}
+	if err := NewPostgresBindingResolver(nil, &recordingFactory{}).CheckReady(ctx); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("CheckReady without a pool = %v, want not-ready", err)
+	}
+	// The other direction: the probe must not be a permanent block. A deployment
+	// that wires the factory becomes ready without a restart.
+	if err := NewPostgresBindingResolver(pool, &recordingFactory{}).CheckReady(ctx); err != nil {
+		t.Fatalf("CheckReady with a pool and a host factory = %v, want ready", err)
+	}
+}

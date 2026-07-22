@@ -55,6 +55,22 @@ type BindingResolver interface {
 	Resolve(ctx context.Context, tenantRef, capability string) (ResolvedBinding, error)
 }
 
+// ResolverReadiness is the OPTIONAL readiness probe of a BindingResolver: it
+// reports whether the resolver could resolve ANY dispatch onto a runnable
+// operation in this deployment, asked BEFORE an intent is pulled.
+//
+// It is a separate, optional port rather than a method on BindingResolver
+// because Resolve is all the execution paths need, and a resolver that is always
+// runnable has nothing to add. A resolver that can be structurally unrunnable —
+// PostgresBindingResolver, whose HostFactory is a deployment fact it refuses to
+// invent — implements it so the readiness gate keeps the worker off the stream
+// instead of letting it nak every intent it pulls. A resolver that does not
+// implement it is treated as ready, which is the answer the gate gave before
+// this probe existed.
+type ResolverReadiness interface {
+	CheckReady(ctx context.Context) error
+}
+
 // ValidateBinding enforces the exact digest/binding + grant checks of a dispatch
 // intent against the stored Action. A mismatch is ErrBindingRejected — the
 // worker never executes it. It binds capability, parameter hash and the one-use

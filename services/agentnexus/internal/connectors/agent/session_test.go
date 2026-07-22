@@ -1164,6 +1164,22 @@ func TestAgentSignedSelfUpdateRollback(t *testing.T) {
 // 13. CheckReady fails closed without concrete seams
 // ============================================================================
 
+// unrunnableResolver is PRESENT but reports that it can resolve nothing — the
+// shape of the shared Postgres resolver composed without a HostFactory, whose
+// refusal is deliberately TRANSIENT. A session that served with it would retry
+// every dispatch forever, so readiness must fail closed on it exactly as it does
+// on a nil seam. (What the real resolver reports is pinned in the worker
+// package; what is pinned here is that this surface asks it at all.)
+type unrunnableResolver struct{}
+
+func (unrunnableResolver) Resolve(context.Context, string, string) (worker.ResolvedBinding, error) {
+	return worker.ResolvedBinding{}, worker.ErrNoHostFactory
+}
+
+func (unrunnableResolver) CheckReady(context.Context) error {
+	return errors.Join(worker.ErrNotReady, worker.ErrNoHostFactory)
+}
+
 func TestAgentCheckReadyFailsClosedWithoutConcreteSeams(t *testing.T) {
 	signer, key := newReceiptSigner(t)
 	svc, err := actions.NewService(actions.NewMemoryStore(), actions.NewMemoryAuditSink(),
@@ -1185,6 +1201,7 @@ func TestAgentCheckReadyFailsClosedWithoutConcreteSeams(t *testing.T) {
 		{"nil signer", func(c *Config) { c.Signer = nil }},
 		{"nil observations", func(c *Config) { c.Observations = nil }},
 		{"nil journal", func(c *Config) { c.Journal = nil }},
+		{"resolver present but unrunnable", func(c *Config) { c.Resolver = unrunnableResolver{} }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -104,6 +104,14 @@ func main() {
 	// consumed without that seam would fail every intent it pulled and burn the
 	// delivery attempts of durable Actions.
 	//
+	// Wiring that producer is no longer enough to make this process consume, and
+	// deliberately so. The composed BindingResolver has no HostFactory, and a
+	// resolver that cannot produce a runnable operation now reports NOT-READY, so
+	// the gate below parks the worker and /readyz answers 503 naming the missing
+	// host wiring. Before that, this construction gap was the ONLY thing keeping
+	// the worker off the stream, and removing it would have started a nak loop
+	// against durable Actions on the very next deploy.
+	//
 	// Name the gap before trying to construct through it. worker.New stops at
 	// the FIRST problem it meets (a nil action plane), so on its own it tells an
 	// operator to go wire one thing, and the next restart tells them the next

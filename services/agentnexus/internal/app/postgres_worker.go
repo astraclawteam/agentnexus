@@ -63,10 +63,18 @@ type PostgresWorkerConfig struct {
 // That last point is load-bearing and must not be read past. ErrNoHostFactory is
 // classified TRANSIENT (worker.PermanentResolutionFailure), so a worker that
 // reached the stream with this resolver would nak every intent it pulled and
-// burn the delivery attempts of durable Actions. What stops that today is that
-// CheckReady still refuses on the nil ObservationProducer, which keeps the
-// worker off the stream entirely. Whoever wires the ObservationProducer removes
-// that protection: a HostFactory MUST be supplied in the same change.
+// burn the delivery attempts of durable Actions. What stops that is the
+// readiness gate, and it now stops it FOR THIS REASON: the resolver itself
+// reports not-ready while its HostFactory is nil
+// (worker.PostgresBindingResolver.CheckReady), so the worker parks off the
+// stream and /readyz answers 503 naming the missing host wiring. It used to be
+// stopped only as a side effect of the nil ObservationProducer, which meant
+// wiring that one seam would silently have started the nak loop.
+//
+// So a HostFactory is still required before this deployment can execute anything
+// — that has not changed and must not be worked around with a default or stub
+// factory, which would run against real customer systems. What changed is that
+// forgetting it is now an honest 503 instead of a poison loop.
 //
 // ObservationProducer is not composed here because it has no implementation
 // anywhere in this build (Task 7). No stub, no pass-through, no fabricated
