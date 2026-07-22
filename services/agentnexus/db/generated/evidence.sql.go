@@ -18,7 +18,7 @@ SET source_version = source_version + 1,
 WHERE tenant_ref = $1 AND data_class = $2
 RETURNING tenant_ref, id, data_class, source_ref, source_version, access_capability,
     source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds,
-    deleted_at, created_at, updated_at
+    deleted_at, created_at, updated_at, authority_tier, freshness_bound_seconds
 `
 
 type BumpEvidenceSourceVersionParams struct {
@@ -44,6 +44,8 @@ func (q *Queries) BumpEvidenceSourceVersion(ctx context.Context, arg BumpEvidenc
 		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuthorityTier,
+		&i.FreshnessBoundSeconds,
 	)
 	return i, err
 }
@@ -99,7 +101,7 @@ func (q *Queries) GetEvidenceHandle(ctx context.Context, arg GetEvidenceHandlePa
 const getEvidenceSourceBinding = `-- name: GetEvidenceSourceBinding :one
 SELECT tenant_ref, id, data_class, source_ref, source_version, access_capability,
     source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds,
-    deleted_at, created_at, updated_at
+    deleted_at, created_at, updated_at, authority_tier, freshness_bound_seconds
 FROM evidence_source_bindings
 WHERE tenant_ref = $1 AND data_class = $2
 `
@@ -127,6 +129,8 @@ func (q *Queries) GetEvidenceSourceBinding(ctx context.Context, arg GetEvidenceS
 		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuthorityTier,
+		&i.FreshnessBoundSeconds,
 	)
 	return i, err
 }
@@ -387,7 +391,7 @@ SET deleted_at = now(),
 WHERE tenant_ref = $1 AND data_class = $2
 RETURNING tenant_ref, id, data_class, source_ref, source_version, access_capability,
     source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds,
-    deleted_at, created_at, updated_at
+    deleted_at, created_at, updated_at, authority_tier, freshness_bound_seconds
 `
 
 type MarkEvidenceSourceDeletedParams struct {
@@ -413,6 +417,8 @@ func (q *Queries) MarkEvidenceSourceDeleted(ctx context.Context, arg MarkEvidenc
 		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuthorityTier,
+		&i.FreshnessBoundSeconds,
 	)
 	return i, err
 }
@@ -420,8 +426,9 @@ func (q *Queries) MarkEvidenceSourceDeleted(ctx context.Context, arg MarkEvidenc
 const upsertEvidenceSourceBinding = `-- name: UpsertEvidenceSourceBinding :one
 INSERT INTO evidence_source_bindings (
     tenant_ref, id, data_class, source_ref, source_version, access_capability,
-    source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds,
+    authority_tier, freshness_bound_seconds
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (tenant_ref, data_class) DO UPDATE
     SET source_ref = EXCLUDED.source_ref,
         source_version = GREATEST(
@@ -434,25 +441,29 @@ ON CONFLICT (tenant_ref, data_class) DO UPDATE
         resource_id = EXCLUDED.resource_id,
         cached_read_allowed = EXCLUDED.cached_read_allowed,
         retention_ttl_seconds = EXCLUDED.retention_ttl_seconds,
+        authority_tier = EXCLUDED.authority_tier,
+        freshness_bound_seconds = EXCLUDED.freshness_bound_seconds,
         deleted_at = NULL,
         updated_at = now()
 RETURNING tenant_ref, id, data_class, source_ref, source_version, access_capability,
     source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds,
-    deleted_at, created_at, updated_at
+    deleted_at, created_at, updated_at, authority_tier, freshness_bound_seconds
 `
 
 type UpsertEvidenceSourceBindingParams struct {
-	TenantRef           string
-	ID                  string
-	DataClass           string
-	SourceRef           string
-	SourceVersion       int64
-	AccessCapability    string
-	SourceCapability    string
-	ResourceType        string
-	ResourceID          string
-	CachedReadAllowed   bool
-	RetentionTtlSeconds int64
+	TenantRef             string
+	ID                    string
+	DataClass             string
+	SourceRef             string
+	SourceVersion         int64
+	AccessCapability      string
+	SourceCapability      string
+	ResourceType          string
+	ResourceID            string
+	CachedReadAllowed     bool
+	RetentionTtlSeconds   int64
+	AuthorityTier         string
+	FreshnessBoundSeconds int64
 }
 
 // source_version is MONOTONIC: an upsert can never lower it, and reviving a
@@ -471,6 +482,8 @@ func (q *Queries) UpsertEvidenceSourceBinding(ctx context.Context, arg UpsertEvi
 		arg.ResourceID,
 		arg.CachedReadAllowed,
 		arg.RetentionTtlSeconds,
+		arg.AuthorityTier,
+		arg.FreshnessBoundSeconds,
 	)
 	var i EvidenceSourceBinding
 	err := row.Scan(
@@ -488,6 +501,8 @@ func (q *Queries) UpsertEvidenceSourceBinding(ctx context.Context, arg UpsertEvi
 		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuthorityTier,
+		&i.FreshnessBoundSeconds,
 	)
 	return i, err
 }

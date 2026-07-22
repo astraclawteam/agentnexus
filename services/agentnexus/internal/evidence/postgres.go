@@ -36,18 +36,14 @@ func (s *PostgresStore) UpsertSourceBinding(ctx context.Context, binding SourceB
 	if s == nil || s.pool == nil {
 		return SourceBinding{}, ErrUnavailable
 	}
-	// GA Task 0D amendment: the observation-authority declaration
-	// (AuthorityTier/FreshnessBound) has no durable column yet - migration
-	// slots 000009-000011 are reserved for Tasks 0E/0F/0G, so extending
-	// evidence_source_bindings is deferred to the task that next opens a
-	// slot. Persisting the row while silently DROPPING the declaration would
-	// be a silent degradation (reads would later fail closed with no hint of
-	// why), so the store refuses EXPLICITLY: authority-declared bindings are
-	// memory-registry-only until the reserved-slot migration lands.
-	if binding.AuthorityTier != "" || binding.FreshnessBound != 0 {
-		return SourceBinding{}, errors.Join(ErrUnavailable, errors.New(
-			"observation-authority declarations cannot be persisted yet: migration slots 000009-000011 are reserved for Tasks 0E/0F/0G and evidence_source_bindings has no authority columns; verification-purpose reads over this store fail closed by design"))
-	}
+	// The observation-authority declaration (AuthorityTier/FreshnessBound) is
+	// persisted as of migration 000015. Until then this store REFUSED such a
+	// binding outright rather than persist the row and silently drop the
+	// declaration - a silent degradation whose only symptom would have been
+	// verification reads failing closed with no hint of why. The refusal is
+	// gone because the columns exist, not because the concern lapsed:
+	// sourceBindingFromRow below reads both back, so a declaration that goes in
+	// comes out, and the round trip is what makes dropping it detectable.
 	row, err := db.New(s.pool).UpsertEvidenceSourceBinding(ctx, db.UpsertEvidenceSourceBindingParams{
 		TenantRef:           binding.TenantRef,
 		ID:                  binding.ID,
@@ -60,6 +56,12 @@ func (s *PostgresStore) UpsertSourceBinding(ctx context.Context, binding SourceB
 		ResourceID:          binding.ResourceID,
 		CachedReadAllowed:   binding.CachedReadAllowed,
 		RetentionTtlSeconds: int64(binding.RetentionTTL / time.Second),
+		AuthorityTier:       binding.AuthorityTier,
+		// Seconds is the durable unit, matching retention_ttl_seconds. The
+		// schema's all-or-nothing CHECK is stated in whole seconds, so a
+		// sub-second bound would truncate to 0 and be rejected as a tier
+		// without a bound rather than stored as an unbounded observation.
+		FreshnessBoundSeconds: int64(binding.FreshnessBound / time.Second),
 	})
 	if err != nil {
 		return SourceBinding{}, err
@@ -237,6 +239,8 @@ func sourceBindingFromRow(r db.EvidenceSourceBinding) SourceBinding {
 		ResourceID:        r.ResourceID,
 		CachedReadAllowed: r.CachedReadAllowed,
 		RetentionTTL:      time.Duration(r.RetentionTtlSeconds) * time.Second,
+		AuthorityTier:     r.AuthorityTier,
+		FreshnessBound:    time.Duration(r.FreshnessBoundSeconds) * time.Second,
 		Deleted:           r.DeletedAt.Valid,
 		CreatedAt:         r.CreatedAt.Time,
 		UpdatedAt:         r.UpdatedAt.Time,

@@ -15,8 +15,8 @@ import (
 
 // Integration tests are DSN-gated: they run only when a PostgreSQL DSN is
 // provided and skip cleanly otherwise (no PostgreSQL on CI developer hosts).
-// Migration 000008 is self-contained (its tables reference only each other),
-// so the fixture applies it directly.
+// The evidence migrations are self-contained (their tables reference only each
+// other), so the fixture applies them directly; see evidenceMigrations.
 //
 // WARNING: the target database is mutated (the fixture drops and recreates
 // the evidence_* tables). Point AGENTNEXUS_E2E_POSTGRES_DSN at a disposable
@@ -46,10 +46,20 @@ func integrationPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// gooseBlock extracts the Up or Down statement block from the goose migration.
-func gooseBlock(t *testing.T, direction string) string {
+// evidenceMigrations are the migrations this fixture applies, in order. 000008
+// creates the evidence_* tables; 000015 adds the observation-authority columns
+// its verification half needs. They are listed rather than globbed so a new
+// migration elsewhere in the tree cannot silently change what these tests run
+// against.
+var evidenceMigrations = []string{
+	"000008_evidence_handles.sql",
+	"000015_evidence_source_binding_authority.sql",
+}
+
+// gooseBlock extracts the Up or Down statement block from one goose migration.
+func gooseBlock(t *testing.T, file, direction string) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "db", "migrations", "000008_evidence_handles.sql"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "db", "migrations", file))
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
 	}
@@ -57,28 +67,37 @@ func gooseBlock(t *testing.T, direction string) string {
 	marker := "-- +goose " + direction
 	start := strings.Index(text, marker)
 	if start < 0 {
-		t.Fatalf("migration is missing %q", marker)
+		t.Fatalf("migration %s is missing %q", file, marker)
 	}
 	segment := text[start:]
 	begin := strings.Index(segment, "-- +goose StatementBegin")
 	end := strings.Index(segment, "-- +goose StatementEnd")
 	if begin < 0 || end < 0 || end < begin {
-		t.Fatalf("migration %s block is malformed", direction)
+		t.Fatalf("migration %s %s block is malformed", file, direction)
 	}
 	return segment[begin+len("-- +goose StatementBegin") : end]
 }
 
+// applyMigration brings the schema up in migration order and tears it down in
+// reverse. Order matters in both directions: 000015 ALTERs a table 000008
+// creates, so applying it first errors and dropping 000008 first would leave
+// 000015's Down with nothing to drop.
 func applyMigration(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, gooseBlock(t, "Down")); err != nil {
-		t.Fatalf("migration down (pre-clean): %v", err)
+	down := func(ctx context.Context) {
+		for i := len(evidenceMigrations) - 1; i >= 0; i-- {
+			_, _ = pool.Exec(ctx, gooseBlock(t, evidenceMigrations[i], "Down"))
+		}
 	}
-	if _, err := pool.Exec(ctx, gooseBlock(t, "Up")); err != nil {
-		t.Fatalf("migration up: %v", err)
+	down(ctx) // pre-clean
+	for _, file := range evidenceMigrations {
+		if _, err := pool.Exec(ctx, gooseBlock(t, file, "Up")); err != nil {
+			t.Fatalf("migration %s up: %v", file, err)
+		}
 	}
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), gooseBlock(t, "Down"))
+		down(context.Background())
 		pool.Close()
 	})
 }
@@ -283,5 +302,101 @@ func TestEvidencePostgresRetentionSweepKeepsAuditableMetadata(t *testing.T) {
 	// Idempotent second sweep.
 	if removed, err := f.svc.SweepRetention(ctx, testTenant); err != nil || removed != 0 {
 		t.Fatalf("second sweep = (%d, %v), want 0", removed, err)
+	}
+}
+
+// TestPostgresSourceBindingRoundTripsAuthorityDeclaration is the real proof for
+// migration 000015. Before it, UpsertSourceBinding REFUSED any binding carrying
+// an authority declaration (there were no columns for it) and
+// sourceBindingFromRow could never populate one, so over PostgreSQL every
+// verification-purpose read denied at observation_authority_undeclared no matter
+// what else was wired.
+//
+// The assertion that matters is the ROUND TRIP through real SQL. Dropping either
+// column from the INSERT, the RETURNING list or sourceBindingFromRow leaves the
+// upsert succeeding and the read-back silently undeclared - exactly the silent
+// degradation the old refusal existed to prevent - and only reading the value
+// back out of the database catches it.
+func TestPostgresSourceBindingRoundTripsAuthorityDeclaration(t *testing.T) {
+	f := newPostgresFixture(t)
+	ctx := context.Background()
+
+	stored, err := f.svc.RegisterSourceBinding(ctx, SourceBinding{
+		TenantRef: testTenant, DataClass: connectorClass, SourceRef: "internal-source",
+		SourceVersion: 1, AccessCapability: "knowledge.suggest",
+		ResourceType: "knowledge", ResourceID: "erp-po-registry",
+		AuthorityTier: AuthorityTierSystemOfRecord, FreshnessBound: 90 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("RegisterSourceBinding with an authority declaration: %v", err)
+	}
+	if stored.AuthorityTier != AuthorityTierSystemOfRecord || stored.FreshnessBound != 90*time.Second {
+		t.Fatalf("upsert returned (%q, %v), want (%q, 1m30s)",
+			stored.AuthorityTier, stored.FreshnessBound, AuthorityTierSystemOfRecord)
+	}
+
+	// Re-read through a SEPARATE query. The upsert's own RETURNING could be
+	// correct while the SELECT list omits the columns.
+	got, err := f.store.GetSourceBinding(ctx, testTenant, connectorClass)
+	if err != nil {
+		t.Fatalf("GetSourceBinding: %v", err)
+	}
+	if got.AuthorityTier != AuthorityTierSystemOfRecord || got.FreshnessBound != 90*time.Second {
+		t.Fatalf("read back (%q, %v), want (%q, 1m30s)",
+			got.AuthorityTier, got.FreshnessBound, AuthorityTierSystemOfRecord)
+	}
+
+	// An undeclared binding stays undeclared: the columns default to the
+	// explicit "not declared" state rather than to some tier.
+	if _, err := f.svc.RegisterSourceBinding(ctx, SourceBinding{
+		TenantRef: testTenant, DataClass: "hr.undeclared", SourceRef: "internal-source-2",
+		SourceVersion: 1, AccessCapability: "knowledge.suggest",
+		ResourceType: "knowledge", ResourceID: "hr-directory",
+	}); err != nil {
+		t.Fatalf("RegisterSourceBinding without a declaration: %v", err)
+	}
+	undeclared, err := f.store.GetSourceBinding(ctx, testTenant, "hr.undeclared")
+	if err != nil {
+		t.Fatalf("GetSourceBinding (undeclared): %v", err)
+	}
+	if undeclared.AuthorityTier != "" || undeclared.FreshnessBound != 0 {
+		t.Fatalf("undeclared binding read back as (%q, %v), want empty/zero",
+			undeclared.AuthorityTier, undeclared.FreshnessBound)
+	}
+}
+
+// TestPostgresRejectsHalfDeclaredAuthority pins the schema's all-or-nothing
+// CHECK independently of Service.RegisterSourceBinding, which applies the same
+// rule in Go and would otherwise be the only thing enforcing it. The store is
+// driven DIRECTLY here so the Go validation is bypassed: a tier without a bound
+// is an unbounded observation and a bound without a tier is freshness under no
+// declared authority, and neither may reach the table by any writer.
+func TestPostgresRejectsHalfDeclaredAuthority(t *testing.T) {
+	f := newPostgresFixture(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name  string
+		tier  string
+		bound time.Duration
+		class string
+	}{
+		{"tier without a freshness bound", AuthorityTierSystemOfRecord, 0, "hr.tier_only"},
+		{"freshness bound without a tier", "", 90 * time.Second, "hr.bound_only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := f.store.UpsertSourceBinding(ctx, SourceBinding{
+				TenantRef: testTenant, ID: "esb_" + tc.class, DataClass: tc.class,
+				SourceRef: "internal", SourceVersion: 1, AccessCapability: "knowledge.suggest",
+				ResourceType: "knowledge", ResourceID: "erp-po-registry",
+				AuthorityTier: tc.tier, FreshnessBound: tc.bound,
+			})
+			if err == nil {
+				t.Fatal("the schema must reject a half-declared observation authority")
+			}
+			if !strings.Contains(err.Error(), "chk_evidence_source_bindings_authority_declared") {
+				t.Fatalf("want the all-or-nothing CHECK to reject this, got %v", err)
+			}
+		})
 	}
 }

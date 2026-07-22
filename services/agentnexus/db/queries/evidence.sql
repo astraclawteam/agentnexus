@@ -4,8 +4,9 @@
 -- denied by source deletion can never silently become readable again.
 INSERT INTO evidence_source_bindings (
     tenant_ref, id, data_class, source_ref, source_version, access_capability,
-    source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds,
+    authority_tier, freshness_bound_seconds
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (tenant_ref, data_class) DO UPDATE
     SET source_ref = EXCLUDED.source_ref,
         source_version = GREATEST(
@@ -18,16 +19,18 @@ ON CONFLICT (tenant_ref, data_class) DO UPDATE
         resource_id = EXCLUDED.resource_id,
         cached_read_allowed = EXCLUDED.cached_read_allowed,
         retention_ttl_seconds = EXCLUDED.retention_ttl_seconds,
+        authority_tier = EXCLUDED.authority_tier,
+        freshness_bound_seconds = EXCLUDED.freshness_bound_seconds,
         deleted_at = NULL,
         updated_at = now()
 RETURNING tenant_ref, id, data_class, source_ref, source_version, access_capability,
     source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds,
-    deleted_at, created_at, updated_at;
+    deleted_at, created_at, updated_at, authority_tier, freshness_bound_seconds;
 
 -- name: GetEvidenceSourceBinding :one
 SELECT tenant_ref, id, data_class, source_ref, source_version, access_capability,
     source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds,
-    deleted_at, created_at, updated_at
+    deleted_at, created_at, updated_at, authority_tier, freshness_bound_seconds
 FROM evidence_source_bindings
 WHERE tenant_ref = $1 AND data_class = $2;
 
@@ -38,7 +41,7 @@ SET source_version = source_version + 1,
 WHERE tenant_ref = $1 AND data_class = $2
 RETURNING tenant_ref, id, data_class, source_ref, source_version, access_capability,
     source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds,
-    deleted_at, created_at, updated_at;
+    deleted_at, created_at, updated_at, authority_tier, freshness_bound_seconds;
 
 -- name: MarkEvidenceSourceDeleted :one
 UPDATE evidence_source_bindings
@@ -47,7 +50,7 @@ SET deleted_at = now(),
 WHERE tenant_ref = $1 AND data_class = $2
 RETURNING tenant_ref, id, data_class, source_ref, source_version, access_capability,
     source_capability, resource_type, resource_id, cached_read_allowed, retention_ttl_seconds,
-    deleted_at, created_at, updated_at;
+    deleted_at, created_at, updated_at, authority_tier, freshness_bound_seconds;
 
 -- name: InsertEvidenceHandle :one
 INSERT INTO evidence_handles (

@@ -125,3 +125,80 @@ func TestReadyzServesTheGuardsReason(t *testing.T) {
 		t.Errorf("/readyz reason = %q, want the guard's own reason %q", served, reason)
 	}
 }
+
+// --- the identity configuration surface (task B3) ----------------------------
+
+// Before B3, AgentClientRef/AgentReleaseRef/OrgSnapshotRef had no configuration
+// surface anywhere in the module: main() supplied its service name as the
+// principal and the wiring guard named the other three forever, with nothing an
+// operator could set to satisfy them.
+//
+// These assertions drive loadWorkerConfig over the REAL environment rather than
+// reading main.go for a call to config.LoadWorkerIdentity. The question worth
+// answering is not whether the call is written down, it is whether setting the
+// variables changes what the guard reports — which is what an operator
+// experiences and what /readyz serves.
+
+func setIdentityEnv(t *testing.T, client, release, org string) {
+	t.Helper()
+	t.Setenv("AGENTNEXUS_WORKER_PRINCIPAL_REF", "")
+	t.Setenv("AGENTNEXUS_WORKER_AGENT_CLIENT_REF", client)
+	t.Setenv("AGENTNEXUS_WORKER_AGENT_RELEASE_REF", release)
+	t.Setenv("AGENTNEXUS_WORKER_ORG_SNAPSHOT_REF", org)
+}
+
+func TestConfiguredIdentityStopsTheGuardNamingTheIdentityRefs(t *testing.T) {
+	setIdentityEnv(t, "agc_console", "agr_2026_07", "orgv_7")
+	workerConfig, err := loadWorkerConfig(testConfig())
+	if err != nil {
+		t.Fatalf("loadWorkerConfig: %v", err)
+	}
+	for _, name := range workerConfig.MissingRequired() {
+		if strings.HasPrefix(name, "Identity.") {
+			t.Errorf("a fully configured environment still leaves %s unsatisfied", name)
+		}
+	}
+	// The execution seams are a separate gap and must STILL be named. A test
+	// that only checked the identity would pass just as well against a build
+	// that had quietly stopped reporting the unwired action plane.
+	_, reason := composeWorker(workerConfig)
+	for _, want := range []string{"Actions", "Resolver", "Signer", "Observations"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the not-ready reason no longer names the unwired %s: %q", want, reason)
+		}
+	}
+}
+
+// The unconfigured deployment: every identity ref is still reported, so an
+// operator reading /readyz learns the identity is unset rather than seeing a
+// principal defaulted in behind their back.
+func TestUnconfiguredIdentityIsStillReportedMissing(t *testing.T) {
+	setIdentityEnv(t, "", "", "")
+	workerConfig, err := loadWorkerConfig(testConfig())
+	if err != nil {
+		t.Fatalf("an unconfigured identity must not be a startup error: %v", err)
+	}
+	executionWorker, reason := composeWorker(workerConfig)
+	if executionWorker != nil {
+		t.Fatal("composeWorker returned a worker with no identity at all")
+	}
+	for _, want := range []string{
+		"Identity.PrincipalRef", "Identity.AgentClientRef",
+		"Identity.AgentReleaseRef", "Identity.OrgSnapshotRef",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the not-ready reason does not name %s: %q", want, reason)
+		}
+	}
+}
+
+// A PARTIAL identity is a startup error, not a three-quarters-empty worker.
+// main() turns this into log.Fatal; the value here is that the error exists at
+// all, because the alternative is a worker whose audit lineage points at a
+// blank agent client.
+func TestPartialIdentityEnvironmentIsAStartupError(t *testing.T) {
+	setIdentityEnv(t, "agc_console", "", "orgv_7")
+	if _, err := loadWorkerConfig(testConfig()); err == nil {
+		t.Fatal("a partial identity environment must fail startup")
+	}
+}

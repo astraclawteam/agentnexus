@@ -121,6 +121,138 @@ func (q *Queries) GetConnectorPackage(ctx context.Context, id string) (Connector
 	return i, err
 }
 
+const insertConnectorProduct = `-- name: InsertConnectorProduct :one
+
+INSERT INTO connector_products (
+    tenant_id, product_key, version, digest, signature_algorithm, signature_key_id,
+    signature_value, sbom_digest, provenance_digest, pack_document
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING tenant_id, product_key, version, digest, signature_algorithm, signature_key_id,
+    signature_value, sbom_digest, provenance_digest, pack_document, created_at
+`
+
+type InsertConnectorProductParams struct {
+	TenantID           string
+	ProductKey         string
+	Version            string
+	Digest             string
+	SignatureAlgorithm string
+	SignatureKeyID     string
+	SignatureValue     string
+	SbomDigest         string
+	ProvenanceDigest   string
+	PackDocument       []byte
+}
+
+// Signed Connector Product Packs and Customer Bindings (migration 000012), read
+// by the private worker BindingResolver. Every statement below is scoped by
+// tenant_id in its own WHERE clause: the tenant of a dispatch is server-authored
+// and a cross-tenant binding must be unreachable, not merely unselected.
+// Products are immutable per (tenant, key, version): an upgrade INSERTs a new
+// version and re-points a binding, it never rewrites one. Re-importing the same
+// version is therefore a conflict, not an update.
+func (q *Queries) InsertConnectorProduct(ctx context.Context, arg InsertConnectorProductParams) (ConnectorProduct, error) {
+	row := q.db.QueryRow(ctx, insertConnectorProduct,
+		arg.TenantID,
+		arg.ProductKey,
+		arg.Version,
+		arg.Digest,
+		arg.SignatureAlgorithm,
+		arg.SignatureKeyID,
+		arg.SignatureValue,
+		arg.SbomDigest,
+		arg.ProvenanceDigest,
+		arg.PackDocument,
+	)
+	var i ConnectorProduct
+	err := row.Scan(
+		&i.TenantID,
+		&i.ProductKey,
+		&i.Version,
+		&i.Digest,
+		&i.SignatureAlgorithm,
+		&i.SignatureKeyID,
+		&i.SignatureValue,
+		&i.SbomDigest,
+		&i.ProvenanceDigest,
+		&i.PackDocument,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listConnectorBindingsForCapability = `-- name: ListConnectorBindingsForCapability :many
+SELECT b.tenant_id, b.binding_key, b.product_key, b.product_version, b.product_digest,
+    b.binding_document, p.pack_document, p.signature_key_id, p.signature_value
+FROM connector_bindings b
+JOIN connector_products p
+    ON p.tenant_id = b.tenant_id
+   AND p.product_key = b.product_key
+   AND p.version = b.product_version
+   AND p.digest = b.product_digest
+WHERE b.tenant_id = $1
+  AND p.pack_document->'capabilities' @> jsonb_build_array(jsonb_build_object('name', $2::text))
+ORDER BY b.binding_key
+`
+
+type ListConnectorBindingsForCapabilityParams struct {
+	TenantID   string
+	Capability string
+}
+
+type ListConnectorBindingsForCapabilityRow struct {
+	TenantID        string
+	BindingKey      string
+	ProductKey      string
+	ProductVersion  string
+	ProductDigest   string
+	BindingDocument []byte
+	PackDocument    []byte
+	SignatureKeyID  string
+	SignatureValue  string
+}
+
+// Every binding of this tenant whose PINNED pack declares the capability.
+//
+// The join is on the full (product_key, version, digest) tuple, which is the
+// foreign key: a binding can only ever reach the exact signed pack content it
+// pinned, so a product upgrade that inserts a new version cannot silently move
+// an existing binding onto different code.
+//
+// This returns EVERY match rather than LIMIT 1 on purpose. Two bindings
+// declaring the same capability is an ambiguous resolution, and the resolver
+// must fail closed on it; a LIMIT here would instead pick an arbitrary customer
+// binding by sort order and execute a real side effect against it.
+func (q *Queries) ListConnectorBindingsForCapability(ctx context.Context, arg ListConnectorBindingsForCapabilityParams) ([]ListConnectorBindingsForCapabilityRow, error) {
+	rows, err := q.db.Query(ctx, listConnectorBindingsForCapability, arg.TenantID, arg.Capability)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListConnectorBindingsForCapabilityRow
+	for rows.Next() {
+		var i ListConnectorBindingsForCapabilityRow
+		if err := rows.Scan(
+			&i.TenantID,
+			&i.BindingKey,
+			&i.ProductKey,
+			&i.ProductVersion,
+			&i.ProductDigest,
+			&i.BindingDocument,
+			&i.PackDocument,
+			&i.SignatureKeyID,
+			&i.SignatureValue,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listConnectorInstances = `-- name: ListConnectorInstances :many
 SELECT id, enterprise_id, connector_package_id, name, status, created_at
 FROM connector_instances
@@ -153,4 +285,52 @@ func (q *Queries) ListConnectorInstances(ctx context.Context, enterpriseID strin
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertConnectorBinding = `-- name: UpsertConnectorBinding :one
+INSERT INTO connector_bindings (
+    tenant_id, binding_key, product_key, product_version, product_digest, binding_document
+) VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (tenant_id, binding_key) DO UPDATE
+    SET product_key = EXCLUDED.product_key,
+        product_version = EXCLUDED.product_version,
+        product_digest = EXCLUDED.product_digest,
+        binding_document = EXCLUDED.binding_document,
+        updated_at = now()
+RETURNING tenant_id, binding_key, product_key, product_version, product_digest,
+    binding_document, created_at, updated_at
+`
+
+type UpsertConnectorBindingParams struct {
+	TenantID        string
+	BindingKey      string
+	ProductKey      string
+	ProductVersion  string
+	ProductDigest   string
+	BindingDocument []byte
+}
+
+// A binding is re-pointed (not rewritten) by a product upgrade, so the product
+// reference is the only mutable half besides the document itself.
+func (q *Queries) UpsertConnectorBinding(ctx context.Context, arg UpsertConnectorBindingParams) (ConnectorBinding, error) {
+	row := q.db.QueryRow(ctx, upsertConnectorBinding,
+		arg.TenantID,
+		arg.BindingKey,
+		arg.ProductKey,
+		arg.ProductVersion,
+		arg.ProductDigest,
+		arg.BindingDocument,
+	)
+	var i ConnectorBinding
+	err := row.Scan(
+		&i.TenantID,
+		&i.BindingKey,
+		&i.ProductKey,
+		&i.ProductVersion,
+		&i.ProductDigest,
+		&i.BindingDocument,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

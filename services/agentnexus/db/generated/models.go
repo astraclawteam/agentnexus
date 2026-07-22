@@ -442,6 +442,10 @@ type EvidenceSourceBinding struct {
 	DeletedAt           pgtype.Timestamptz
 	CreatedAt           pgtype.Timestamptz
 	UpdatedAt           pgtype.Timestamptz
+	// Frozen observation-authority tier under which this source reports (evidence/observation.go AuthorityTier* literals); empty means not declared, which fails verification-purpose reads closed.
+	AuthorityTier string
+	// Bound within which an observation staged from this source may be treated as fresh; 0 exactly when authority_tier is empty.
+	FreshnessBoundSeconds int64
 }
 
 type ExternalIdentity struct {

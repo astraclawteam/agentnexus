@@ -481,12 +481,19 @@ func TestVerificationReadRejectsForgedAuthorityAndFreshness(t *testing.T) {
 		assertLastDenyReason(t, f.evidenceFixture, denyObservationStale)
 	})
 
-	t.Run("durable registry refuses undeclarable authority rather than dropping it", func(t *testing.T) {
-		// Migration slots 000009-000011 are reserved for Tasks 0E/0F/0G, so
-		// the durable registry cannot persist authority declarations yet.
-		// Persisting a binding while silently DROPPING its declared tier
-		// would be a silent degradation; the store refuses explicitly and
-		// the caller learns the declaration is not yet durable.
+	t.Run("durable registry no longer short-circuits an authority declaration", func(t *testing.T) {
+		// Migration 000015 added authority_tier/freshness_bound_seconds, so
+		// UpsertSourceBinding no longer refuses a declared binding outright.
+		// The old refusal returned BEFORE touching the pool; the only way a
+		// declaration can fail now is a real store failure, which against an
+		// unreachable pool is a connection error.
+		//
+		// This is deliberately a narrow assertion. It proves the pre-store
+		// rejection is gone, and nothing more - that the declaration actually
+		// ROUND TRIPS is a claim only a real database can settle, and it is
+		// settled by TestPostgresSourceBindingRoundTripsAuthorityDeclaration in
+		// the DSN-gated integration suite. Asserting the round trip here with a
+		// fake would prove only that the fake stores what it was handed.
 		pool, err := pgxpool.New(context.Background(), "postgres://unit:unit@127.0.0.1:1/agentnexus_unreachable")
 		if err != nil {
 			t.Fatalf("lazy pool: %v", err)
@@ -500,10 +507,13 @@ func TestVerificationReadRejectsForgedAuthorityAndFreshness(t *testing.T) {
 			FreshnessBound: verifyFreshness,
 		})
 		if err == nil {
-			t.Fatal("the durable store must refuse authority declarations it cannot persist")
+			t.Fatal("an unreachable pool must still fail the upsert")
 		}
-		if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "reserved") {
-			t.Fatalf("refusal must be explicit about the reserved migration slots, got %v", err)
+		// The distinguishing fact: the failure is the DIAL, not a refusal to
+		// persist the declaration. If the pre-store rejection came back, this
+		// error would name the reserved migration slots and never reach the pool.
+		if !strings.Contains(err.Error(), "dial") && !strings.Contains(err.Error(), "connect") {
+			t.Fatalf("the declaration must reach the store and fail on connection, got %v", err)
 		}
 	})
 }

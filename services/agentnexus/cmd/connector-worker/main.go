@@ -38,6 +38,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// The worker's own first-party identity. A PARTIAL identity is fatal here
+	// (LoadWorkerIdentity's all-or-nothing rule); a wholly absent one is not,
+	// because that is a deployment which has not wired the worker yet and its
+	// health surface must stay observable rather than crash-loop.
+	workerConfig, err := loadWorkerConfig(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	identity := ""
 	if mode == transportsecurity.ModeMutualTLS {
@@ -67,31 +75,40 @@ func main() {
 	// invokes the isolated host and produces the authoritative signed
 	// ActionReceipt plus the exact ObservationReceipt set.
 	//
-	// Its two concrete fail-closed seams — the Postgres private BindingResolver
-	// over connector_products/connector_bindings and the evidence-backed
-	// ObservationProducer — are not wired yet. Rather than exiting, the process
+	// Its concrete fail-closed seams are still not composed here. Task B3 landed
+	// the Postgres private BindingResolver over
+	// connector_products/connector_bindings, but the host it must hand back has
+	// no production implementation for any connector family, so wiring it would
+	// only move the failure onto the stream; the evidence-backed
+	// ObservationProducer is likewise unbuilt. Rather than exiting, the process
 	// stays up and the readiness gate keeps it OFF the stream: a worker that
 	// consumed without those seams would fail every intent it pulled and burn
 	// the delivery attempts of durable Actions. No pass-stub, no fake
 	// ActionPlane, no fabricated receipt.
-	// The worker's own first-party identity. The tenant of each dispatch comes
-	// from the server-authored message, never from here and never from Agent
-	// input.
-	workerConfig := worker.Config{
-		Identity: worker.Identity{PrincipalRef: cfg.ServiceName},
-	}
 	// Name the gap before trying to construct through it. worker.New stops at
 	// the FIRST problem it meets (a nil action plane), so on its own it tells an
 	// operator to go wire one thing, and the next restart tells them the next
-	// thing. MissingRequired reports the whole set at once, including the three
-	// identity refs that have no configuration surface at all -- which worker.New
+	// thing. MissingRequired reports the whole set at once -- which worker.New
 	// can only describe as a sentence and CheckReady never reaches.
 	//
-	// Nothing here can satisfy that set today; both halves are task B3. The
-	// guard's job for this binary is therefore to make the failure EXPLICIT, not
-	// to pretend it can be met: no pass-stub, no fake ActionPlane, no invented
-	// agent_client_ref. The process still stays up, because a container that
-	// flaps hides the reason, and /readyz still answers 503 with it.
+	// Task B3 gave the four identity refs a configuration surface
+	// (AGENTNEXUS_WORKER_*), so a deployment that sets them no longer sees them
+	// listed here. The EXECUTION seams are a different matter and remain
+	// unsatisfiable in this build: the ActionPlane, ReceiptSigner and
+	// ObservationProducer have no composition here, and while B3 does ship a
+	// concrete BindingResolver, it cannot yet return a runnable host -- no
+	// connector family adapter has a production client, and neither the Product
+	// Pack nor the Customer Binding schema declares which family a connector
+	// belongs to. Wiring a resolver that always fails would be worse than this
+	// refusal: it would satisfy CheckReady, put the worker ON the stream, and
+	// then nak every intent it pulled, burning the delivery attempts of durable
+	// Actions.
+	//
+	// So the guard's job for this binary is unchanged: make the failure
+	// EXPLICIT rather than pretend it can be met. No pass-stub, no fake
+	// ActionPlane, no invented agent_client_ref. The process still stays up,
+	// because a container that flaps hides the reason, and /readyz still answers
+	// 503 with it.
 	executionWorker, notReadyReason := composeWorker(workerConfig)
 
 	// Readiness in the startup line must be the SAME predicate /readyz answers.
@@ -130,6 +147,34 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = healthServer.Shutdown(shutdownCtx)
+}
+
+// loadWorkerConfig reads the deployment's worker configuration into the shape
+// worker.New and the wiring guard consume.
+//
+// It is a function rather than inline in main for the same reason composeWorker
+// is: it is the ONLY place the identity environment reaches the worker, and the
+// alternative way to cover that link would be to grep main.go for a call to
+// config.LoadWorkerIdentity, which proves a string is present and nothing about
+// what the process does with it. Driven over real environment variables, this
+// answers the question that actually matters — does setting AGENTNEXUS_WORKER_*
+// change what the wiring guard reports missing.
+//
+// The tenant of each dispatch comes from the server-authored message, never from
+// this identity and never from Agent input.
+func loadWorkerConfig(cfg config.Config) (worker.Config, error) {
+	identity, err := config.LoadWorkerIdentity(cfg.ServiceName)
+	if err != nil {
+		return worker.Config{}, err
+	}
+	return worker.Config{
+		Identity: worker.Identity{
+			PrincipalRef:    identity.PrincipalRef,
+			AgentClientRef:  identity.AgentClientRef,
+			AgentReleaseRef: identity.AgentReleaseRef,
+			OrgSnapshotRef:  identity.OrgSnapshotRef,
+		},
+	}, nil
 }
 
 // composeWorker builds the worker, or explains precisely why it could not.
