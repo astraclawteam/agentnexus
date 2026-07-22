@@ -66,20 +66,10 @@ func main() {
 	// exits on boot tells them nothing.
 	assistant, notReadyReason := composeAssistant(cfg, mode, manager)
 
-	health := app.NewHealthStatus(cfg.ServiceName, cfg.Version, true)
+	health := serviceHealth(cfg, assistant)
 	healthServer := startHealthServer(cfg, assistant, notReadyReason)
 
-	// assistant_transport is reported separately from assistant_ready, and is
-	// currently always none. The assistant is composed and its dependencies are
-	// wired, but nothing calls Assistant.Ask: the frozen contract at
-	// api/openapi/gateway-runtime.yaml declares no agent conversation endpoint,
-	// and it is digest-pinned cross-repo, so a route cannot be added here.
-	// Printing readiness alone would read as "operators can talk to it", which
-	// is the misreading this line exists to prevent.
-	fmt.Printf("service=%s version=%s environment=%s ready=%t mtls=%t identity=%s app=%s agent=%s assistant_ready=%t assistant_transport=none\n",
-		health.Service, health.Version, cfg.Environment, health.Ready,
-		mode == transportsecurity.ModeMutualTLS, identity,
-		gatewayagent.AppName, gatewayagent.AgentName, assistant != nil)
+	fmt.Println(startupLine(cfg, health, mode, identity, assistant))
 	if assistant == nil {
 		slog.Warn("gateway agent is not serving the assistant", "reason", notReadyReason)
 	} else {
@@ -92,6 +82,41 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = healthServer.Shutdown(shutdownCtx)
+}
+
+// assistantIsServing is the single readiness predicate for this binary. The
+// startup line and /readyz both derive from it, because the one thing that must
+// never happen again is the two disagreeing.
+func assistantIsServing(assistant *gatewayagent.Assistant) bool { return assistant != nil }
+
+// serviceHealth is the one place readiness is decided.
+//
+// It used to be a literal true in TWO places - here and in newHealthMux - so
+// the single line an operator reads at boot said ready=true while /readyz on
+// the same process returned 503, and the line contradicted its own
+// assistant_ready=false field three columns further along.
+func serviceHealth(cfg config.Config, assistant *gatewayagent.Assistant) app.HealthStatus {
+	return app.NewHealthStatus(cfg.ServiceName, cfg.Version, assistantIsServing(assistant))
+}
+
+// startupLine renders the one line an operator reads at boot.
+//
+// It is a function rather than an inline Printf so the value it publishes can
+// be compared against the value /readyz serves for the same inputs. Reading
+// main.go to check they agree is exactly how they came to disagree.
+//
+// assistant_transport is reported separately from assistant_ready, and is
+// currently always none. The assistant is composed and its dependencies are
+// wired, but nothing calls Assistant.Ask: the frozen contract at
+// api/openapi/gateway-runtime.yaml declares no agent conversation endpoint, and
+// it is digest-pinned cross-repo, so a route cannot be added here. Printing
+// readiness alone would read as "operators can talk to it", which is the
+// misreading this line exists to prevent.
+func startupLine(cfg config.Config, health app.HealthStatus, mode transportsecurity.Mode, identity string, assistant *gatewayagent.Assistant) string {
+	return fmt.Sprintf("service=%s version=%s environment=%s ready=%t mtls=%t identity=%s app=%s agent=%s assistant_ready=%t assistant_transport=none",
+		health.Service, health.Version, cfg.Environment, health.Ready,
+		mode == transportsecurity.ModeMutualTLS, identity,
+		gatewayagent.AppName, gatewayagent.AgentName, assistantIsServing(assistant))
 }
 
 // composeAssistant builds the assistant, or explains why it could not.
@@ -203,12 +228,17 @@ func probeTargets(targets []config.ProbeTarget, mode transportsecurity.Mode, man
 // it is digest-pinned cross-repo.
 func newHealthMux(cfg config.Config, assistant *gatewayagent.Assistant, notReadyReason string) *http.ServeMux {
 	mux := http.NewServeMux()
-	health := app.NewHealthStatus(cfg.ServiceName, cfg.Version, true)
+	health := serviceHealth(cfg, assistant)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		// Liveness stays 200 on purpose: the process must remain observable so
+		// an operator can read /readyz and learn WHY it is not serving.
 		writeHealth(w, http.StatusOK, health.Service, health.Version, true, "")
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if assistant == nil {
+		// Branch on health.Ready rather than re-deriving `assistant == nil`, so
+		// the value this handler answers with and the value the startup line
+		// prints are the SAME value. Independently derived, they drifted.
+		if !health.Ready {
 			writeHealth(w, http.StatusServiceUnavailable, health.Service, health.Version, false, notReadyReason)
 			return
 		}

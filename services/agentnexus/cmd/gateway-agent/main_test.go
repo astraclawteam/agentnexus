@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -75,10 +77,106 @@ func TestReadinessFollowsComposition(t *testing.T) {
 
 // readinessStatus drives GET /readyz through the real handler.
 func readinessStatus(assistant *gatewayagent.Assistant) int {
+	status, _ := readiness(assistant)
+	return status
+}
+
+// readiness drives GET /readyz through the real handler and returns both what
+// an orchestrator sees (the status code) and what the body claims.
+func readiness(assistant *gatewayagent.Assistant) (int, bool) {
 	recorder := httptest.NewRecorder()
 	newHealthMux(testConfig(), assistant, "not composed").ServeHTTP(
 		recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	return recorder.Code
+	var body struct {
+		Ready bool `json:"ready"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		panic("decode /readyz body " + recorder.Body.String() + ": " + err.Error())
+	}
+	return recorder.Code, body.Ready
+}
+
+// startupField pulls one `key=value` field out of the boot line. The line is a
+// flat key=value list with no quoting, so a field ends at the next space.
+func startupField(t *testing.T, line, key string) string {
+	t.Helper()
+	for _, field := range strings.Fields(line) {
+		if name, value, ok := strings.Cut(field, "="); ok && name == key {
+			return value
+		}
+	}
+	t.Fatalf("startup line %q has no %s field", line, key)
+	return ""
+}
+
+// TestStartupLineReadinessAgreesWithReadyz is the assertion that fails if the
+// startup line goes back to a hard-coded true.
+//
+// The observed defect: this process printed
+//
+//	service=gateway-agent ... ready=true ... assistant_ready=false
+//
+// while GET /readyz on the SAME process answered 503 with "assistant not
+// composed". The one line an operator reads at boot contradicted both /readyz
+// and its own next-but-one field, because readiness there was the literal
+// `true` rather than the predicate the readiness handler answers.
+//
+// This drives the real boot line and the real mux over a composition that
+// genuinely failed, so a literal reintroduced in either place breaks it.
+func TestStartupLineReadinessAgreesWithReadyz(t *testing.T) {
+	cfg := testConfig()
+	cfg.LLMRouter = config.LLMRouterSettings{} // the deployment from the observed run
+	assistant, reason := composeAssistant(cfg, transportsecurity.ModePlaintext, nil)
+	if assistant != nil {
+		t.Fatalf("fixture composed an assistant, so this asserts nothing: %s", reason)
+	}
+
+	line := startupLine(cfg, serviceHealth(cfg, assistant), transportsecurity.ModePlaintext, "", assistant)
+	if got := startupField(t, line, "ready"); got != "false" {
+		t.Errorf("startup line says ready=%s while the assistant is not composed: %q", got, line)
+	}
+	// The line contradicted ITSELF, three columns apart. Both fields report on
+	// the same process at the same instant, so they can never differ.
+	if ready, assistantReady := startupField(t, line, "ready"), startupField(t, line, "assistant_ready"); ready != assistantReady {
+		t.Errorf("startup line reports ready=%s and assistant_ready=%s in one breath: %q", ready, assistantReady, line)
+	}
+
+	status, bodyReady := readiness(assistant)
+	if status != http.StatusServiceUnavailable || bodyReady {
+		t.Fatalf("/readyz status=%d ready=%v while the assistant is not composed", status, bodyReady)
+	}
+	if got := startupField(t, line, "ready"); got != strconv.FormatBool(bodyReady) {
+		t.Errorf("startup line ready=%s but /readyz answers ready=%v on the same process", got, bodyReady)
+	}
+}
+
+// The composed deployment must still read ready=true everywhere, or the fix
+// above would "pass" by printing false unconditionally.
+func TestStartupLineReportsReadyWhenTheAssistantIsComposed(t *testing.T) {
+	cfg := testConfig()
+	assistant, reason := composeAssistant(cfg, transportsecurity.ModePlaintext, nil)
+	if assistant == nil {
+		t.Fatalf("no assistant to serve: %s", reason)
+	}
+	line := startupLine(cfg, serviceHealth(cfg, assistant), transportsecurity.ModePlaintext, "", assistant)
+	if got := startupField(t, line, "ready"); got != "true" {
+		t.Errorf("startup line says ready=%s for a composed assistant: %q", got, line)
+	}
+	status, bodyReady := readiness(assistant)
+	if status != http.StatusOK || !bodyReady {
+		t.Fatalf("/readyz status=%d ready=%v for a composed assistant", status, bodyReady)
+	}
+}
+
+// Liveness must stay 200 while readiness is false: a container that flaps on
+// boot hides the reason an operator needs.
+func TestLivenessStaysUpWhileUnready(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	newHealthMux(testConfig(), nil, "not composed").ServeHTTP(
+		recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if recorder.Code != http.StatusOK {
+		t.Errorf("/healthz = %d, want 200 - the process must stay observable", recorder.Code)
+	}
 }
 
 // TestAssistantRefusesWithoutAModel pins the llmrouter-only boundary at the
