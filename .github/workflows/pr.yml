@@ -1,0 +1,95 @@
+# AgentNexus — pull-request gate.
+#
+# Before this file, the only pull-request CI in this repository was
+# agentnexus-auth.yml, a narrow fail-closed auth gate that runs `make test-auth`
+# (nine packages) against a real PostgreSQL. Nothing ran the rest of the suite,
+# nothing built the service binaries, nothing built the SDK modules or the
+# console, and nothing verified the frozen public contract. Every other
+# "the tests pass" claim in this repository's history was a local `go test` run.
+#
+# This gate is deliberately NOT merged into agentnexus-auth.yml. That workflow
+# provisions a PostgreSQL service and asserts a release condition; this one is a
+# plain build/test gate with no external dependencies. The packages they share
+# therefore run twice — once here without a DSN, once there against real
+# PostgreSQL. That overlap is intended: the auth gate proves behaviour against a
+# live database, this one proves the module still builds and passes standalone.
+
+name: pr
+
+on:
+  pull_request:
+  # Lets the gate be exercised on a branch without opening a pull request.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: "-buildvcs=false"
+
+jobs:
+  service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/agentnexus/go.mod
+          cache-dependency-path: services/agentnexus/go.sum
+
+      - name: build
+        working-directory: services/agentnexus
+        run: make build
+
+      - name: test
+        working-directory: services/agentnexus
+        run: make test
+
+      # The digest pin of the frozen public contract artifacts is a core
+      # invariant of this system: agentatlas mirrors api/openapi/gateway-runtime.yaml
+      # into services/agentatlas/internal/nexusclient/testdata/ and asserts its
+      # sha256 against the value recorded here. Drifting it silently has already
+      # caused one revert, so contract verification is part of the gate, not a
+      # release-time afterthought.
+      - name: contract verification
+        working-directory: services/agentnexus
+        run: make contracts-verify
+
+  # The five public SDK modules are separate Go modules and are NOT covered by
+  # the service module's `go test ./...`.
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/agentnexus/go.mod
+
+      - name: build and test each SDK module
+        run: |
+          set -eu
+          for module in sdk/go/*/; do
+            echo "== ${module} =="
+            ( cd "${module}" && go build ./... && go test ./... -count=1 )
+          done
+
+  console:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      - name: test
+        run: npm test --workspaces
+
+      # `build` runs `tsc -b` before vite. Keeping it in the gate is the point:
+      # the console typecheck was broken by a missing @types/node and nothing
+      # caught it, because this command had never run in CI.
+      - name: build
+        run: npm run build --workspaces
