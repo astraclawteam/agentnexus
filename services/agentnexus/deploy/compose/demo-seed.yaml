@@ -1,0 +1,84 @@
+# The demo tenant, and the evidence runtime configuration that depends on it.
+#
+# Compose this ON TOP of a profile:
+#
+#   docker compose -f compose.private-dev.yaml -f demo-seed.yaml up -d
+#
+# WHY THE TWO ARE ONE FILE. The evidence runtime's configuration set is
+# all-or-nothing AND self-referential: AGENTNEXUS_EVIDENCE_SOURCE_CATALOG_FILE
+# names data classes that gateway-api resolves against the connector_products /
+# connector_bindings rows at startup (internal/app/evidence_catalog.go). Turning
+# the evidence variables on without seeding those rows is not a degraded stack,
+# it is a gateway-api that refuses to start. So the seed and the configuration
+# that consumes it are enabled together or not at all.
+#
+# Nothing here is production wiring. A real deployment seeds its tenant through
+# its own provisioning system and supplies the content key from a secret
+# manager.
+services:
+  # One-shot. Writes the demo enterprise, org units, membership, sealed policy
+  # version, signed connector product, customer binding and Access Ticket, then
+  # emits the source catalog, content key and ticket credential into the shared
+  # volume and exits. Idempotent: a re-run reuses every generated credential and
+  # upserts every row.
+  demo-seed:
+    image: golang:1.25-alpine
+    working_dir: /workspace/services/agentnexus
+    command: ["go", "run", "./cmd/demo-seed"]
+    environment:
+      AGENTNEXUS_POSTGRES_DSN: "${AGENTNEXUS_POSTGRES_DSN:-postgres://agentnexus:agentnexus@postgres:5432/agentnexus?sslmode=disable}"
+      AGENTNEXUS_DEMO_TENANT: "${AGENTNEXUS_OIDC_ENTERPRISE_ID:-agentnexus-dev}"
+      AGENTNEXUS_DEMO_OUTPUT_DIR: /run/agentnexus/demo
+    volumes:
+      - ../../../..:/workspace
+      - agentnexus-private-dev-gomodcache:/go/pkg/mod
+      - agentnexus-private-dev-gobuildcache:/root/.cache/go-build
+      - agentnexus-demo-seed:/run/agentnexus/demo
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # The tables the seed writes into only exist after the migrator ran.
+      migrate:
+        condition: service_completed_successfully
+
+  gateway-api:
+    environment:
+      # Node-local staging root for encrypted evidence content. With more than
+      # one gateway-api replica a handle staged by one is unreadable on another,
+      # which is why this is a named volume and not a shared store.
+      AGENTNEXUS_EVIDENCE_OBJECT_ROOT: /var/lib/agentnexus/evidence
+      # Stable across restarts by contract: every staged handle records this
+      # reference, so changing it orphans previously staged content.
+      AGENTNEXUS_EVIDENCE_CONTENT_KEY_REF: agentnexus-demo-content-key-1
+      AGENTNEXUS_EVIDENCE_CONTENT_KEY_FILE: /run/agentnexus/demo/evidence-content-key
+      AGENTNEXUS_EVIDENCE_SOURCE_CATALOG_FILE: /run/agentnexus/demo/evidence-source-catalog.json
+    volumes:
+      - agentnexus-demo-seed:/run/agentnexus/demo:ro
+      - agentnexus-demo-evidence:/var/lib/agentnexus/evidence
+    depends_on:
+      demo-seed:
+        condition: service_completed_successfully
+
+  # Wiring the worker's identity and execution seams is what turns its /readyz
+  # from "this deployment configured nothing" into the ARCHITECTURAL gap that is
+  # actually left. With these set, Actions, Signer and Resolver are all
+  # constructed from Postgres and the guard names only what no build supplies.
+  connector-worker:
+    environment:
+      AGENTNEXUS_WORKER_PRINCIPAL_REF: demo-finance-controller
+      AGENTNEXUS_WORKER_AGENT_CLIENT_REF: demo-connector-worker
+      AGENTNEXUS_WORKER_AGENT_RELEASE_REF: demo-connector-worker-0.1.0
+      AGENTNEXUS_WORKER_ORG_SNAPSHOT_REF: "1"
+      AGENTNEXUS_WORKER_RECEIPT_SIGNING_KEY_ID: agentnexus-demo-receipt-key-1
+      AGENTNEXUS_WORKER_RECEIPT_SIGNING_KEY_FILE: /run/agentnexus/demo/worker-receipt-signing-key
+    volumes:
+      - agentnexus-demo-seed:/run/agentnexus/demo:ro
+    depends_on:
+      demo-seed:
+        condition: service_completed_successfully
+
+volumes:
+  # Generated demo credentials and the catalog derived from them. Never a bind
+  # mount: a host mount would strip the 0600 mode the seed writes them with.
+  agentnexus-demo-seed:
+  agentnexus-demo-evidence:
