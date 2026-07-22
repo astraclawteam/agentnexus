@@ -7,21 +7,37 @@ name: agentnexus-saas-dev
 include:
   - path: browser-auth-dev.yaml
 
+# The services run as built images, not as `go run` against a mounted
+# repository. Compiling at container start made the build part of every
+# service's startup latency and of its failure surface: a start_period had to
+# cover a compile it could not predict, and one truncated module download left
+# a container exited with no way to tell that apart from a fatal
+# misconfiguration. Building once, ahead of `up`, removes both.
+#
+# The services share every layer except the final `go build`, so each image
+# after the first costs only that step, and they share one module and build
+# cache between them.
+x-agentnexus-build: &agentnexus-build
+  # The repository root: the service module `replace`s ../../sdk/go/*, so both
+  # module trees have to be inside the context.
+  context: ../../../..
+  dockerfile: services/agentnexus/deploy/docker/Dockerfile
+
 x-agentnexus-service: &agentnexus-service
-  image: golang:1.25-alpine
-  working_dir: /workspace/services/agentnexus
-  volumes:
-    - ../../../..:/workspace
-    # The three Go services compile the same module tree. Sharing the module
-    # and build caches turns three cold `go run` builds into roughly one.
-    - agentnexus-saas-gomodcache:/go/pkg/mod
-    - agentnexus-saas-gobuildcache:/root/.cache/go-build
+  # Secondary to the change above, and deliberately bounded. With the build out
+  # of container start there is nothing transient left for a restart to paper
+  # over; what remains is a dependency that dropped after startup, which a few
+  # retries recover, and a fail-closed configuration error, which no number of
+  # retries will. Three attempts covers the first without turning the second
+  # into an endless loop that hides the exit status behind `Restarting`.
+  restart: on-failure:3
   environment: &agentnexus-env
     # Only variables some Go code actually reads. The profile previously also
     # exported AGENTNEXUS_PROFILE, the three *_EXTERNAL toggles,
     # AGENTNEXUS_OBJECT_STORAGE_ENDPOINT and both AGENTNEXUS_SECRET_PROVIDER*
     # variables; none of them had a reader anywhere in the module, so setting
-    # them changed nothing while reading as configuration.
+    # them changed nothing while reading as configuration. The object-storage
+    # service they described is gone too; see the note above the volumes block.
     AGENTNEXUS_ENV: saas-dev
     AGENTNEXUS_VERSION: 0.1.0-dev
     AGENTNEXUS_POSTGRES_DSN: postgres://agentnexus:agentnexus@postgres:5432/agentnexus?sslmode=disable
@@ -35,21 +51,27 @@ x-agentnexus-service: &agentnexus-service
       condition: service_healthy
     nats:
       condition: service_healthy
-    object-storage:
-      condition: service_started
 
 services:
   gateway-api:
     <<: *agentnexus-service
-    command: ["go", "run", "./cmd/gateway-api"]
+    image: agentnexus/gateway-api:dev
+    build:
+      <<: *agentnexus-build
+      args:
+        SERVICE: gateway-api
     ports:
       - "${AGENTNEXUS_GATEWAY_API_PORT:-8080}:8080"
-    # The browser-auth environment, credential volume, ordering and health
+    # The browser-auth environment, credential volume, ordering, user and health
     # probe all arrive from browser-auth-dev.yaml.
 
   gateway-agent:
     <<: *agentnexus-service
-    command: ["go", "run", "./cmd/gateway-agent"]
+    image: agentnexus/gateway-agent:dev
+    build:
+      <<: *agentnexus-build
+      args:
+        SERVICE: gateway-agent
     ports:
       - "${AGENTNEXUS_GATEWAY_AGENT_PORT:-8081}:8080"
     environment:
@@ -73,11 +95,19 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
-      start_period: 40s
+      # Set from process start, and only process start: the binary is built
+      # into the image. It dials NATS and Postgres, both already healthy by
+      # depends_on, then serves. Measured container start to first passing
+      # probe is 6s, and 5s of that is the probe interval itself.
+      start_period: 15s
 
   connector-worker:
     <<: *agentnexus-service
-    command: ["go", "run", "./cmd/connector-worker"]
+    image: agentnexus/connector-worker:dev
+    build:
+      <<: *agentnexus-build
+      args:
+        SERVICE: connector-worker
     ports:
       - "${AGENTNEXUS_CONNECTOR_WORKER_PORT:-8082}:8080"
     # Liveness only. /readyz is deliberately NOT the container health
@@ -90,7 +120,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
-      start_period: 40s
+      # Set from process start, and only process start: the binary is built
+      # into the image. It dials NATS and Postgres, both already healthy by
+      # depends_on, then serves. Measured container start to first passing
+      # probe is 6s, and 5s of that is the probe interval itself.
+      start_period: 15s
 
   postgres:
     image: postgres:16-alpine
@@ -120,21 +154,16 @@ services:
       - "${AGENTNEXUS_NATS_PORT:-4222}:4222"
       - "${AGENTNEXUS_NATS_MONITOR_PORT:-8222}:8222"
 
-  object-storage:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: agentnexus
-      MINIO_ROOT_PASSWORD: agentnexus-dev-secret
-    ports:
-      - "${AGENTNEXUS_OBJECT_STORAGE_PORT:-9000}:9000"
-      - "${AGENTNEXUS_OBJECT_STORAGE_CONSOLE_PORT:-9001}:9001"
-    volumes:
-      - agentnexus-saas-object-storage:/data
+# There is no object-storage service. A MinIO instance ran here, and every
+# AgentNexus service was ordered behind it, on the strength of an
+# AGENTNEXUS_OBJECT_STORAGE_ENDPOINT variable that no Go file in the module
+# reads -- `grep -rn OBJECT_STORAGE --include=*.go` finds nothing, and the
+# module depends on no S3 or MinIO client. The only content AgentNexus stages
+# is evidence, under AGENTNEXUS_EVIDENCE_OBJECT_ROOT, which is a node-local
+# filesystem path. So the depends_on edges delayed three services on a
+# dependency none of them talk to, and `service_started` would not have caught
+# a MinIO that came up and then failed to serve anyway.
 
 volumes:
   agentnexus-saas-postgres:
-  agentnexus-saas-object-storage:
   # The credential volume itself is declared by browser-auth-dev.yaml.
-  agentnexus-saas-gomodcache:
-  agentnexus-saas-gobuildcache:

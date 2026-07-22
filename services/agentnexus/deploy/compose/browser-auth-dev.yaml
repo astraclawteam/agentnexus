@@ -40,6 +40,11 @@ services:
       # reads the system root file, so the dev IdP becomes trusted without
       # breaking module downloads or any other public TLS.
       SSL_CERT_DIR: /run/agentnexus/auth/trust
+    # Root so it can read the 0600 material the provisioner wrote, exactly as
+    # idp below. The service images run as an unprivileged user by default;
+    # dev-only, and a real deployment mounts secrets with matching ownership
+    # instead of overriding this.
+    user: "0:0"
     volumes:
       - agentnexus-dev-auth:/run/agentnexus/auth:ro
     depends_on:
@@ -51,17 +56,26 @@ services:
         condition: service_healthy
     # gateway-api is the only service publishing a port and was the only one
     # with no health probe, so a crash-looping gateway and a working one looked
-    # identical and `up --wait` reported success for both. Nothing depends_on
-    # gateway-api because nothing in the stack calls it -- it is the entry
-    # point -- but an orchestrator still has to be told the truth about it.
+    # identical and `up --wait` reported success for both. Nothing in THIS stack
+    # depends_on gateway-api -- it is the entry point -- but a joint deployment
+    # does: AgentAtlas orders atlas-agent and atlas-worker behind
+    # `gateway-api: service_healthy`. A start_period that does not cover a real
+    # start therefore stops another product on a gateway that is fine.
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 12
-      # `go run` compiles the module on first start. Later starts hit the
-      # shared build cache; the first one does not.
-      start_period: 300s
+      # Set from process start, and only process start: the binary is built
+      # into the image, so nothing is compiled or downloaded here. What this
+      # covers is the fail-closed startup work described at the top of this
+      # file -- loading and validating every credential, OIDC discovery against
+      # idp, the audit signing key write -- against dependencies depends_on has
+      # already brought up healthy. Measured on this stack, container start to
+      # first passing probe is 6s, of which 5s is just the probe interval; the
+      # process is serving in about one. 30s is headroom for a loaded host, not
+      # an estimate of a build.
+      start_period: 30s
 
   # One-shot. Generates the OIDC signing key, the console and upstream client
   # secrets, and the dev CA plus IdP server certificate into a volume, then
